@@ -18,8 +18,12 @@ func (v Vec2) Finite() bool {
 // Player is a domain value, not a network DTO. Zero acknowledgement means that
 // no input has been simulated yet. Input sequences start at 1 and do not wrap.
 type Player struct {
-	ID                    ID
-	Position              Vec2
-	Velocity              Vec2
-	LastProcessedInputSeq uint32
+	ID                      ID
+	Position                Vec2
+	Velocity                Vec2
+	LastProcessedInputSeq   uint32
+	BaseStats, CurrentStats CombatStats
+	Health                  float64
+	Alive                   bool
+	Aim                     Vec2
 }

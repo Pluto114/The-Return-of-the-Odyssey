@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/systems"
 )
 
@@ -35,18 +36,20 @@ type Config struct {
 	Spawn        entity.Vec2
 	MoveSpeed    float64
 	InputTimeout time.Duration
+	Combat       CombatConfig
 }
 
 func DefaultConfig() Config {
 	return Config{Capacity: 2, Max: entity.Vec2{X: 20, Y: 20}, Spawn: entity.Vec2{X: 10, Y: 10},
-		MoveSpeed: 5, InputTimeout: 200 * time.Millisecond}
+		MoveSpeed: 5, InputTimeout: 200 * time.Millisecond, Combat: DefaultCombatConfig()}
 }
 
 func (c Config) Validate() error {
 	if c.Capacity < 1 || !c.Min.Finite() || !c.Max.Finite() || !c.Spawn.Finite() ||
 		c.Min.X >= c.Max.X || c.Min.Y >= c.Max.Y ||
+		math.Abs(c.Min.X) > 1e6 || math.Abs(c.Min.Y) > 1e6 || math.Abs(c.Max.X) > 1e6 || math.Abs(c.Max.Y) > 1e6 ||
 		c.Spawn.X < c.Min.X || c.Spawn.X > c.Max.X || c.Spawn.Y < c.Min.Y || c.Spawn.Y > c.Max.Y ||
-		math.IsNaN(c.MoveSpeed) || math.IsInf(c.MoveSpeed, 0) || c.MoveSpeed <= 0 || c.InputTimeout <= 0 {
+		math.IsNaN(c.MoveSpeed) || math.IsInf(c.MoveSpeed, 0) || c.MoveSpeed <= 0 || c.MoveSpeed > 1e6 || c.InputTimeout <= 0 || !c.Combat.valid() {
 		return fmt.Errorf("invalid world configuration")
 	}
 	return nil
@@ -57,10 +60,12 @@ func (c Config) Validate() error {
 type Input struct {
 	Seq       uint32
 	Direction entity.Vec2
+	Aim       entity.Vec2
+	Shoot     bool
 }
 
 func (i Input) Validate() error {
-	if i.Seq == 0 || !i.Direction.Finite() {
+	if i.Seq == 0 || !i.Direction.Finite() || !i.Aim.Finite() || (i.Shoot && i.Aim.X == 0 && i.Aim.Y == 0) {
 		return ErrInvalidInput
 	}
 	return nil
@@ -69,10 +74,13 @@ func (i Input) Validate() error {
 type Snapshot struct {
 	ServerTick uint64
 	Players    []entity.Player
+	Monsters   []MonsterView
+	Stage      stage.View
 }
 
 func (s Snapshot) Clone() Snapshot {
 	s.Players = slices.Clone(s.Players)
+	s.Monsters = slices.Clone(s.Monsters)
 	return s
 }
 
@@ -81,25 +89,33 @@ type playerState struct {
 	input      Input
 	receivedAt time.Time
 	pending    bool
+	nextShot   uint64
+	firing     bool
 }
 
 // World is deliberately not concurrent. Only its Room goroutine may call its
 // methods. Snapshot returns detached values suitable for publication.
 type World struct {
-	config  Config
-	tick    uint64
-	players map[entity.ID]*playerState
+	config        Config
+	tick          uint64
+	players       map[entity.ID]*playerState
+	monsters      map[entity.ID]*monsterState
+	projectiles   map[entity.ID]entity.Projectile
+	nextEntity    entity.ID
+	stage         stage.View
+	events        []Event
+	eventOverflow bool
 }
 
 func NewWorld(config Config) (*World, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &World{config: config, players: make(map[entity.ID]*playerState)}, nil
+	return &World{config: config, players: make(map[entity.ID]*playerState), monsters: make(map[entity.ID]*monsterState), projectiles: make(map[entity.ID]entity.Projectile)}, nil
 }
 
 func (w *World) AddPlayer(id entity.ID) error {
-	if id == 0 {
+	if id == 0 || id >= FirstWorldEntityID {
 		return ErrInvalidPlayer
 	}
 	if _, exists := w.players[id]; exists {
@@ -108,14 +124,27 @@ func (w *World) AddPlayer(id entity.ID) error {
 	if len(w.players) >= w.config.Capacity {
 		return ErrWorldFull
 	}
-	w.players[id] = &playerState{player: entity.Player{ID: id, Position: w.config.Spawn}}
+	if w.stage.State != stage.Waiting {
+		return ErrStageState
+	}
+	stats := w.config.Combat.PlayerStats
+	stats.MoveSpeed = w.config.MoveSpeed
+	w.players[id] = &playerState{player: entity.Player{ID: id, Position: w.config.Spawn, BaseStats: stats, CurrentStats: stats, Health: stats.MaxHealth, Alive: true, Aim: entity.Vec2{X: 1}}}
 	return nil
 }
 
 func (w *World) RemovePlayer(id entity.ID) { delete(w.players, id) }
-func (w *World) Clear()                    { clear(w.players) }
-func (w *World) PlayerCount() int          { return len(w.players) }
-func (w *World) Tick() uint64              { return w.tick }
+func (w *World) Clear() {
+	clear(w.players)
+	clear(w.monsters)
+	clear(w.projectiles)
+	w.events = nil
+	w.eventOverflow = false
+	w.stage = stage.View{}
+}
+func (w *World) Close()           { w.Clear(); w.stage.State = stage.Closed }
+func (w *World) PlayerCount() int { return len(w.players) }
+func (w *World) Tick() uint64     { return w.tick }
 
 // ApplyInput stages the newest intent; it does not advance position or ack.
 // receivedAt must be the trusted server arrival time, not a client timestamp.
@@ -139,10 +168,19 @@ func (w *World) ApplyInput(id entity.ID, input Input, receivedAt time.Time) erro
 // packets. now is used only for input expiry, never for movement dt.
 func (w *World) Step(now time.Time) {
 	for _, p := range w.players {
+		p.firing = false
+		if !p.player.Alive {
+			p.player.Velocity = entity.Vec2{}
+			continue
+		}
 		direction := entity.Vec2{}
 		fresh := p.input.Seq != 0 && !now.Before(p.receivedAt) && now.Sub(p.receivedAt) < w.config.InputTimeout
 		if fresh {
 			direction = p.input.Direction
+			p.firing = p.input.Shoot
+			if p.input.Aim.X != 0 || p.input.Aim.Y != 0 {
+				p.player.Aim = systems.UnitDirection(p.input.Aim)
+			}
 			if p.pending {
 				p.player.LastProcessedInputSeq = p.input.Seq
 			}
@@ -150,15 +188,20 @@ func (w *World) Step(now time.Time) {
 		if !now.Before(p.receivedAt) {
 			p.pending = false
 		}
-		systems.Move(&p.player, direction, w.config.MoveSpeed, StepSeconds, w.config.Min, w.config.Max)
+		systems.Move(&p.player, direction, p.player.CurrentStats.MoveSpeed, StepSeconds, w.config.Min, w.config.Max)
 	}
 	w.tick++
+	w.stepCombat()
 }
 
 // Snapshot is full-state and deterministically ordered by player ID. Callers
 // can mutate the returned slice without modifying the live world.
 func (w *World) Snapshot() Snapshot {
-	s := Snapshot{ServerTick: w.tick, Players: make([]entity.Player, 0, len(w.players))}
+	s := Snapshot{ServerTick: w.tick, Players: make([]entity.Player, 0, len(w.players)), Stage: w.stage}
+	for _, id := range orderedIDs(w.monsters) {
+		m := w.monsters[id].monster
+		s.Monsters = append(s.Monsters, MonsterView{ID: m.ID, Position: m.Position, Velocity: m.Velocity, Health: m.Health, MaxHealth: m.CurrentStats.MaxHealth, State: m.State})
+	}
 	for _, p := range w.players {
 		s.Players = append(s.Players, p.player)
 	}

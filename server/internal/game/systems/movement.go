@@ -6,6 +6,18 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 )
 
+// UnitDirection also handles subnormal aiming vectors without underflow.
+func UnitDirection(v entity.Vec2) entity.Vec2 {
+	scale := math.Max(math.Abs(v.X), math.Abs(v.Y))
+	if scale == 0 {
+		return entity.Vec2{}
+	}
+	v.X /= scale
+	v.Y /= scale
+	length := math.Hypot(v.X, v.Y)
+	return entity.Vec2{X: v.X / length, Y: v.Y / length}
+}
+
 // NormalizeDirection preserves analog magnitudes below one and caps larger
 // vectors. Scaling first avoids overflow even with two MaxFloat64 components.
 // The caller must reject non-finite inputs before invoking this function.
