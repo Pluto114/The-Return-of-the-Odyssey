@@ -4,4 +4,42 @@ package odyssey.protocol.v1;
 
 option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
 
-// Reserved module: system. Message fields and IDs await protocol-owner review.
+import "common.proto";
+
+// ============================================================================
+// system.proto — transport-level liveness + lifecycle events.
+//
+// Message IDs: 0..99 (see common.proto::MessageType).
+// Owned by Role A. No business content.
+// ============================================================================
+
+// C -> S. Heartbeat. The Frame Sequence (header) is unrelated to the echo
+// fields below; clients must copy them verbatim.
+message Ping {
+  // Monotonic timestamp on the client clock at capture time. Informational;
+  // the server does not gate on it.
+  uint64 client_time_ms = 1;
+  // Per-session nonce. Server echoes it back unchanged so the client can
+  // match its own in-flight pings.
+  uint64 nonce = 2;
+}
+
+// S -> C. Heartbeat reply. Sent within one server tick (33ms target).
+message Pong {
+  // Echo of the source Ping.
+  uint64 client_time_ms = 1;
+  // Server clock at send time.
+  uint64 server_time_ms = 2;
+  // Echo of Ping::nonce.
+  uint64 nonce = 3;
+}
+
+// S -> C. Server-initiated shutdown hint or forced close. Clients should
+// surface this and stop retrying the same token. The Reliable Queue carries
+// it; the server closes the socket immediately after.
+message Disconnect {
+  ReasonCode reason = 1;
+  // Human-readable explanation. Localized strings are out of scope for v1;
+  // English only.
+  string message = 2;
+}

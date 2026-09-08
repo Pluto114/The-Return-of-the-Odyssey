@@ -4,4 +4,77 @@ package odyssey.protocol.v1;
 
 option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
 
-// Reserved module: session. Message fields and IDs await protocol-owner review.
+import "common.proto";
+
+// ============================================================================
+// session.proto — login and resume handshake.
+//
+// Message IDs: 100..199 (see common.proto::MessageType).
+// Owned by Role A. The Resume contract is shared with Role D's Redis token
+// store (token bytes flow as opaque blob here, server-side mapping lives in D).
+// ============================================================================
+
+// C -> S. First application-level message after the server accepts the TCP
+// connection. A connection without a LoginRequest will be closed by the
+// server after the LOGIN_TIMEOUT_MS (configured; default 5s).
+//
+// Until this is acked, the server treats the session as SESSION_STATE_CONNECTED
+// (header-level only) and rejects all other messages except Ping and Pong.
+message LoginRequest {
+  // Wire protocol version expected by the client. MUST match the Version
+  // byte in the 16-byte header. Server replies with REASON_INVALID_VERSION
+  // when they disagree.
+  uint32 protocol_version = 1;
+  // Opaque auth ticket. v1 accepts any non-empty string; real auth lands
+  // in Week 2-3.
+  string token = 2;
+  // Optional display name (UTF-8, <= 32 bytes). Server may rename if the
+  // value collides or violates the contents policy.
+  string display_name = 3;
+}
+
+// S -> C. Always sent exactly once per LoginRequest (also on a duplicate
+// login on an already-authenticated connection — the existing session is
+// preserved in that case).
+message LoginResponse {
+  // Protocol version the server actually selected. Clients should compare
+  // with the value they sent and disconnect on mismatch.
+  uint32 protocol_version = 1;
+
+  // Outcome. REASON_OK is the only success code.
+  ReasonCode reason = 2;
+  // Human-readable detail; English only.
+  string message = 3;
+
+  // Issued session handle. Both fields are 0 unless reason == REASON_OK.
+  uint64 session_id = 4;
+  uint64 player_id = 5;
+
+  // Opaque token for later ResumeRequest. Empty unless reason == REASON_OK.
+  // Lifetime is server-configured; default 60 seconds before disconnect grace
+  // expires.
+  bytes resume_token = 6;
+}
+
+// C -> S. Sent to attach a new TCP connection to an existing session after a
+// transient disconnect. Logically a synonym of LoginRequest for the recovery
+// path; kept separate so the routing stays explicit and auditable.
+message ResumeRequest {
+  // The bytes previously returned in LoginResponse::resume_token.
+  bytes resume_token = 1;
+  // Wire protocol version expected by the client. Same rules as
+  // LoginRequest::protocol_version.
+  uint32 protocol_version = 2;
+}
+
+// S -> C. Result of ResumeRequest. On REASON_OK the session rebinds to this
+// connection; the client must expect a full WorldSnapshot to follow on the
+// game channel.
+message ResumeResponse {
+  ReasonCode reason = 1;
+  string message = 2;
+
+  // Issued session handle. Both fields are 0 unless reason == REASON_OK.
+  uint64 session_id = 3;
+  uint64 player_id = 4;
+}

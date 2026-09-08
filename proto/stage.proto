@@ -4,4 +4,68 @@ package odyssey.protocol.v1;
 
 option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
 
-// Reserved module: stage. Message fields and IDs await protocol-owner review.
+import "common.proto";
+
+// ============================================================================
+// stage.proto — stage lifecycle and reward phase.
+//
+// Message IDs: 400..499 (see common.proto::MessageType).
+// Protocol-shape owned by Role A; algorithm owned by Role B (Stage/Director).
+//   - Static data: only IDs travel across the wire. See
+//     docs/protocol/snapshots.md ("static data by id, dynamic data by value").
+//   - StatModifier applies both to Equipment and to GlobalModifier. See
+//     common.proto::StatModifier.
+// ============================================================================
+
+// S -> C. A new stage has begun playing. Server is authoritative on
+// monster_count + seed + per-archetype ids.
+message StageStarted {
+  uint32 stage_index = 1;
+  // Server tick number when monsters became active.
+  uint64 server_tick = 2;
+  uint32 monster_count = 3;
+  // Seed used for spawn pattern + any deterministic per-stage RNG draws.
+  uint32 seed = 4;
+  // Per-monster archetype ids. Length == monster_count, order is server-only.
+  repeated uint32 monster_archetype_ids = 5;
+  // Global modifiers (e.g. Player Attack +20%). Server has already applied
+  // them internally; this is sent for client UI only.
+  repeated StatModifier modifiers = 6;
+}
+
+// S -> C. Stage cleared, players entering the reward phase.
+message StageCleared {
+  uint32 stage_index = 1;
+  // Time from StageStarted to all monsters dead. Informational; UI surface.
+  uint64 clear_time_ms = 2;
+  uint32 difficulty_score = 3;
+}
+
+// S -> C. Three (or fewer) equipment options for the player to choose.
+// choice must be sent within deadline_server_tick or the server picks
+// DEFAULT (first id) on the player's behalf.
+message RewardOptions {
+  uint32 stage_index = 1;
+  repeated uint32 equipment_ids = 2;
+  // Server tick by which the choice must arrive.
+  uint64 deadline_server_tick = 3;
+}
+
+// C -> S. Player selected an equipment. Server validates it is among the
+// offered ids and applies it (or returns REASON_INVALID_STATE).
+message RewardChoice {
+  uint32 equipment_id = 1;
+}
+
+// S -> C. Reward applied (or refused). On REASON_OK the equipment is now
+// live; the next snapshot reflects the new stats.
+message RewardApplied {
+  ReasonCode reason = 1;
+  uint32 equipment_id = 2;
+}
+
+// C -> S. Ready for the next stage. Server collects all "ready" then triggers
+// Director and emits StageStarted.
+message NextStageRequest {
+  // Empty for v1.
+}

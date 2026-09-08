@@ -4,4 +4,159 @@ package odyssey.protocol.v1;
 
 option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
 
-// Reserved module: common. Message fields and IDs await protocol-owner review.
+// ============================================================================
+// common.proto — wire-level identifiers and shared DTOs.
+//
+// NUMERIC VALUES IN THIS FILE ARE PROTOCOL-STABLE.
+// Renumbering existing entries is a breaking change. Always append new entries.
+// After deprecating an entry, mark it `reserved` (range or name) to prevent
+// future reuse.
+//
+// This file is owned by Role A (Realtime Network & Protocol). Any change here
+// requires A's review and C's compatibility check (see CONTRIBUTING.md).
+// ============================================================================
+
+// Wire-level message type id carried in the 16-byte header.MessageType field.
+// The server uses this to route the decoded payload to the appropriate
+// handler. The numeric value MUST match the header byte-for-byte.
+enum MessageType {
+  MESSAGE_UNSPECIFIED = 0;
+
+  // ---- 0..99: System (liveness + transport-level events) -----------------
+  MSG_PING = 1;
+  MSG_PONG = 2;
+  MSG_DISCONNECT = 3;
+
+  // ---- 100..199: Login / Session -----------------------------------------
+  MSG_LOGIN_REQUEST = 101;
+  MSG_LOGIN_RESPONSE = 102;
+  MSG_RESUME_REQUEST = 103;
+  MSG_RESUME_RESPONSE = 104;
+
+  // ---- 200..299: Lobby / Match (impl owned by D) -------------------------
+  MSG_MATCH_REQUEST = 200;
+  MSG_MATCH_FOUND = 201;
+  MSG_MATCH_CANCEL = 202;
+
+  // ---- 300..399: Game / Entity / Combat ----------------------------------
+  MSG_PLAYER_INPUT = 300;
+  MSG_WORLD_SNAPSHOT = 310;
+  MSG_PROJECTILE_SPAWN = 320;
+  MSG_PROJECTILE_DESTROY = 321;
+  MSG_DAMAGE_EVENT = 322;
+  MSG_DEATH_EVENT = 323;
+  MSG_ENTITY_REMOVED = 324;
+
+  // ---- 400..499: Stage / Reward ------------------------------------------
+  MSG_STAGE_STARTED = 400;
+  MSG_STAGE_CLEARED = 401;
+  MSG_REWARD_OPTIONS = 410;
+  MSG_REWARD_CHOICE = 411;
+  MSG_REWARD_APPLIED = 412;
+  MSG_NEXT_STAGE_REQUEST = 413;
+
+  // ---- 500..599: Director / Metrics (read paths) -------------------------
+  MSG_PERFORMANCE_METRICS = 500;
+  MSG_STAGE_PLAN = 501;
+}
+
+// Stable reason codes shared by every refusal / lifecycle event. When the
+// meaning is identical across messages, reuse the same number.
+enum ReasonCode {
+  REASON_UNSPECIFIED = 0;
+
+  // success / informational
+  REASON_OK = 1;
+
+  // protocol / wire (1xx reserved below for system)
+  REASON_INTERNAL = 2;
+  REASON_INVALID_MAGIC = 3;
+  REASON_INVALID_VERSION = 4;
+  REASON_PROTOCOL_DEPRECATED = 5;
+  REASON_FRAME_TOO_LARGE = 6;
+  REASON_DECODE_FAILED = 7;
+  REASON_RATE_LIMIT = 8;
+
+  // auth / session
+  REASON_AUTH_FAILED = 100;
+  REASON_AUTH_REQUIRED = 101;
+  REASON_DUPLICATE_LOGIN = 102;
+  REASON_SESSION_NOT_FOUND = 103;
+  REASON_RESUME_TOKEN_INVALID = 104;
+  REASON_RESUME_TOKEN_EXPIRED = 105;
+
+  // state machine / room
+  REASON_INVALID_STATE = 200;
+  REASON_ROOM_NOT_FOUND = 201;
+  REASON_ROOM_FULL = 202;
+  REASON_NOT_IN_ROOM = 203;
+  REASON_INPUT_TOO_FAST = 204;
+  REASON_INPUT_GAP_TOO_LARGE = 205;
+
+  // game lifecycle
+  REASON_PROJECTILE_EXPIRED = 300;
+  REASON_PROJECTILE_HIT = 301;
+  REASON_OWNER_DEAD = 302;
+}
+
+// Session lifecycle state owned by the server. Clients read this back from
+// LoginResponse / ResumeResponse only; they must never assume a state from the
+// absence of a message.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_CONNECTED = 1;    // TCP up, no Login processed yet
+  SESSION_STATE_LOBBY = 2;
+  SESSION_STATE_MATCHING = 3;
+  SESSION_STATE_IN_ROOM = 4;
+  SESSION_STATE_REWARD = 5;
+  SESSION_STATE_DISCONNECTED = 6; // session retained, no live conn
+  SESSION_STATE_CLOSED = 7;       // terminal; resume window elapsed
+}
+
+// Server-plane 2D position. The server is authority; clients may render this
+// anywhere (e.g. x/z in raylib world) but must not mutate it locally for
+// authoritative entities.
+message Vec2 {
+  float x = 1;
+  float y = 2;
+}
+
+// Stable per-entity id assigned by the server. 0 means "no entity".
+message EntityId {
+  uint64 value = 1;
+}
+
+// Server-side stat modifier (Equipment + GlobalModifier share this shape).
+// Server applies them deterministically; clients only see resolved values
+// inside snapshots. DO NOT carry modifiers over the wire every tick.
+message StatModifier {
+  enum Target {
+    TARGET_UNSPECIFIED = 0;
+    PLAYER = 1;
+    MONSTER = 2;
+  }
+  enum Operation {
+    OP_UNSPECIFIED = 0;
+    ADD = 1;
+    MULTIPLY = 2;
+  }
+  enum Stat {
+    STAT_UNSPECIFIED = 0;
+    ATTACK = 1;
+    DEFENSE = 2;
+    MAX_HEALTH = 3;
+    MOVE_SPEED = 4;
+    ATTACK_SPEED = 5;
+  }
+  Target target = 1;
+  Operation op = 2;
+  Stat stat = 3;
+  float value = 4;
+}
+
+// Server-issued session handle. Returned on Login/Resume success; used as the
+// routing key for everything downstream.
+message SessionRef {
+  uint64 session_id = 1;
+  uint64 player_id = 2;
+}
