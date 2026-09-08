@@ -4,4 +4,37 @@ package odyssey.protocol.v1;
 
 option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
 
-// Reserved module: lobby. Message fields and IDs await protocol-owner review.
+// lobby.proto — match request / match found.
+//
+// Message IDs: 200..299 (see common.proto::MessageType).
+// Implementation owned by Role D; protocol-shape reviewed by Role A. Any
+// change here requires both A and D to sign off.
+//
+// This file currently uses only built-in scalar types; the common.proto
+// import is added lazily when a ReasonCode or shared DTO is needed.
+// ============================================================================
+
+// C -> S. Request to enter the matchmaking pool. Idempotent within a single
+// session; sending it again while already MATCHING is a no-op.
+message MatchRequest {
+  // Optional skill estimate. Server may ignore or use it to bias pairing.
+  uint32 mmr = 1;
+  // Optional preferred region tag (e.g. "cn-east-1"). Empty string means no
+  // preference.
+  string preferred_region = 2;
+}
+
+// S -> C. Match found. The session is moved to SESSION_STATE_MATCHING at this
+// point; the client should present a "joining room" UI.
+message MatchFound {
+  uint64 room_id = 1;
+  // Opaque token used by the client to confirm the room address is reached.
+  string room_token = 2;
+  // Pre-announced teammates (player_ids; order is non-deterministic).
+  repeated uint64 teammates = 3;
+}
+
+// C -> S. Withdraw an outstanding MatchRequest. No-op when not in MATCHING.
+message MatchCancel {
+  // Empty for v1.
+}

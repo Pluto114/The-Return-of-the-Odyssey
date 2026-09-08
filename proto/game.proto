@@ -4,4 +4,113 @@ package odyssey.protocol.v1;
 
 option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
 
-// Reserved module: game. Message fields and IDs await protocol-owner review.
+import "common.proto";
+
+// ============================================================================
+// game.proto — in-room real-time traffic.
+//
+// Message IDs: 300..399 (see common.proto::MessageType).
+// Owned by Role A for protocol; Room implementation owned by Role B.
+// Sending authoritative state here is a bug. See docs/protocol/snapshots.md.
+// ============================================================================
+
+// C -> S. Local-player intent. Sent at the client's input rate (typically the
+// server tick rate, 30Hz). The Input Sequence lives here; the Frame Sequence
+// in the header is unrelated and must not be reused for input gating.
+message PlayerInput {
+  // Strictly increasing per-session counter. Server treats gaps > 64 as
+  // ReasonableRejectInvalidInputGapTooLarge to bound rewind cost.
+  uint64 input_seq = 1;
+  // Local clock at capture. Informational only; server does not gate on it.
+  uint64 client_tick_ms = 2;
+  // Normalized move vector (WASD). Length is server-validated (<= 1.05).
+  Vec2 move = 3;
+  // Aim heading in degrees, 0..360 around +X. Server normalizes.
+  float aim_deg = 4;
+  // Shoot button held this tick.
+  bool shoot = 5;
+  // Use-potion trigger. Server checks Potion availability.
+  bool use_potion = 6;
+}
+
+// S -> C. Authoritative world state, 10Hz. Includes a self-snapshot and an
+// entity list. Reliable delivery; the Snapshot Queue (Latest Wins) drops
+// stale frames before they hit the wire.
+message WorldSnapshot {
+  // Server tick number, monotonically increasing per room.
+  uint64 server_tick = 1;
+  // Last input_seq the server has applied for THIS player. Clients use this
+  // for reconciliation (see docs/protocol/sequence.md).
+  uint64 last_processed_input = 2;
+  // Full self snapshot (Position/Velocity/HP/Weapon/etc.).
+  PlayerSnapshot self = 3;
+  // All other live entities (other players + monsters + projectiles if any).
+  // Order is stable within a tick but NOT preserved across ticks.
+  repeated EntitySnapshot entities = 4;
+}
+
+// Snapshot row for the receiving player. Includes everything the HUD + the
+// prediction engine need.
+message PlayerSnapshot {
+  uint64 player_id = 1;
+  Vec2 position = 2;
+  Vec2 velocity = 3;
+  float aim_deg = 4;
+  int32 hp = 5;
+  int32 max_hp = 6;
+  uint32 weapon_id = 7;     // static id; client resolves display
+  uint32 state_flags = 8;   // bitfield, defined per release (e.g. ALIVE=1)
+}
+
+// Compact snapshot for non-self entities (other players + monsters). Mirrors
+// PlayerSnapshot but is allowed to drop fields that only the local player
+// needs. Adding fields here is backwards-compatible; removing is not.
+message EntitySnapshot {
+  uint64 entity_id = 1;
+  uint32 archetype_id = 2; // monster archetype or 0 for players
+  Vec2 position = 3;
+  Vec2 velocity = 4;
+  float aim_deg = 5;
+  int32 hp = 6;
+  int32 max_hp = 7;
+  uint32 state_flags = 8;
+}
+
+// S -> C. Reliable event. A hit landed. The client renders the number pop;
+// the actual HP is updated via the next WorldSnapshot.
+message DamageEvent {
+  uint64 attacker_id = 1;
+  uint64 victim_id = 2;
+  int32 amount = 3;
+  // Weapon or monster archetype that caused the damage (used for FX).
+  uint32 cause_archetype = 4;
+}
+
+// S -> C. Reliable event. An entity died. The HP row may still show >0 until
+// the next snapshot arrives; the client should suppress input for the victim.
+message DeathEvent {
+  uint64 victim_id = 1;
+  uint32 cause_archetype = 2;
+}
+
+// S -> C. Reliable event. A projectile entered the world. The client creates
+// a Visual Projectile from this; the authoritative one lives in Room.
+message ProjectileSpawnEvent {
+  uint64 projectile_id = 1;
+  uint64 owner_id = 2;
+  uint32 archetype_id = 3;
+  Vec2 position = 4;
+  Vec2 velocity = 5;
+}
+
+// S -> C. Reliable event. A projectile left the world (hit/expired/owner dead).
+message ProjectileDestroyEvent {
+  uint64 projectile_id = 1;
+  ReasonCode reason = 2;
+}
+
+// S -> C. Reliable event. An entity left the visible set (despawned, not a
+// kill). Separate from DeathEvent so clients can play despawn vs death FX.
+message EntityRemovedEvent {
+  uint64 entity_id = 1;
+}
