@@ -1,0 +1,11 @@
+.git
+.idea
+.tools
+.local-backup
+**/node_modules
+**/vcpkg_installed
+build
+cmake-build-*
+**/.env
+**/.env.local
+*.log

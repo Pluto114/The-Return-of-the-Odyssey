@@ -1,0 +1,48 @@
+name: Scaffold checks
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-and-protocol:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache-dependency-path: |
+            server/go.sum
+            bot/go.sum
+      - name: Install matching protoc
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v33.4/protoc-33.4-linux-x86_64.zip
+          echo 'c0040ea9aef08fdeb2c74ca609b18d5fdbfc44ea0042fcfbfb38860d35f7dd66  /tmp/protoc.zip' | sha256sum --check
+          unzip -q /tmp/protoc.zip -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+      - name: Generate both language outputs
+        shell: pwsh
+        run: ./scripts/generate-proto/generate.ps1
+      - name: Verify Go dependencies and compile available packages
+        shell: pwsh
+        run: ./scripts/test/check.ps1 -Race
+
+  dashboard-and-compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm --prefix dashboard ci
+      - run: npm --prefix dashboard run build
+      - run: docker compose --env-file .env.example config --quiet

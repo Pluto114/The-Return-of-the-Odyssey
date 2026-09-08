@@ -1,0 +1,40 @@
+# Local tools, credentials and editors
+.tools/
+.local-backup/
+.env
+.env.*
+!.env.example
+!**/.env.example
+.idea/
+.vscode/
+CMakeUserPresets.json
+*.user
+.DS_Store
+Thumbs.db
+
+# Build outputs (root anchored: scripts/build remains tracked)
+/build/
+/bin/
+/dist/
+cmake-build-*/
+**/vcpkg_installed/
+**/node_modules/
+dashboard/dist/
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.o
+*.a
+*.so
+*.dylib
+*.log
+*.prof
+*.test
+coverage.out
+
+# Reproducible protocol outputs; proto/ is the source of truth
+server/generated/protocol/*.pb.go
+client/generated/protocol/*.pb.cc
+client/generated/protocol/*.pb.h

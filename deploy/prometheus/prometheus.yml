@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  # Reserved endpoint. DOWN is expected until the game server is implemented.
+  - job_name: gameserver
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9091"]

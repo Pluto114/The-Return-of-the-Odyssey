@@ -1,0 +1,40 @@
+{
+  "go": "1.26.8",
+  "node": "24.20.0",
+  "npm": "11.19.0",
+  "protoc": "33.4",
+  "protocGenGo": "v1.36.12",
+  "cmakeMinimum": "3.31.0",
+  "vcpkgBaseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+  "vcpkgTag": "2026.07.29",
+  "windowsDownloads": [
+    {
+      "name": "go",
+      "url": "https://go.dev/dl/go1.26.8.windows-amd64.zip",
+      "sha256": "b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59",
+      "destination": "go-1.26.8",
+      "executable": "go/bin/go.exe"
+    },
+    {
+      "name": "node",
+      "url": "https://nodejs.org/dist/v24.20.0/node-v24.20.0-win-x64.zip",
+      "sha256": "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba",
+      "destination": "node-24.20.0",
+      "executable": "node-v24.20.0-win-x64/node.exe"
+    },
+    {
+      "name": "protoc",
+      "url": "https://github.com/protocolbuffers/protobuf/releases/download/v33.4/protoc-33.4-win64.zip",
+      "sha256": "0b31be019b9fe45a388e93bf1f16d70afdf9ce5caf958ea47892fbc868b5a1b3",
+      "destination": "protoc-33.4",
+      "executable": "bin/protoc.exe"
+    },
+    {
+      "name": "compose-validator",
+      "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-windows-x86_64.exe",
+      "sha256": "a3c0c73033eaede90210345d0cc2233edf4fab8fe0282a91dad8fd8436809d2f",
+      "destination": "compose-5.5.1",
+      "executable": "docker-compose.exe"
+    }
+  ]
+}

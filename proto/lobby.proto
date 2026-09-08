@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package odyssey.protocol.v1;
+
+option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol;protocol";
+
+// Reserved module: lobby. Message fields and IDs await protocol-owner review.
