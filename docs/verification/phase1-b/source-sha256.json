@@ -1,0 +1,35 @@
+{
+  "baseCommit": "aa65d00aa3ef18847d5568d74fd1d713ebc3386a",
+  "branch": "codex/game-core-phase1",
+  "goVersion": "1.26.8",
+  "files": [
+    {
+      "path": "server/internal/game/entity/player.go",
+      "sha256": "549bd4f99c0d04726c4d3b4d750255538bcff53b6dfbe26cdea5d408fd5ebceb"
+    },
+    {
+      "path": "server/internal/game/systems/movement.go",
+      "sha256": "98a928dd1e169577cc488513ba142bc3084e6b921141c4af96fab176bd20e4fa"
+    },
+    {
+      "path": "server/internal/game/world_test.go",
+      "sha256": "d04ff6ffd9e274505673d1d24b2f97429540f1694b2258f2fc34adf10f147526"
+    },
+    {
+      "path": "server/internal/game/world.go",
+      "sha256": "1b8adcda565bd88f119e31e728aa7587e8bd85fd7e95db05cddf4e697c0601e9"
+    },
+    {
+      "path": "server/internal/room/example_test.go",
+      "sha256": "6509f8ef7ab634f37d4f994340505bcc9f2621b363ae4b17c1b76d8e26782320"
+    },
+    {
+      "path": "server/internal/room/room_test.go",
+      "sha256": "bb3c9e83bc82bd46a19ae82c7acefde0834abb40b162ac3e5689e9af4570b876"
+    },
+    {
+      "path": "server/internal/room/room.go",
+      "sha256": "c326ddebe3ed0a1afd636618edc674f2de3f429519db173192055ade339c237e"
+    }
+  ]
+}

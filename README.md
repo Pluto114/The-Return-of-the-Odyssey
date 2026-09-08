@@ -1,11 +1,12 @@
 # The Return of the Odyssey
 
 基于 Go 服务端权威架构的多人 Roguelike 实训项目。
-当前阶段：**项目骨架与开发环境**。游戏、协议消息、数据库表及管理后台业务均未实现。
+当前分支阶段：**角色 B 第一阶段核心开发**。已有可独立测试的房间与权威移动模块；网络协议消息、客户端游戏逻辑、匹配服务及数据库业务尚待对应角色接入。
 
 远程仓库：[Pluto114/The-Return-of-the-Odyssey](https://github.com/Pluto114/The-Return-of-the-Odyssey)。团队日常开发从 develop 创建功能分支。
 
 团队开工请先阅读 **[环境配置清单与安装步骤](docs/SETUP.md)**，并遵守 [协作约定](CONTRIBUTING.md)。
+前三天的角色目标、完成标准和联调测试见 [第一阶段计划](docs/plans/PHASE1-DAYS1-3.md)。角色 B 接入接口及默认参数见 [房间与游戏核心交接文档](docs/architecture/GAME-CORE-PHASE1.md)。
 完整设计保留在 [ARCHITECTURE.md](ARCHITECTURE.md)，本次初始化的具体选择记录在 [环境决策](docs/architecture/ENVIRONMENT.md)。
 
 ## 目录
@@ -53,5 +54,5 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 ## 验证与待办
 
 本机验证结果见 [初始化验收记录](docs/VERIFICATION.md)。
-下一阶段由 A/C 确定协议字段与 Message ID，再按架构文档推进最小实时闭环。
+B 的新增实现检查见 [角色 B 第一阶段验证记录](docs/verification/phase1-b/README.md)。A/C 确定协议字段与 Message ID，A/D 接入房间接口后共同联调最小实时闭环。
 三周功能计划、玩法与性能目标以架构文档为参考；尚无性能数据。
