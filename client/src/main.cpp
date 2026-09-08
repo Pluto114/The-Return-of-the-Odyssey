@@ -10,9 +10,12 @@
 // replaced once the reviewed protocol lands; the client never defines its own
 // wire schema.
 #include "core/BoundedQueue.h"
+#include "input/InputSampler.h"
+#include "input/InputSample.h"
 #include "network/NetClient.h"
 #include "network/NetMessage.h"
 #include "raylib.h"
+#include "sync/GameView.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -35,10 +38,15 @@ constexpr std::uint16_t kProvisionalPong = 2;
 constexpr float kPingIntervalSeconds = 1.0f;
 
 using odyssey::client::core::BoundedQueue;
+using odyssey::client::input::InputReport;
+using odyssey::client::input::InputSample;
+using odyssey::client::input::InputSampler;
+using odyssey::client::input::InputSequencer;
 using odyssey::client::network::ConnectionState;
 using odyssey::client::network::NetClient;
 using odyssey::client::network::NetEvent;
 using odyssey::client::network::ToString;
+using odyssey::client::sync::GameView;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -61,6 +69,13 @@ int main() {
     NetClient client;
     DemoState demo;
 
+    InputSampler input_sampler;
+    InputSequencer input_sequencer;
+    InputSample last_sample;
+    InputReport last_report;      // normalized vector + sequence (connected ticks)
+    double last_input_time = 0.0;
+    GameView game_view;           // filled once A's snapshot DTO is decoded
+
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
     client.Start(kServerHost, kServerPort);
 
@@ -75,6 +90,18 @@ int main() {
             demo.state = ConnectionState::kIdle;
             demo.state_detail = "retrying";
             client.Connect(kServerHost, kServerPort);
+        }
+
+        // Sample input at a fixed 30Hz while connected. Sequencing/payload
+        // transmission is gated by room/session state once A's PlayerInput
+        // lands; for now the HUD shows the intent and tick count.
+        if (demo.state == ConnectionState::kConnected) {
+            const double now = GetTime();
+            if (now - last_input_time >= 1.0 / 30.0) {
+                last_input_time = now;
+                last_sample = input_sampler.SampleNow();
+                last_report = input_sequencer.Tick(last_sample);
+            }
         }
 
         // Drain the Network -> Main inbox (Main Thread consumes events only).
@@ -127,6 +154,19 @@ int main() {
         }
         DrawText(("Pings sent: " + std::to_string(demo.ping_sequence)).c_str(), 24, 200, 20, GRAY);
         DrawText(("Outbound queue drops: " + std::to_string(demo.outbound_drops)).c_str(), 24, 240, 20, GRAY);
+
+        const std::string input_line =
+            "Input intent: keys(dx=" + std::to_string(last_sample.dx) +
+            ", dz=" + std::to_string(last_sample.dz) + ") vec(" +
+            std::to_string(last_report.vector.x) + ", " + std::to_string(last_report.vector.z) +
+            ") seq=" + std::to_string(last_report.sequence) + " @30Hz";
+        DrawText(input_line.c_str(), 24, 280, 20, GRAY);
+
+        const std::string view_line =
+            "View: players=" + std::to_string(game_view.PlayerCount()) +
+            " room=" + std::to_string(game_view.RoomId()) +
+            " tick=" + std::to_string(game_view.ServerTick()) + " (awaiting protocol)";
+        DrawText(view_line.c_str(), 24, 320, 20, GRAY);
 
         DrawText("R: retry connect   |   ESC / close window: quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);
         DrawFPS(kScreenWidth - 90, 12);
