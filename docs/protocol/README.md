@@ -64,7 +64,10 @@ Header 与 Protobuf payload 分两次写缓冲；先 header 后 body，BodyLengt
 | 321 | ProjectileDestroyEvent | S→C | game.proto |
 | 322 | DamageEvent | S→C | game.proto |
 | 323 | DeathEvent | S→C | game.proto |
-| 324 | EntityRemovedEvent | S→C | game.proto |
+| 324 | EntityRemovedEvent | S→C | game.proto（预留，暂未发出） |
+| 325 | StageStartedEvent | S→C | game.proto |
+| 326 | StageClearedEvent | S→C | game.proto |
+| 327 | TeamDefeatedEvent | S→C | game.proto |
 | 400 | StageStarted | S→C | stage.proto |
 | 401 | StageCleared | S→C | stage.proto |
 | 410 | RewardOptions | S→C | stage.proto |
@@ -73,6 +76,11 @@ Header 与 Protobuf payload 分两次写缓冲；先 header 后 body，BodyLengt
 | 413 | NextStageRequest | C→S | stage.proto |
 | 500 | PerformanceMetrics | S→C | （Week 3） |
 | 501 | StagePlan | S→C | （Week 3） |
+
+> **命名区分**：`StageStartedEvent` / `StageClearedEvent`（300 段）是 B 的
+> `game.EventKind` 直通的可靠事件——"这一刻关卡开始/清场了"；而
+> `StageStarted` / `StageCleared`（400 段，stage.proto）是 Stage/Reward 模块的
+> 阶段生命周期消息，承载 reward 阶段编排。两者语义不同，勿混用。
 
 任何 ID 变更 = breaking change，按 §3 处理。
 

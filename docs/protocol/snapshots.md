@@ -16,21 +16,38 @@
 
 ## 三种 Snapshot
 
-### Self Snapshot（`PlayerSnapshot`）
+`WorldSnapshot` 现在的结构（对齐 B 的 `game.Snapshot` + `room.Snapshot`）：
+
+```text
+WorldSnapshot
+  ├─ server_tick            uint64
+  ├─ last_processed_input   uint32   ← 本玩家的输入 ack
+  ├─ self                   PlayerSnapshot
+  ├─ players                repeated PlayerSnapshot  ← 其他玩家，按 player_id 升序
+  ├─ monsters               repeated MonsterSnapshot ← 全量怪物，缺即移除
+  └─ stage                  StageState
+```
+
+### Self Snapshot（`PlayerSnapshot.self`）
 
 随 `WorldSnapshot.self` 一起发。所有字段都齐，客户端可以立即消费：
 
 - 用于 HUD
 - 用于 Prediction（结合 last_processed_input reconciliation）
-- 不在 EntitySnapshot 列表里重复
+- 不在 players 列表里重复
 
-### Other Player Snapshot（走 `EntitySnapshot`）
+`PlayerSnapshot` 字段：`player_id / position / velocity / aim(Vec2) / hp /
+max_hp / attack / defense / move_speed / alive`。`alive=false` 表示已死亡，
+客户端应抑制该实体的输入。
 
-字段精简：**没有** weapon_id、state_flags 之外的 static-like 字段，详见 game.proto。每条 entity 8 字段以下。
+### Other Player Snapshot（`players`）
 
-> 注意：`state_flags` 在 player 与 monster 上 bit 定义可能不同；客户端按 archetype_id 区分解码。
+与 self 同构（`PlayerSnapshot`），按 player_id 升序排列，稳定顺序。
 
-### Monster Snapshot（也是 `EntitySnapshot`）
+### Monster Snapshot（`monsters`）
+
+独立 `MonsterSnapshot`，字段：`monster_id / position / velocity / hp / max_hp /
+state`。`state` 对齐 `entity.MonsterState`：0 idle / 1 chase / 2 attack / 3 dead。
 
 不发送 AI 内部状态：
 
@@ -38,7 +55,9 @@
 - 不发 attack_cooldown
 - 不发 decision_timer
 
-`archetype_id` 让客户端从本地 DataTable 查体型 / 颜色 / 模型。
+怪物全量集合语义：**缺失即移除**——客户端按 monster_id 对齐，列表里没有的
+怪物要从画面上删掉。子弹（projectile）**不进快照**，只通过
+ProjectileSpawn/Destroy 事件维护视觉效果（B 的显式约定）。
 
 ## 静态数据传 id
 
