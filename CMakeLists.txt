@@ -7,4 +7,7 @@ if(ODYSSEY_CLIENT_DEPS)
     enable_language(C)
     enable_language(CXX)
 endif()
+# Register tests at the top level so `ctest --test-dir build\...` works from
+# the build root (subdirectories add their own add_test entries).
+include(CTest)
 add_subdirectory(client)

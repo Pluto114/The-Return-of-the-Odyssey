@@ -55,7 +55,7 @@ set_target_properties(odyssey_client_net PROPERTIES CXX_STANDARD 20 CXX_STANDARD
 target_link_libraries(odyssey_client_net PUBLIC odyssey_client_core odyssey_net_deps)
 
 # Headless unit tests for the core library (no window, no sockets).
-include(CTest)
+# BUILD_TESTING comes from include(CTest) in the root CMakeLists.
 if(BUILD_TESTING)
     add_executable(odyssey_core_tests tests/core_tests.cpp)
     target_include_directories(odyssey_core_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
