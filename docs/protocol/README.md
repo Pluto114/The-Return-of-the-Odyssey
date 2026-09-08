@@ -28,7 +28,7 @@ pwsh -File scripts\generate-proto\generate.ps1
 | 3 | Flags | 1 | bit0=compressed（reserved）, bit1=fragmented（reserved） |
 | 4 | MessageType | 2 | 见 [common.proto::MessageType](../../proto/common.proto) |
 | 6 | Reserved | 2 | 写入 0；保留给未来 Flags 扩展 |
-| 8 | BodyLength | 4 | Protobuf payload 字节数，<= 1<<20 (1 MiB) |
+| 8 | BodyLength | 4 | Protobuf payload 字节数，<= 64 KiB（**待 D1 对齐会定死**，草案建议 64 KiB，勿自行改 1 MiB） |
 | 12 | Sequence | 4 | Frame Sequence，per-connection 单调；与 Input Sequence 不互通 |
 
 Header 与 Protobuf payload 分两次写缓冲；先 header 后 body，BodyLength 必须严格等于实际 payload 字节。
