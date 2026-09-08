@@ -20,15 +20,18 @@ using asio::ip::tcp;
 
 namespace {
 
-constexpr std::size_t kOutboundQueueCapacity = 64;
+constexpr std::size_t kDefaultOutboundQueueCapacity = 64;
 constexpr std::size_t kReadBufferBytes = 8192;
 
 }  // namespace
 
 class NetClient::Impl : public std::enable_shared_from_this<NetClient::Impl> {
 public:
-    Impl() : io_(), work_guard_(asio::make_work_guard(io_)), strand_(asio::make_strand(io_)),
-             socket_(strand_), resolver_(strand_), reader_(core::kMaxFrameBodyBytes) {
+    explicit Impl(std::size_t outbound_capacity)
+        : io_(), work_guard_(asio::make_work_guard(io_)), strand_(asio::make_strand(io_)),
+          socket_(strand_), resolver_(strand_), reader_(core::kMaxFrameBodyBytes),
+          outbound_capacity_(outbound_capacity > 0 ? outbound_capacity
+                                                   : kDefaultOutboundQueueCapacity) {
         reader_.SetFrameCallback([this](core::Frame&& frame) {
             NetEvent event;
             event.kind = NetEvent::Kind::kMessage;
@@ -207,7 +210,7 @@ private:
         if (stopping_.load() || !connected_) {
             return;
         }
-        if (write_queue_.size() >= kOutboundQueueCapacity) {
+        if (write_queue_.size() >= outbound_capacity_) {
             write_queue_.pop_front();
             NetEvent dropped;
             dropped.kind = NetEvent::Kind::kOutboundDropped;
@@ -274,6 +277,7 @@ private:
     std::deque<std::vector<std::uint8_t>> write_queue_;  // io-thread only
     std::vector<std::uint8_t> write_buffer_;             // io-thread only
     bool write_in_flight_ = false;                       // io-thread only
+    const std::size_t outbound_capacity_;
 };
 
 const char* ToString(ConnectionState state) {
@@ -287,7 +291,8 @@ const char* ToString(ConnectionState state) {
     return "unknown";
 }
 
-NetClient::NetClient() : impl_(std::make_shared<Impl>()) {}
+NetClient::NetClient(std::size_t outbound_queue_capacity)
+    : impl_(std::make_shared<Impl>(outbound_queue_capacity)) {}
 
 NetClient::~NetClient() = default;
 

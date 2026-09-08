@@ -298,6 +298,43 @@ void TestFramingMaxBodyAccepted() {
     }
 }
 
+void TestFramingHundredFramesMerged() {
+    // T02 direction: 100 frames delivered inside one Append must decode
+    // exactly once each, in order, with identical payloads.
+    FramingReader reader;
+    std::vector<Frame> frames;
+    reader.SetFrameCallback([&frames](Frame&& f) { frames.push_back(std::move(f)); });
+
+    std::vector<std::uint8_t> stream;
+    std::vector<std::vector<std::uint8_t>> expected_bodies;
+    for (std::uint32_t seq = 1; seq <= 100; ++seq) {
+        // Vary payload sizes: 0..3 bytes.
+        std::vector<std::uint8_t> body;
+        const std::size_t body_size = static_cast<std::size_t>(seq % 4);
+        for (std::size_t i = 0; i < body_size; ++i) {
+            body.push_back(static_cast<std::uint8_t>(seq + i));
+        }
+        const auto bytes = FrameBytes(static_cast<std::uint16_t>(seq % 300), seq, body);
+        stream.insert(stream.end(), bytes.begin(), bytes.end());
+        expected_bodies.push_back(std::move(body));
+    }
+    // Bodies cycle 0,1,2,3 bytes (seq%4): 25 full cycles of {1,2,3,0} = 150
+    // payload bytes over 100 frames.
+    CHECK(stream.size() == 100 * kFrameHeaderSize + 150);
+
+    reader.Append(stream.data(), stream.size());
+    CHECK(frames.size() == 100);
+    CHECK(reader.BufferedBytes() == 0);
+    if (frames.size() == 100) {
+        for (std::size_t i = 0; i < 100; ++i) {
+            const std::uint32_t seq = static_cast<std::uint32_t>(i + 1);
+            CHECK(frames[i].header.sequence == seq);
+            CHECK(frames[i].header.message_type == static_cast<std::uint16_t>(seq % 300));
+            CHECK(frames[i].body == expected_bodies[i]);
+        }
+    }
+}
+
 void TestFinishCleanAndTruncated() {
     {
         FramingReader reader;
@@ -462,6 +499,7 @@ int main() {
     TestFramingBadMagicAndVersion();
     TestFramingOversizeRejectedEarly();
     TestFramingMaxBodyAccepted();
+    TestFramingHundredFramesMerged();
     TestFinishCleanAndTruncated();
     TestQueueFifoAndBounds();
     TestQueueTryPushReject();

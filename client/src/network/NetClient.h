@@ -26,7 +26,9 @@ class NetClient {
 public:
     using EventCallback = std::function<void(NetEvent&&)>;
 
-    NetClient();
+    // outbound_queue_capacity overrides the default 64-frame write queue cap;
+    // kept injectable so the saturation/drop policy can be tested headlessly.
+    explicit NetClient(std::size_t outbound_queue_capacity = 64);
     ~NetClient();
 
     NetClient(const NetClient&) = delete;

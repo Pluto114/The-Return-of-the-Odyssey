@@ -163,6 +163,71 @@ private:
     std::atomic<int> pong_count_{0};
 };
 
+// Server that accepts a connection but never reads: used to back-pressure the
+// client's outbound writer so the bounded queue saturates deterministically.
+class SilentServer {
+public:
+    SilentServer() : io_(), acceptor_(io_) {
+        tcp::endpoint endpoint(asio::ip::make_address("127.0.0.1"), 0);
+        acceptor_.open(endpoint.protocol());
+        acceptor_.set_option(asio::socket_base::reuse_address(true));
+        acceptor_.bind(endpoint);
+        acceptor_.listen();
+        port_ = acceptor_.local_endpoint().port();
+        thread_ = std::thread([this] { io_.run(); });
+        AcceptNext();
+    }
+
+    ~SilentServer() { Close(); }
+
+    std::uint16_t Port() const { return port_; }
+
+    void Close() {
+        io_.post([this] {
+            std::error_code ignored;
+            acceptor_.close(ignored);
+            for (const auto& session : sessions_) {
+                session->Close();
+            }
+        });
+        io_.stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    class Session {
+    public:
+        explicit Session(asio::io_context& io) : socket_(io) {}
+        tcp::socket& Socket() { return socket_; }
+        void Close() {
+            std::error_code ignored;
+            socket_.close(ignored);
+        }
+
+    private:
+        tcp::socket socket_;
+    };
+
+    void AcceptNext() {
+        auto session = std::make_shared<Session>(io_);
+        sessions_.push_back(session);
+        acceptor_.async_accept(session->Socket(),
+                               [this, session](const std::error_code& ec) {
+                                   if (!ec) {
+                                       AcceptNext();
+                                   }
+                               });
+    }
+
+    asio::io_context io_;
+    tcp::acceptor acceptor_;
+    std::uint16_t port_ = 0;
+    std::thread thread_;
+    std::vector<std::shared_ptr<Session>> sessions_;
+};
+
 // ---- helpers ---------------------------------------------------------------
 
 using Inbox = BoundedQueue<NetEvent>;
@@ -264,6 +329,40 @@ void TestConnectRefused() {
     client.Stop();
 }
 
+void TestOutboundQueueSaturationDropsOldest() {
+    SilentServer server;
+    // Tiny outbound capacity so saturation is reached deterministically while
+    // the peer (which never reads) keeps the first write blocked.
+    NetClient client(4);
+    Inbox inbox(4096);
+    client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
+    CHECK(client.Start("127.0.0.1", static_cast<std::uint16_t>(server.Port())));
+
+    NetEvent connected;
+    CHECK(WaitState(inbox, ConnectionState::kConnected, connected));
+
+    // Large payloads saturate the OS send buffer so the writer blocks and the
+    // bounded queue must start dropping the oldest frames.
+    std::vector<std::uint8_t> big(8192, 0xAB);
+    int drops = 0;
+    for (std::uint32_t seq = 1; seq <= 300; ++seq) {
+        client.SendFrame(kPing, seq, big.data(), big.size());
+    }
+    NetEvent dropped;
+    if (WaitEvent(inbox, [&drops](const NetEvent& e) {
+            if (e.kind == NetEvent::Kind::kOutboundDropped) {
+                ++drops;
+                return true;
+            }
+            return false;
+        }, dropped, 8000)) {
+        CHECK(!dropped.detail.empty());
+    }
+    CHECK(drops >= 1);
+    client.Stop();
+    server.Close();
+}
+
 void TestNoDoubleStart() {
     EchoServer server;
     NetClient client;
@@ -282,6 +381,7 @@ int main() {
     TestConnectAndPingPong();
     TestPeerCloseDisconnects();
     TestConnectRefused();
+    TestOutboundQueueSaturationDropsOldest();
     TestNoDoubleStart();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
