@@ -2,7 +2,7 @@
 
 日期：2026-09-08。范围：B 的 World / Movement / Room，不是全组阶段验收或 Bot 性能报告。
 工作分支：`codex/game-core-phase1`，基于 develop 的 `aa65d00aa3ef18847d5568d74fd1d713ebc3386a`。
-本记录针对该分支当前工作树增量；尚未提交、未推送，也未由 D 评审或合并 develop。
+本记录对应最初的移动核心验证，之后已随 `c094fee` 提交并推送；D 评审与 develop 联调尚未在此记录中确认。后续战斗增量见 [新验证记录](../combat-core/README.md)。
 
 ## 实现状态
 

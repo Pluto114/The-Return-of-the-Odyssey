@@ -1,11 +1,12 @@
 # The Return of the Odyssey
 
 基于 Go 服务端权威架构的多人 Roguelike 实训项目。
-当前分支阶段：**角色 B 第一阶段核心开发**。已有可独立测试的房间与权威移动模块；网络协议消息、客户端游戏逻辑、匹配服务及数据库业务尚待对应角色接入。
+当前分支阶段：**角色 B 房间与首关战斗核心开发**。已有权威移动、射击、怪物与伤害结算，以及可直接运行的离线演示；网络协议消息、客户端游戏逻辑、匹配服务及数据库业务尚待对应角色接入。
 
 远程仓库：[Pluto114/The-Return-of-the-Odyssey](https://github.com/Pluto114/The-Return-of-the-Odyssey)。团队日常开发从 develop 创建功能分支。
 
 团队开工请先阅读 **[环境配置清单与安装步骤](docs/SETUP.md)**，并遵守 [协作约定](CONTRIBUTING.md)。
+**协作入口：[最新需求、角色任务和联调标准](docs/plans/CURRENT-COLLABORATION.md)**。B 的交付在 codex/game-core-phase1 分支，供评审和接入。
 前三天的角色目标、完成标准和联调测试见 [第一阶段计划](docs/plans/PHASE1-DAYS1-3.md)。角色 B 接入接口及默认参数见 [房间与游戏核心交接文档](docs/architecture/GAME-CORE-PHASE1.md)。
 完整设计保留在 [ARCHITECTURE.md](ARCHITECTURE.md)，本次初始化的具体选择记录在 [环境决策](docs/architecture/ENVIRONMENT.md)。
 
@@ -42,6 +43,7 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 
 客户端依赖验证与基础设施启动见 [SETUP.md](docs/SETUP.md)。
 当前没有 gameserver、Bot 或游戏客户端可执行入口；不要将环境构建成功视为游戏已可运行。
+角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；规则、接口和待办见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)。
 
 ## 固定架构边界
 

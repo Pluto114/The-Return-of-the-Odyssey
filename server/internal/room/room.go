@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 )
 
 type ID uint64
@@ -33,11 +34,12 @@ type Config struct {
 	InputsPerTick      int
 	TickSampleCapacity int
 	EmptyTimeout       time.Duration
+	EventCapacity      int
 }
 
 func DefaultConfig() Config {
 	return Config{World: game.DefaultConfig(), ControlCapacity: 64, InputCapacity: 256,
-		ControlsPerTick: 16, InputsPerTick: 128, TickSampleCapacity: 128, EmptyTimeout: 5 * time.Second}
+		ControlsPerTick: 16, InputsPerTick: 128, TickSampleCapacity: 128, EmptyTimeout: 5 * time.Second, EventCapacity: 64}
 }
 
 func (c Config) validate() error {
@@ -45,7 +47,7 @@ func (c Config) validate() error {
 		return err
 	}
 	if c.ControlCapacity < 1 || c.InputCapacity < 1 || c.ControlsPerTick < 1 || c.InputsPerTick < 1 ||
-		c.TickSampleCapacity < 1 || c.EmptyTimeout <= 0 {
+		c.TickSampleCapacity < 1 || c.EmptyTimeout <= 0 || c.EventCapacity < 1 || c.EventCapacity > 1024 {
 		return fmt.Errorf("invalid room configuration")
 	}
 	return nil
@@ -83,6 +85,7 @@ type Stats struct {
 	DroppedTickSamples uint64
 	LastTick           TickSample
 	Closed             bool
+	CloseReason        string
 }
 
 type control struct {
@@ -90,6 +93,7 @@ type control struct {
 	sessionID SessionID
 	playerID  entity.ID
 	result    chan error
+	stagePlan *stage.Plan
 }
 
 type movement struct {
@@ -118,6 +122,7 @@ type Room struct {
 	inputs   chan movement
 	updates  chan Snapshot
 	samples  chan TickSample
+	events   chan game.EventBatch
 	latest   atomic.Pointer[Snapshot]
 	status   atomic.Pointer[Stats]
 	rejected atomic.Uint64
@@ -149,7 +154,8 @@ func Start(ctx context.Context, id ID, config Config) (*Room, error) {
 	r := &Room{id: id, config: config, ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		controls: make(chan control, config.ControlCapacity), inputs: make(chan movement, config.InputCapacity),
 		updates: make(chan Snapshot, 1), samples: make(chan TickSample, config.TickSampleCapacity),
-		world: w, members: make(map[SessionID]binding), emptyTimer: time.NewTimer(config.EmptyTimeout), stats: Stats{RoomID: id}}
+		events: make(chan game.EventBatch, config.EventCapacity),
+		world:  w, members: make(map[SessionID]binding), emptyTimer: time.NewTimer(config.EmptyTimeout), stats: Stats{RoomID: id}}
 	s := Snapshot{RoomID: id, Snapshot: w.Snapshot()}
 	r.latest.Store(&s)
 	r.storeStats()
@@ -179,6 +185,16 @@ func (r *Room) Leave(sessionID SessionID) (<-chan error, error) {
 		return nil, ErrInvalidSession
 	}
 	return r.submit(control{sessionID: sessionID})
+}
+
+// StartStage is a trusted server orchestration command, never a direct client
+// request. The plan is copied before enqueue, and success is reported by receipt.
+func (r *Room) StartStage(plan stage.Plan) (<-chan error, error) {
+	if err := game.ValidateStage(plan, r.config.World); err != nil {
+		return nil, err
+	}
+	plan = plan.Clone()
+	return r.submit(control{stagePlan: &plan})
 }
 
 func (r *Room) submit(c control) (<-chan error, error) {
@@ -233,6 +249,10 @@ func (r *Room) LatestSnapshot() Snapshot   { return r.latest.Load().clone() }
 // TickSamples has one consumer (D's metrics adapter). It is lossy and bounded;
 // consumers must report DroppedTickSamples when interpreting percentiles.
 func (r *Room) TickSamples() <-chan TickSample { return r.samples }
+
+// Events is for one reliable-event dispatcher. Saturation closes the room and
+// records event_backpressure; combat events are never silently replaced.
+func (r *Room) Events() <-chan game.EventBatch { return r.events }
 func (r *Room) Done() <-chan struct{}          { return r.done }
 
 func (r *Room) Stats() Stats {
@@ -253,17 +273,23 @@ func (r *Room) run() {
 	for {
 		select {
 		case <-r.ctx.Done():
+			r.stats.CloseReason = "requested"
 			return
 		case <-r.emptyTimer.C:
+			r.stats.CloseReason = "idle"
 			return
 		case <-ticker.C:
 			if r.ctx.Err() != nil {
+				r.stats.CloseReason = "requested"
 				return
 			}
 			// Use actual server time for expiry if scheduling was delayed. The
 			// ticker may drop missed ticks; movement never catches up unboundedly.
 			now := time.Now()
 			r.tick(now)
+			if r.stats.CloseReason != "" {
+				return
+			}
 		}
 	}
 }
@@ -300,6 +326,16 @@ inputs:
 	}
 simulate:
 	r.world.Step(time.Now())
+	batch := r.world.TakeEvents()
+	if batch.Overflow {
+		r.stats.CloseReason = "event_backpressure"
+	} else if len(batch.Events) > 0 {
+		select {
+		case r.events <- batch:
+		default:
+			r.stats.CloseReason = "event_backpressure"
+		}
+	}
 	if r.world.Tick()%game.SnapshotEvery == 0 {
 		r.publish(false)
 	}
@@ -315,6 +351,9 @@ simulate:
 }
 
 func (r *Room) applyControl(c control) error {
+	if c.stagePlan != nil {
+		return r.world.StartStage(*c.stagePlan)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if c.join {
@@ -385,12 +424,13 @@ drainInputs:
 		}
 	}
 cleared:
-	r.world.Clear()
+	r.world.Close()
 	clear(r.members)
 	r.stats.Closed = true
 	r.publish(true)
 	r.storeStats()
 	close(r.updates)
 	close(r.samples)
+	close(r.events)
 	close(r.done)
 }
