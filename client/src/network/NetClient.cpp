@@ -299,6 +299,10 @@ bool NetClient::Start(std::string host, std::uint16_t port) {
     return impl_->Start(std::move(host), port);
 }
 
+void NetClient::Connect(std::string host, std::uint16_t port) {
+    impl_->Connect(std::move(host), port);
+}
+
 bool NetClient::IsRunning() const {
     return impl_->IsRunning();
 }

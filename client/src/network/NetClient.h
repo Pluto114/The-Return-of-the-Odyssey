@@ -40,6 +40,10 @@ public:
     // when already running or the callback was not set.
     bool Start(std::string host, std::uint16_t port);
 
+    // Starts another connection attempt (e.g. a retry after a failure).
+    // No-op while a connect/connection is active or after Stop().
+    void Connect(std::string host, std::uint16_t port);
+
     bool IsRunning() const;
 
     // Enqueues one outbound frame (header derived from message_type/sequence;
