@@ -1,19 +1,12 @@
-// odyssey_client entry point - Phase 1 D1 slices A + B.
-//
-// Slice A: responsive raylib window that opens, renders and exits cleanly.
-// Slice B: Asio TCP Network Thread + bounded Network->Main inbox + HUD that
-// shows the live connection state; 'R' retries a failed connect; ESC or
-// window close stops the network thread and exits.
-//
-// Message type numbers below are PROVISIONAL demo placeholders only - the
-// authoritative message set/IDs belong to A (feature/network). They are
-// replaced once the reviewed protocol lands; the client never defines its own
-// wire schema.
+// odyssey_client entry point - Phase 1 D1 slices A + B, now wired to A's v0
+// protocol message IDs (see network/ProtocolIds.h). Slice C input/snapshot
+// framework is in place; real PlayerInput/WorldSnapshot decode lands next.
 #include "core/BoundedQueue.h"
 #include "input/InputSampler.h"
 #include "input/InputSample.h"
 #include "network/NetClient.h"
 #include "network/NetMessage.h"
+#include "network/ProtocolIds.h"
 #include "raylib.h"
 #include "sync/GameView.h"
 
@@ -31,10 +24,6 @@ constexpr int kFps = 60;
 constexpr const char* kServerHost = "127.0.0.1";
 constexpr std::uint16_t kServerPort = 7777;
 
-// Provisional (awaiting A): System range 0-99.
-constexpr std::uint16_t kProvisionalPing = 1;
-constexpr std::uint16_t kProvisionalPong = 2;
-
 constexpr float kPingIntervalSeconds = 1.0f;
 
 using odyssey::client::core::BoundedQueue;
@@ -46,6 +35,7 @@ using odyssey::client::network::ConnectionState;
 using odyssey::client::network::NetClient;
 using odyssey::client::network::NetEvent;
 using odyssey::client::network::ToString;
+using namespace odyssey::client::network::ids;
 using odyssey::client::sync::GameView;
 
 struct DemoState {
@@ -123,14 +113,15 @@ int main() {
             }
         }
 
-        // While connected, demo a Ping every second. Payload is empty for now;
-        // a real Pong/Login integration waits for A's reviewed protocol.
+        // While connected, send a Ping every second using A's authoritative
+        // message ID. Payload is empty for now; Login/PlayerInput/Snapshot
+        // decode lands in the next slices.
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
             if (now - last_ping_sent >= kPingIntervalSeconds) {
                 last_ping_sent = now;
                 ++demo.ping_sequence;
-                client.SendFrame(kProvisionalPing, demo.ping_sequence, nullptr, 0);
+                client.SendFrame(kPing, demo.ping_sequence, nullptr, 0);
             }
         }
 
