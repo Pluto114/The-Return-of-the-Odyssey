@@ -58,7 +58,7 @@ func (c Config) Validate() error {
 // Input contains intent only. Session supplies the player identity and the
 // server stamps arrival time; neither comes from a client-controlled position.
 type Input struct {
-	Seq       uint32
+	Seq       uint64
 	Direction entity.Vec2
 	Aim       entity.Vec2
 	Shoot     bool

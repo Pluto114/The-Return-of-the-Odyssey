@@ -55,7 +55,7 @@ func countEvents(events []game.Event, kind game.EventKind) int {
 func TestProjectileDamageDeathAndStageClear(t *testing.T) {
 	w := encounter(t, game.DefaultConfig(), target(13, 10, 40))
 	var events []game.Event
-	for seq := uint32(1); seq <= 30; seq++ {
+	for seq := uint64(1); seq <= 30; seq++ {
 		events = append(events, stepInput(t, w, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true})...)
 	}
 	s := w.Snapshot()
@@ -95,7 +95,7 @@ func TestProjectileDamageDeathAndStageClear(t *testing.T) {
 func TestFireCooldownIndependentOfPacketRate(t *testing.T) {
 	for _, packets := range []int{1, 10} {
 		w := encounter(t, game.DefaultConfig(), target(19, 19, 1e6))
-		var seq uint32
+		var seq uint64
 		var events []game.Event
 		for range 30 {
 			now := time.Unix(100, 0).Add(time.Duration(w.Tick()) * game.TickInterval)
@@ -220,7 +220,7 @@ func TestTeamDefeatStopsCombatAndDeadPlayerMovement(t *testing.T) {
 		t.Fatal("team wipe missing")
 	}
 	pos := w.Snapshot().Players[0].Position
-	for seq := uint32(2); seq < 30; seq++ {
+	for seq := uint64(2); seq < 30; seq++ {
 		e := stepInput(t, w, game.Input{Seq: seq, Direction: entity.Vec2{X: 1}, Aim: entity.Vec2{X: 1}, Shoot: true})
 		if len(e) != 0 {
 			t.Fatal("combat continued after defeat")
@@ -249,7 +249,7 @@ func TestProjectileCapacityAndLifetime(t *testing.T) {
 	c.Combat.PlayerStats.AttackCooldownTicks = 1
 	w := encounter(t, c, target(19, 19, 100))
 	active, maxActive := 0, 0
-	for seq := uint32(1); seq <= 25; seq++ {
+	for seq := uint64(1); seq <= 25; seq++ {
 		for _, e := range stepInput(t, w, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true}) {
 			if e.Kind == game.ProjectileSpawned {
 				active++
@@ -307,7 +307,7 @@ func TestCombatReplayIsDeterministic(t *testing.T) {
 		m.Stats.Attack = 10
 		w := encounter(t, game.DefaultConfig(), m, target(17, 12, 100))
 		var events []game.Event
-		for seq := uint32(1); seq <= 180; seq++ {
+		for seq := uint64(1); seq <= 180; seq++ {
 			events = append(events, stepInput(t, w, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true})...)
 		}
 		return events, w.Snapshot()

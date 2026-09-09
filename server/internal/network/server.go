@@ -112,7 +112,8 @@ type Connection struct {
 	logger  *slog.Logger
 
 	// out is the bounded outbound queue drained by the Writer goroutine.
-	out chan []byte
+	out    chan []byte
+	sendMu sync.Mutex // serializes queue admission with queue closure
 
 	closeOnce sync.Once // protects socket close + onClose
 	queueOnce sync.Once // protects close(c.out)
@@ -150,6 +151,8 @@ func (c *Connection) Context() interface{} {
 // The byte slice must not be mutated after Send returns. Send is safe to call
 // after the connection has closed (it returns false rather than panicking).
 func (c *Connection) Send(frame []byte) bool {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	select {
 	case <-c.closed:
 		return false
@@ -182,6 +185,12 @@ func (c *Connection) Close() {
 // run()'s normal path. It is used for graceful rejection where the peer must
 // receive the terminal frame before the socket closes. Safe and idempotent.
 func (c *Connection) CloseAfterFlush() {
+	c.closeQueue()
+}
+
+func (c *Connection) closeQueue() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	c.deadOnce.Do(func() { close(c.closed) })
 	c.queueOnce.Do(func() { close(c.out) })
 }
@@ -204,7 +213,7 @@ func (c *Connection) run() {
 	go c.writeLoop(writerDone)
 
 	<-readerDone
-	c.queueOnce.Do(func() { close(c.out) })
+	c.closeQueue()
 	<-writerDone
 	c.Close() // idempotent: closes socket + untracks exactly once
 }

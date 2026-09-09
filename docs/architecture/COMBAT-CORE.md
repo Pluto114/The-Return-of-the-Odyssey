@@ -54,7 +54,7 @@ Reward / PreparingNextStage 枚举仅保留给后续状态转换，没有虚构�
 
 实体 ID 使用 uint64：玩家 ID 范围为 1 到 2^63−1，怪物/子弹使用高半区并在同一 World 内单调分配。A/C 需要保留 64 位，不可缩窄到 uint32。
 这里的 State / EventKind 都是领域枚举，A 应显式映射到自己维护的协议枚举和消息 ID，不直接当成 wire 编号。
-游戏内没有 Proto、Socket、数据库或 Prometheus 依赖；本次未实现或修改其他角色的协议消息与服务入口。
+游戏内没有 Proto、Socket、数据库或 Prometheus 依赖。集成分支通过独立的 protocolbridge 包适配 A 的 DTO；协议源未改动，战斗事件映射仍待字段对齐，见 [A/B 联调记录](../verification/network-core/README.md)。
 
 ## 4. 状态与事件出口
 

@@ -48,7 +48,7 @@ func TestFixedTickMovement(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w := world(t)
 			now := time.Unix(100, 0)
-			var seq uint32
+			var seq uint64
 			for range 30 {
 				for range tc.packets {
 					seq++
@@ -82,7 +82,7 @@ func TestAcknowledgesOnlySimulatedInput(t *testing.T) {
 	if before.LastProcessedInputSeq != 0 {
 		t.Fatal("ack advanced before Step")
 	}
-	for _, seq := range []uint32{3, 2, 1} {
+	for _, seq := range []uint64{3, 2, 1} {
 		if err := w.ApplyInput(1, game.Input{Seq: seq, Direction: entity.Vec2{X: -1}}, now); !errors.Is(err, game.ErrStaleInput) {
 			t.Fatalf("old input: %v", err)
 		}
@@ -143,7 +143,7 @@ func TestReleaseAndInputExpiry(t *testing.T) {
 			after := w.Snapshot().Players[0]
 			near(t, after.Position.X, before.Position.X)
 			near(t, after.Velocity.X, 0)
-			wantAck := uint32(1)
+			wantAck := uint64(1)
 			if release {
 				wantAck = 2
 			}
@@ -188,7 +188,7 @@ func TestBoundsAndActualVelocity(t *testing.T) {
 	for _, direction := range []entity.Vec2{{X: 1}, {X: -1}, {Y: 1}, {Y: -1}} {
 		w := world(t)
 		now := time.Unix(100, 0)
-		for seq := uint32(1); seq <= 100; seq++ {
+		for seq := uint64(1); seq <= 100; seq++ {
 			if err := w.ApplyInput(1, game.Input{Seq: seq, Direction: direction}, now); err != nil {
 				t.Fatal(err)
 			}

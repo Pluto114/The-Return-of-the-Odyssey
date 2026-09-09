@@ -23,4 +23,4 @@ try {
     & protoc '--proto_path=.' "--plugin=protoc-gen-go=$plugin" "--go_out=$goOut" '--go_opt=paths=source_relative' "--cpp_out=$cppOut" "--descriptor_set_out=$root/build/protocol.pb" '--include_imports' @schemas
     if ($LASTEXITCODE -ne 0) { throw 'Protocol generation failed.' }
 } finally { Pop-Location }
-Write-Host 'Generated Go + C++ protocol files from proto/. No business messages are defined yet.'
+Write-Host 'Generated Go + C++ protocol files and descriptor set from proto/.'
