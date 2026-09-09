@@ -74,12 +74,18 @@ if(BUILD_TESTING)
     target_link_libraries(odyssey_logic_tests PRIVATE Threads::Threads)
     set_target_properties(odyssey_logic_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
     add_test(NAME odyssey_logic_tests COMMAND odyssey_logic_tests)
+
+    add_executable(odyssey_protocol_tests tests/protocol_tests.cpp)
+    target_include_directories(odyssey_protocol_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(odyssey_protocol_tests PRIVATE odyssey_protocol)
+    set_target_properties(odyssey_protocol_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    add_test(NAME odyssey_protocol_tests COMMAND odyssey_protocol_tests)
 endif()
 
-# The game client executable. Frame/network/render wiring lands incrementally
-# on feature/client; protocol payload integration waits for the owner-reviewed
-# message set (A) so the client never hand-writes a second protocol definition.
+# The game client executable. Ping/Login now use A's generated protocol;
+# PlayerInput transmission and WorldSnapshot decoding land in the next slices.
 add_executable(odyssey_client src/main.cpp src/input/InputSampler.cpp)
 target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(odyssey_client PRIVATE odyssey_client_dependencies odyssey_client_net odyssey_client_core)
+target_link_libraries(odyssey_client PRIVATE
+    odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
