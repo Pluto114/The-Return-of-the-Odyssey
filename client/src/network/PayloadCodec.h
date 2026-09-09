@@ -49,6 +49,29 @@ inline bool DecodePong(const std::vector<std::uint8_t>& payload, PongData& out) 
     return true;
 }
 
+// ---- PlayerInput (C -> S, 30Hz intent) ------------------------------------
+
+struct PlayerInputData {
+    std::uint32_t input_seq = 0;  // client-side 30Hz seq (independent of Frame Seq)
+    float dir_x = 0.0f;           // world x (server x); normalized
+    float dir_z = 0.0f;           // world z (server y); normalized
+    bool shoot = false;
+    std::uint64_t client_tick_ms = 0;
+};
+
+inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) {
+    odyssey::protocol::v1::PlayerInput proto;
+    proto.set_input_seq(data.input_seq);
+    proto.set_client_tick_ms(data.client_tick_ms);
+    auto* move = proto.mutable_move();
+    move->set_x(data.dir_x);
+    move->set_y(data.dir_z);
+    proto.set_shoot(data.shoot);
+    std::vector<std::uint8_t> out(proto.ByteSizeLong());
+    proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
+    return out;
+}
+
 // ---- Disconnect ------------------------------------------------------------
 
 struct DisconnectData {

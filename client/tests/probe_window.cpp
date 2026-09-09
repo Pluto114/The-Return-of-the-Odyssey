@@ -7,6 +7,10 @@
 int main() {
     std::printf("probe: before InitWindow\n");
     fflush(stdout);
+    // Present-path experiment: vsync + high-dpi change the swap/composition
+    // mode used by the Intel driver + glfw (screen showed clear+text but no
+    // primitives while the GPU framebuffer had them).
+    SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_HIGHDPI);
     InitWindow(640, 360, "Odyssey window probe");
     std::printf("probe: after InitWindow\n");
     fflush(stdout);
@@ -26,8 +30,16 @@ int main() {
         }
         BeginDrawing();
         ClearBackground(RAYWHITE);
+        // Decisive markers: shapes vs text rendering.
+        DrawRectangle(40, 60, 120, 80, RED);
+        DrawCircle(240, 100, 40, BLUE);
+        DrawText("probe text 64px", 60, 180, 64, BLACK);
         DrawText("probe window", 24, 24, 24, DARKGRAY);
         EndDrawing();
+        if (frame == 1) {
+            TakeScreenshot("probe_shot.png");  // dump actual rendered frame
+            std::printf("probe: screenshot saved\n"); fflush(stdout);
+        }
         const double frame_elapsed = GetTime() - frame_start;
         if (frame_elapsed < kFrameSeconds) {
             WaitTime(kFrameSeconds - frame_elapsed);

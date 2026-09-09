@@ -32,6 +32,7 @@ using odyssey::client::network::payload::DecodeLoginResponse;
 using odyssey::client::network::payload::DecodePong;
 using odyssey::client::network::payload::EncodeLoginRequest;
 using odyssey::client::network::payload::EncodePing;
+using odyssey::client::network::payload::EncodePlayerInput;
 using odyssey::client::network::payload::LoginRequestData;
 using odyssey::client::network::payload::LoginResponseData;
 using odyssey::client::network::payload::PingData;
@@ -126,6 +127,38 @@ void TestLoginResponseRejected() {
     CHECK(login.player_id == 0);
 }
 
+void TestPlayerInputWire() {
+    odyssey::client::network::payload::PlayerInputData data;
+    data.input_seq = 77;
+    data.dir_x = 0.70710678f;
+    data.dir_z = -0.70710678f;
+    data.shoot = false;
+    data.client_tick_ms = 12345;
+    const auto bytes = EncodePlayerInput(data);
+
+    odyssey::protocol::v1::PlayerInput parsed;
+    CHECK(parsed.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())));
+    CHECK(parsed.input_seq() == 77);
+    CHECK(parsed.client_tick_ms() == 12345);
+    CHECK(parsed.has_move());
+    if (parsed.has_move()) {
+        CHECK(parsed.move().x() == data.dir_x);
+        CHECK(parsed.move().y() == data.dir_z);
+    }
+    CHECK(!parsed.shoot());
+    // Zero-intent (release) encodes fine with seq and no direction magnitude.
+    odyssey::client::network::payload::PlayerInputData idle;
+    idle.input_seq = 78;
+    const auto idle_bytes = EncodePlayerInput(idle);
+    odyssey::protocol::v1::PlayerInput idle_parsed;
+    CHECK(idle_parsed.ParseFromArray(idle_bytes.data(), static_cast<int>(idle_bytes.size())));
+    CHECK(idle_parsed.input_seq() == 78);
+    if (idle_parsed.has_move()) {
+        CHECK(idle_parsed.move().x() == 0.0f);
+        CHECK(idle_parsed.move().y() == 0.0f);
+    }
+}
+
 void TestDisconnectDecode() {
     odyssey::protocol::v1::Disconnect proto;
     proto.set_reason(odyssey::protocol::v1::REASON_EVENT_BACKPRESSURE);
@@ -146,6 +179,7 @@ int main() {
     TestLoginRequestWire();
     TestLoginResponseOk();
     TestLoginResponseRejected();
+    TestPlayerInputWire();
     TestDisconnectDecode();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

@@ -42,6 +42,17 @@
 依赖安装完成后增量构建与 ctest 均正常。已安装依赖：raylib 6.0、asio 1.32.0、protobuf 6.33.4#2、imgui 1.92.8#1
 （含传递依赖），基线 `9e593bb18ea69cc5095e012465dcd675a822ed0d`。
 
+## 本机环境待办：raylib 动态库呈现问题（不影响逻辑/网络联调）
+
+现象：raylib 窗口在「显式 `PollInputEvents()` + 手动限帧」后消息泵正常（Responding=true、60fps、ESC/X 可退出），
+但**纯色图元（矩形/圆）不上屏，背景与文字正常**；GPU 帧缓冲读回（TakeScreenshot）确认绘制内容正确，
+CopyFromScreen/PrintWindow 抓屏显示图元缺失。已尝试 `FLAG_VSYNC_HINT|FLAG_WINDOW_HIGHDPI` 无改善。
+定位为 raylib（动态库 raylib.dll+glfw3.dll）在该机 Intel UHD 770 驱动下的呈现/合成问题。
+
+处理：不作为代码缺陷；画面类验收（双人几何绘制等）暂以「本机待驱动更新或 raylib 静态链接后复验」记录。
+逻辑、协议编解码、网络联调均通过无头测试/日志验证，不依赖本问题。
+
+
 | 尚未完成 | 后续责任 |
 | --- | --- |
 | 最小 proto 消息集 + Message ID 表 + Frame 十六进制固定样例 + 错误处理表 | A（C 复核） |
