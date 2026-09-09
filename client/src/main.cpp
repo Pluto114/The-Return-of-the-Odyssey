@@ -35,6 +35,7 @@ constexpr const char* kDevDisplayName = "odyssey-c";
 constexpr std::uint32_t kClientProtocolVersion = 1;
 
 constexpr float kPingIntervalSeconds = 1.0f;
+constexpr double kFrameSeconds = 1.0 / 60.0;
 
 using namespace odyssey::client::network::ids;
 namespace payload = odyssey::client::network::payload;
@@ -89,7 +90,9 @@ struct DemoState {
 }  // namespace
 
 int main() {
+    std::printf("main: before InitWindow\n"); fflush(stdout);
     InitWindow(kScreenWidth, kScreenHeight, "The Return of the Odyssey - Client");
+    std::printf("main: after InitWindow\n"); fflush(stdout);
     SetTargetFPS(kFps);
 
     BoundedQueue<NetEvent> inbox(256);
@@ -104,17 +107,38 @@ int main() {
     GameView game_view;           // filled once the WorldSnapshot decode slice lands
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
+    std::printf("main: starting net thread\n"); fflush(stdout);
     client.Start(kServerHost, kServerPort);
+    std::printf("main: net thread started, entering loop\n"); fflush(stdout);
 
     double last_ping_sent = 0.0;
+    int frame_counter = 0;
+    const double t_start = GetTime();
 
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
         client.SendFrame(message_type, ++demo.frame_seq, payload.data(), payload.size());
     };
 
-    while (!WindowShouldClose()) {
+    while (true) {
+        // Drive the platform message pump explicitly: in this raylib build
+        // EndDrawing()/WindowShouldClose() do NOT dispatch Win32 messages on
+        // their own (the window would be "Not Responding"). Poll once per
+        // frame, then honour the close flag.
+        PollInputEvents();
+        if (WindowShouldClose()) {
+            std::printf("main: window close requested\n"); fflush(stdout);
+            break;
+        }
+        const double frame_start = GetTime();
+        if ((frame_counter % 120) == 0) {
+            std::printf("main: frame %d state=%s elapsed=%.1fs fps=%d\n", frame_counter,
+                        ToString(demo.state), GetTime() - t_start, GetFPS());
+            fflush(stdout);
+        }
+        ++frame_counter;
         if (IsKeyPressed(KEY_ESCAPE)) {
+            std::printf("main: ESC pressed, exiting loop\n"); fflush(stdout);
             break;
         }
         if (IsKeyPressed(KEY_R)) {
@@ -145,6 +169,9 @@ int main() {
                 case NetEvent::Kind::kStateChanged:
                     demo.state = event->state;
                     demo.state_detail = event->detail;
+                    std::printf("main: net state -> %s (%s)\n", ToString(demo.state),
+                                demo.state_detail.c_str());
+                    fflush(stdout);
                     if (demo.state != ConnectionState::kConnected) {
                         // Fresh session on every reconnect; never reuse identity.
                         demo.login_sent = false;
@@ -274,10 +301,20 @@ int main() {
         DrawFPS(kScreenWidth - 90, 12);
 
         EndDrawing();
+
+        // Manual frame pacing fallback: hold each frame to ~1/60s even when
+        // raylib's built-in timing is not applied by the linked build.
+        const double frame_elapsed = GetTime() - frame_start;
+        if (frame_elapsed < kFrameSeconds) {
+            WaitTime(kFrameSeconds - frame_elapsed);
+        }
     }
 
     // Always stop the Network Thread before tearing the process down.
+    std::printf("main: loop exited, stopping net thread\n"); fflush(stdout);
     client.Stop();
+    std::printf("main: net stopped, closing window\n"); fflush(stdout);
     CloseWindow();
+    std::printf("main: exit\n"); fflush(stdout);
     return 0;
 }

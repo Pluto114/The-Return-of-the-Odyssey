@@ -89,3 +89,9 @@ target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+
+# Diagnostic: raylib window with no network/protocol (isolates environment
+# issues from client-logic hangs). Prints markers to stdout.
+add_executable(odyssey_window_probe tests/probe_window.cpp)
+target_link_libraries(odyssey_window_probe PRIVATE odyssey_client_dependencies)
+set_target_properties(odyssey_window_probe PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
