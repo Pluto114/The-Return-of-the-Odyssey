@@ -7,10 +7,9 @@
 int main() {
     std::printf("probe: before InitWindow\n");
     fflush(stdout);
-    // Present-path experiment: vsync + high-dpi change the swap/composition
-    // mode used by the Intel driver + glfw (screen showed clear+text but no
-    // primitives while the GPU framebuffer had them).
-    SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_HIGHDPI);
+    // NOTE: FLAG_WINDOW_HIGHDPI caused a framebuffer/clear-size mismatch on
+    // this scaled display (big black regions, content pushed to a corner).
+    // Keep the default framebuffer size - no experimental window flags.
     InitWindow(640, 360, "Odyssey window probe");
     std::printf("probe: after InitWindow\n");
     fflush(stdout);
