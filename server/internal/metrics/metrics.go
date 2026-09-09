@@ -1,0 +1,148 @@
+// Package metrics owns metric names, labels, and Prometheus exposition.
+package metrics
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	ErrInvalidSnapshot        = errors.New("metric snapshot values must not be negative")
+	ErrInvalidMatchDuration   = errors.New("match duration must not be negative")
+	ErrInvalidReconnectResult = errors.New("invalid reconnect result")
+)
+
+// ReconnectResult is a bounded label value. Keeping this set closed prevents
+// client-controlled values from creating unbounded Prometheus series.
+type ReconnectResult string
+
+const (
+	ReconnectSucceeded    ReconnectResult = "success"
+	ReconnectInvalidToken ReconnectResult = "invalid_token"
+	ReconnectExpired      ReconnectResult = "expired"
+	ReconnectBackendError ReconnectResult = "backend_error"
+)
+
+// Snapshot contains current server state sampled by the integration layer.
+type Snapshot struct {
+	OnlinePlayers     int
+	ActiveRooms       int
+	MatchQueuePlayers int
+}
+
+// Metrics centralizes the project's collector definitions and registry. Its
+// methods are safe for concurrent use through the Prometheus collectors.
+type Metrics struct {
+	registry *prometheus.Registry
+
+	onlinePlayers     prometheus.Gauge
+	activeRooms       prometheus.Gauge
+	matchQueuePlayers prometheus.Gauge
+	matches           prometheus.Counter
+	matchDuration     prometheus.Histogram
+	reconnectAttempts *prometheus.CounterVec
+}
+
+// New creates an isolated registry containing Go/process collectors and the
+// Odyssey application metrics. Isolation avoids duplicate registration in
+// tests and when multiple gameserver instances share one process.
+func New() *Metrics {
+	registry := prometheus.NewRegistry()
+	result := &Metrics{
+		registry: registry,
+		onlinePlayers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "odyssey",
+			Name:      "online_players",
+			Help:      "Current number of online players.",
+		}),
+		activeRooms: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "odyssey",
+			Name:      "active_rooms",
+			Help:      "Current number of active rooms.",
+		}),
+		matchQueuePlayers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "odyssey",
+			Name:      "match_queue_players",
+			Help:      "Current number of players waiting for a match.",
+		}),
+		matches: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "matches_total",
+			Help:      "Total number of matches formed.",
+		}),
+		matchDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "odyssey",
+			Name:      "match_duration_seconds",
+			Help:      "Time a completed match spent waiting for enough players.",
+			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
+		}),
+		reconnectAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "reconnect_attempts_total",
+			Help:      "Total number of reconnect attempts by bounded result.",
+		}, []string{"result"}),
+	}
+
+	registry.MustRegister(
+		prometheus.NewGoCollector(),
+		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
+		result.onlinePlayers,
+		result.activeRooms,
+		result.matchQueuePlayers,
+		result.matches,
+		result.matchDuration,
+		result.reconnectAttempts,
+	)
+	return result
+}
+
+// Handler exposes this module's isolated registry in Prometheus text format.
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
+// SetSnapshot validates the entire state sample before updating its gauges.
+// Prometheus gauges are individually thread-safe; callers should treat values
+// from one call as one logical sample even though a scrape may overlap it.
+func (m *Metrics) SetSnapshot(snapshot Snapshot) error {
+	if snapshot.OnlinePlayers < 0 || snapshot.ActiveRooms < 0 || snapshot.MatchQueuePlayers < 0 {
+		return ErrInvalidSnapshot
+	}
+
+	m.onlinePlayers.Set(float64(snapshot.OnlinePlayers))
+	m.activeRooms.Set(float64(snapshot.ActiveRooms))
+	m.matchQueuePlayers.Set(float64(snapshot.MatchQueuePlayers))
+	return nil
+}
+
+// ObserveMatch records one completed matchmaking wait.
+func (m *Metrics) ObserveMatch(duration time.Duration) error {
+	if duration < 0 {
+		return ErrInvalidMatchDuration
+	}
+	m.matches.Inc()
+	m.matchDuration.Observe(duration.Seconds())
+	return nil
+}
+
+// ObserveReconnect records one reconnect attempt using a bounded result label.
+func (m *Metrics) ObserveReconnect(result ReconnectResult) error {
+	if !validReconnectResult(result) {
+		return ErrInvalidReconnectResult
+	}
+	m.reconnectAttempts.WithLabelValues(string(result)).Inc()
+	return nil
+}
+
+func validReconnectResult(result ReconnectResult) bool {
+	switch result {
+	case ReconnectSucceeded, ReconnectInvalidToken, ReconnectExpired, ReconnectBackendError:
+		return true
+	default:
+		return false
+	}
+}

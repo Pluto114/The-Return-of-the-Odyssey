@@ -3,7 +3,7 @@
 适用阶段：Repository Scaffolding。统一版本后即可分模块开工；当前尚无可运行的游戏。
 本机实际完成程度另见 [VERIFICATION.md](VERIFICATION.md)，此处是全组应使用的配置。
 
-本机 2026-09-08 已启动全部四个容器。由于现有 MySQL 和 Windows 保留端口冲突，本机 .env 覆盖为 MYSQL_PORT=13306、PROMETHEUS_PORT=19090；Grafana 仍为 3000、Redis 为 6379。下文表格保留团队模板默认端口，实际访问以各自 .env 为准。
+本机 2026-09-08 已启动全部四个容器。Windows 保留端口范围覆盖默认的 MySQL 3306 和 Grafana 3000，本机 .env 覆盖为 MYSQL_PORT=33306、GRAFANA_PORT=33000；Prometheus 仍为 9090、Redis 仍为 6379。下文表格保留团队模板默认端口，实际访问以各自 .env 为准。
 
 ## 1. 版本基线
 
@@ -152,7 +152,7 @@ pwsh -File deploy/scripts/infra.ps1 -Action status
 
 Prometheus 的 gameserver target 在业务服务实现前显示 DOWN 属正常现象，不能当成游戏指标接入完成。
 容器通过 host.docker.internal:9091 采集宿主机服务；将来的指标监听不能只绑定宿主机 127.0.0.1，因此模板预留 0.0.0.0:9091，防火墙仅放行所需 Docker 本地网络。
-pprof 仍只绑定本机。Grafana 当前没有业务面板，目录已经 provision。
+pprof 仍只绑定本机。Grafana 已预配置 Odyssey Overview 面板；gameserver 尚未暴露指标时，应用面板显示 No data 属正常现象。
 
 验证实际基础设施：
 
