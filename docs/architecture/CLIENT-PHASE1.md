@@ -1,7 +1,9 @@
 # 角色 C：第一阶段客户端与接入契约
 
-状态：D1 中**协议无关**部分已实现并在 `feature/client`（fork: xxhsir）验证通过（CTest 3/3：core 235 + net 21 + logic 37）。
-本文描述客户端已落地的接口与边界，供 A（网络/协议）、B（游戏核心）、D（平台/联调）接入时对齐；跨团队 wire 协议未定稿前，凡涉及 A 的消息字段/ID 均为**占位**，见「5. 待定与 Owner」。
+状态：客户端已接入 **A 的 v0 协议**（feature/network 分支：MessageType 枚举、Ping/Pong/Login/PlayerInput/WorldSnapshot），
+在本地集成分支 `work/d2` 实现并验证（无头 CTest 4/4：core/net/logic/protocol）。
+`feature/client`（fork: xxhsir，PR #1）保持 D1 协议无关基线；待 A/B 合入 develop 后回填成熟改动。
+本机画面呈现（纯色图元上屏）存在 raylib/驱动环境问题，详见验证记录；逻辑/协议/网络联调不受影响。
 
 依据：[前三天计划](../plans/PHASE1-DAYS1-3.md)、[总体架构](../../ARCHITECTURE.md)、B 的 [核心交接文档](GAME-CORE-PHASE1.md)。
 
@@ -13,6 +15,8 @@
 | 流式组帧 | `client/src/core/FramingReader.{h,cpp}` | TCP 字节流 → 完整帧；拆包/粘包；坏 Magic/Version/超限/EOF 截断分类 |
 | 有界队列 | `client/src/core/BoundedQueue.h` | 线程安全有界队列：Push(丢最旧)/TryPush(拒绝)；Close 唤醒等待者 |
 | 网络线程 | `client/src/network/NetClient.{h,cpp}` | Asio TCP 客户端，独立 Network Thread；异步连接/读写；断连事件 |
+| 消息 ID 适配 | `client/src/network/ProtocolIds.h` | A 的 `MessageType` 枚举 → 客户端 constexpr 常量（单一映射点） |
+| 载荷编解码 | `client/src/network/PayloadCodec.h` | Ping/Pong/Login(Req/Resp)/Disconnect/PlayerInput/WorldSnapshot ↔ POD 视图 |
 | 事件/消息类型 | `client/src/network/NetMessage.h` | Network→Main 交接类型（状态变化/入站帧/出站丢弃） |
 | 输入 | `client/src/input/InputSample.h`、`InputSampler.{h,cpp}` | WASD→意图向量；对角限长；30Hz InputSeq 递增器 |
 | 快照视图 | `client/src/sync/GameView.h` | 按 B 语义应用**全量快照**：缺失实体移除、closed 清空、self ack |
@@ -39,19 +43,13 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 
 Frame Sequence 与 Input Sequence 相互独立（架构 §8.1）。客户端不使用 Sequence 做可靠性判断。
 
-## 3. 客户端希望服务器按下列语义提供消息（占位，A 提案后替换）
+## 3. 消息类型（已接入 A 的 v0 协议，非占位）
 
-消息类型值沿用架构 §9 区间，**以下是客户端目前使用的占位**，等待 A 的最小消息集（A，C 复核）：
+客户端消息 ID 统一来自 `common.proto::MessageType`（经 `ProtocolIds.h` 映射），不再使用占位值。
+已接入：Ping/Pong、LoginRequest/Response、Disconnect、PlayerInput（编码）、WorldSnapshot（解码→GameView）。
+Match/Stage/Reward 常量已声明，待 D 的 lobby 与后续阶段接入。
 
-| 占位 | 值 | 用途（C 侧） |
-| --- | --- | --- |
-| Ping / Pong | 系统区 0-99 内占位 `1`/`2` | 连通性演示；真实 ID/样例由 A 定 |
-| LoginRequest / LoginResponse | 待 A | D2 显示登录结果 |
-| MatchRequest / MatchFound | 待 A | D2 获取 Room/Player ID |
-| PlayerInput | 待 A | D2 起以 30Hz 发送意图（见 §6） |
-| WorldSnapshot | 待 A | D2 起驱动 GameView（见 §7） |
-
-客户端**不会**自行增改消息字段；A 发布生成源后 C 只做 DTO→客户端类型的映射适配。
+客户端**不自行增改消息字段**；A 更新 proto 后仅需重新生成（generate.ps1），必要时调整 `PayloadCodec` 映射。
 
 ## 4. Network Thread → Main Thread 交接契约（C 内部，供 A/D 评审）
 
@@ -71,51 +69,50 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 - Main Thread 每帧 Drain 队列后应用状态；不存在跨线程共享的可变世界对象。
 - 断连通知：EOF/连接重置 → `kDisconnected`；其余 IO/组帧错误 → `kFailed`（`detail` 含原因）。关闭窗口/ESC → `Stop()` 关闭 socket、join 线程后才退出进程。
 
-## 5. 客户端当前尚未实现 / 依赖清单（请各 Owner 关注）
+## 5. 依赖与联调清单（请各 Owner 关注）
 
-| # | 事项 | Owner | 客户端需要的输入 |
+| # | 事项 | 状态 | 客户端需要的输入 |
 | --- | --- | --- | --- |
-| 5.1 | 最小 proto 消息集 + Message ID 表 + Frame 十六进制固定样例 + 错误处理表 | A（C 复核） | 同一生成源；样例用于 T01/T02 真实验证 |
-| 5.2 | `PlayerInput`、`WorldSnapshot` 的 wire 字段定义（须覆盖 B 的域快照字段与 InputSeq 语义） | A（B 确认语义） | 见 §6/§7 映射表 |
-| 5.3 | 开发用登录（development 昵称 → Session/Player ID） | A | 客户端 Login 显示与后续匹配 |
-| 5.4 | 可联调的真实 Go Server 实例与地址/端口 | A + B + D | D2 起接入真实服务器验收（stub 只允许到 D1） |
-| 5.5 | B 的域语义确认（供自检样例）：出生 (10,10)、速度 5/s、地图 [0,20]²、30Hz/快照 10Hz、InputSeq 从 1 递增不回绕 | B（已在 GAME-CORE-PHASE1.md 声明） | 若协议字段名/单位与之不一致，请 A/B 修订后同步 |
+| 5.1 | 协议 v0（proto + Message ID 表） | ✅ A 已在 `feature/network` 提供并接入；**未合入 develop** | 合入 develop 后同步回填 |
+| 5.2 | PlayerInput/WorldSnapshot wire 字段 | ✅ 已按 A v0 实现编解码（PlayerInput `move`/`aim`/`shoot`；WorldSnapshot `self`+`players` 与 `last_processed_input`） | 真发/端到端待 Room 接入服务器 |
+| 5.3 | 开发登录（dev token → Session/Player ID） | ✅ 客户端已实现登录流程（A 网络层支持 dev 登录） | 真实服务器就绪后联调 |
+| 5.4 | 可联调的真实 Go Server + 地址/端口（及 D 的 lobby/匹配） | ⏳ A 网络层可独立起服；Room/匹配未接线 | 用于 D2/D3 验收（stub 只到 D1） |
+| 5.5 | B 域语义（出生/速度/地图/30Hz/InputSeq） | ✅ GAME-CORE-PHASE1 已声明，客户端对齐 | 轴符号与 `move` 方向在联调前确认 |
 
-> 5.4 的服务器在 D2 前就绪可让 C 提前做真实字节联调；D 提供的 Bot 用于 T09/T13，不阻塞 C 的 D1/D2 路径。
+## 6. 输入契约（C → 服务器）
 
-## 6. 输入契约（C → 服务器，D2 起生效）
+- 频率 30Hz；一 Tick 一报；InputSeq（uint32，从 1 递增，0 保留）与 Frame Sequence 独立。
+- **只发意图，不发坐标/速度/最终结果**。释放按键产生零向量（服务器停止）。
+- 键盘映射：A/D → 服务器平面 x ∓、W/S → y（客户端 x/z 语义）；对角输入归一化到单位圆。
+- 已按 A 的 `PlayerInput{input_seq, client_tick_ms, move(Vec2), aim, shoot}` 编码（`PayloadCodec::EncodePlayerInput`）。
+- 真发门控：需「已登录 + 已入房（MatchFound/Join 回执）」状态；当前 A 服务器未接 Room，先留门控，联调时放开。
 
-- 频率 30Hz；一 Tick 一报；InputSeq（uint32，从 1 递增）与 Frame Sequence 独立。
-- **只发意图，不发坐标/速度/最终结果**。释放按键即产生零向量（服务器据此停止）。
-- 当前键盘映射（**占位，签名随 A 字段定稿**）：A/D → dx ∓、W/S → dz；对角输入归一化到单位圆（不允许斜向加速）。
-- 客户端 `InputSequencer` 在「已连接且（将来）已入房」时每 30Hz 产出 `InputReport{seq, vector}`；实际发送在 PlayerInput wire 落地后由发送层接上（主循环预留）。
+## 7. 快照消费契约（服务器 → C）
 
-## 7. 快照消费契约（服务器 → C，D2 起生效）
+客户端已按 A 的 `WorldSnapshot`（`server_tick`/`last_processed_input`(self ack)/`self`/`players`(其他玩家，升序)/`monsters`/`stage`）解码并应用到 `GameView`：
 
-客户端 `GameView` 按 B 的域快照语义实现，等待 A 的 WorldSnapshot DTO 适配：
-
-| B 域快照字段 | 客户端 `PlayerView` 映射 | 处理规则 |
+| WorldSnapshot 字段 | 客户端 `PlayerView` 映射 | 处理规则 |
 | --- | --- | --- |
-| RoomID | `room_id:u32` | 展示 |
-| ServerTick | `server_tick:u32` | 展示/调试 |
-| Closed | `closed:bool` | closed=true → 清空视图 |
-| Player.ID（升序） | `id:u64` | 视图按键排序；缺失实体从最新完整快照移除 |
-| Position（服务器 x/y） | `x/z:float` | 客户端 x/z |
-| Velocity | `vx/vz` | 预留预测/插值 |
-| LastProcessedInputSeq | `last_processed_input_seq:u32` | self ack 显示（语义：本 Tick 使用的最新意图编号，非逐包确认） |
+| server_tick | `server_tick` | 展示/调试 |
+| last_processed_input | self 的 `last_processed_input_seq` | self ack（本 Tick 最新已应用意图，非逐包确认） |
+| self + players | `players`（id 升序） | 全量替换：缺失实体移除；self 常驻 |
+| position x/y | `x/z` | 客户端 x/z |
+| velocity | `vx/vz` | 预留预测/插值 |
+| monsters/stage | 暂未入视图 | 战斗阶段接入（含 HP/Stage 展示） |
 
 客户端不做权威判定；伤害/碰撞等由服务端计算。
 
-## 8. D1 联调测试中 C 的角色（对照计划清单）
+## 8. 联调测试中 C 的角色（对照计划清单）
 
-- **T01/T02**：C 提供/核对固定 Frame 字节样例与拆包粘包证据（已有 core 235 项含固定样例与逐字节边界）。
-- **T03**：非法帧处理为 A 主测，C 提供组帧错误分类供对齐。
-- **T07（D2）**：按键释放/停止发送 Input → 与 B 协作验证停止语义。
-- **T08/T11/T12（D3）**：双真实客户端同房互见、断线实体移除、Windows 构建——需 5.4 服务器就绪后执行。
-- **D3 统一提交**：联调当天由 C 选定 develop 提交号，全组同一提交构建、生成协议（计划 §7.5）。
+- **T01/T02**：Frame 固定字节样例/拆包粘包证据（core 538 项含 100 帧合并、逐字节边界）。
+- **T03**：非法帧策略由 A 主测；C 提供组帧错误分类供对齐。
+- **T04–T07（D2）**：登录/未入房输入/重复匹配由 A+D 主测；客户端实现就绪，随 5.4 服务器联调执行。
+- **T08/T11/T12（D3）**：双真实客户端同房互见、断线实体移除、Windows 构建——需 5.4 就绪。
+- **D3 统一提交**：联调当天由 C 选定 develop 提交号，全组同一提交构建、生成协议。
 
 ## 9. 未决 / 风险记录
 
-- 消息 ID 与 payload 全部为占位；A 定稿后 `main.cpp` 的 Ping 占位与发送层将替换为真实消息。
-- 输入轴符号（W 对应 dz 正负）未与服务器对齐，D2 联调前必须定稿，否则方向可能镜像。
+- 输入轴符号（W/S 在服务器平面上的正负）需在联调前与 A/B 定稿，防止方向镜像。
+- PlayerInput 真发、Match/入房门控、双人绘制画面验收，依赖 5.4（Room 接线 + D lobby）与本机渲染环境修复。
 - 预测/校正/插值（渲染平滑）不在本阶段；10Hz 阶梯感不作为失败项。
+- 本机 raylib 动态库呈现问题（纯色图元不上屏）记录在验证文档，属环境待办，不影响逻辑/网络联调。
