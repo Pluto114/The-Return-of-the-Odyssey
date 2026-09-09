@@ -7,6 +7,7 @@
 #pragma once
 
 #include "game.pb.h"
+#include "lobby.pb.h"
 #include "session.pb.h"
 #include "system.pb.h"
 
@@ -15,6 +16,32 @@
 #include <vector>
 
 namespace odyssey::client::network::payload {
+
+// ---- Matchmaking ----------------------------------------------------------
+
+struct MatchFoundData {
+    std::uint64_t room_id = 0;
+    std::string room_token;
+    std::vector<std::uint64_t> teammates;
+};
+
+inline std::vector<std::uint8_t> EncodeMatchRequest() {
+    odyssey::protocol::v1::MatchRequest proto;
+    std::vector<std::uint8_t> out(proto.ByteSizeLong());
+    proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
+    return out;
+}
+
+inline bool DecodeMatchFound(const std::vector<std::uint8_t>& payload, MatchFoundData& out) {
+    odyssey::protocol::v1::MatchFound proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.room_id = proto.room_id();
+    out.room_token = proto.room_token();
+    out.teammates.assign(proto.teammates().begin(), proto.teammates().end());
+    return out.room_id != 0;
+}
 
 // ---- Ping / Pong -----------------------------------------------------------
 

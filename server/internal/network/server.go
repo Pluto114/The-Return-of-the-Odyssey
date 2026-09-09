@@ -20,13 +20,27 @@ import (
 // An error return signals that the connection should be closed.
 type Handler func(c *Connection, h Header, payload []byte) error
 
+// DisconnectHandler is invoked once after a connection has been untracked.
+// It must return quickly; application cleanup that may block should run in a
+// separate goroutine.
+type DisconnectHandler func(c *Connection)
+
 // Server accepts TCP connections and dispatches each to its own Connection.
 type Server struct {
 	handler Handler
 	logger  *slog.Logger
 
-	mu    sync.Mutex
-	conns map[*Connection]struct{}
+	mu           sync.Mutex
+	conns        map[*Connection]struct{}
+	onDisconnect DisconnectHandler
+}
+
+// OnDisconnect installs the application lifecycle callback. Configure it
+// before Serve starts.
+func (s *Server) OnDisconnect(handler DisconnectHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onDisconnect = handler
 }
 
 // NewServer creates a server that will route every connection's decoded
@@ -78,7 +92,15 @@ func (s *Server) newConnection(conn net.Conn) *Connection {
 		snapshot: make(chan []byte, 1),
 		closed:   make(chan struct{}),
 	}
-	c.onClose = func() { s.untrack(c) }
+	c.onClose = func() {
+		s.untrack(c)
+		s.mu.Lock()
+		handler := s.onDisconnect
+		s.mu.Unlock()
+		if handler != nil {
+			handler(c)
+		}
+	}
 	return c
 }
 
@@ -99,6 +121,21 @@ func (s *Server) ActiveConns() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+// CloseConnections terminates every active connection. It is used during
+// server shutdown so Serve cancellation cannot leave connection goroutines
+// behind after the listener is closed.
+func (s *Server) CloseConnections() {
+	s.mu.Lock()
+	connections := make([]*Connection, 0, len(s.conns))
+	for c := range s.conns {
+		connections = append(connections, c)
+	}
+	s.mu.Unlock()
+	for _, c := range connections {
+		c.Close()
+	}
 }
 
 // Connection represents a single client socket. It owns two goroutines:
@@ -151,6 +188,16 @@ func (c *Connection) Context() interface{} {
 	c.ctxMu.Lock()
 	defer c.ctxMu.Unlock()
 	return c.ctx
+}
+
+// IsClosed reports whether teardown has started.
+func (c *Connection) IsClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 // Send queues an already-encoded frame (header + body) for writing. It is

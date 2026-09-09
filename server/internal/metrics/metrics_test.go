@@ -28,6 +28,7 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 	if err := metrics.ObserveReconnect(ReconnectSucceeded); err != nil {
 		t.Fatal(err)
 	}
+	metrics.ObserveTickWork(750 * time.Microsecond)
 
 	body := scrape(t, metrics)
 	for _, sample := range []string{
@@ -36,6 +37,7 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 		"odyssey_match_queue_players 2",
 		"odyssey_matches_total 1",
 		"odyssey_match_duration_seconds_count 1",
+		"odyssey_room_tick_work_duration_seconds_count 1",
 		`odyssey_reconnect_attempts_total{result="success"} 1`,
 	} {
 		if !strings.Contains(body, sample) {

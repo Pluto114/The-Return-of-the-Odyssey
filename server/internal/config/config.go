@@ -43,7 +43,7 @@ func Default() *Config {
 		Env:             "development",
 		TCPAddr:         "127.0.0.1:7777",
 		AdminAddr:       "127.0.0.1:8080",
-		MetricsAddr:     "0.0.0.0:19091", // 9091 reserved on this host; see PHASE1 §9
+		MetricsAddr:     "0.0.0.0:19091", // 9091 is reserved on the integration host
 		PprofAddr:       "127.0.0.1:6060",
 		TickHz:          30,
 		SnapshotHz:      10,

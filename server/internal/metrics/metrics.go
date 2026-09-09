@@ -44,6 +44,7 @@ type Metrics struct {
 	matchQueuePlayers prometheus.Gauge
 	matches           prometheus.Counter
 	matchDuration     prometheus.Histogram
+	tickWorkDuration  prometheus.Histogram
 	reconnectAttempts *prometheus.CounterVec
 }
 
@@ -80,6 +81,12 @@ func New() *Metrics {
 			Help:      "Time a completed match spent waiting for enough players.",
 			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
 		}),
+		tickWorkDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "odyssey",
+			Name:      "room_tick_work_duration_seconds",
+			Help:      "Room tick work duration, excluding the wait for the next tick.",
+			Buckets:   []float64{0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.02, 0.03333},
+		}),
 		reconnectAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "odyssey",
 			Name:      "reconnect_attempts_total",
@@ -95,9 +102,17 @@ func New() *Metrics {
 		result.matchQueuePlayers,
 		result.matches,
 		result.matchDuration,
+		result.tickWorkDuration,
 		result.reconnectAttempts,
 	)
 	return result
+}
+
+// ObserveTickWork records one room tick's active work duration.
+func (m *Metrics) ObserveTickWork(duration time.Duration) {
+	if duration >= 0 {
+		m.tickWorkDuration.Observe(duration.Seconds())
+	}
 }
 
 // Handler exposes this module's isolated registry in Prometheus text format.

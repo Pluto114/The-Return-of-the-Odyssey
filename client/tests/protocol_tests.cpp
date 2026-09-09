@@ -4,6 +4,7 @@
 #include "network/PayloadCodec.h"
 
 #include "common.pb.h"
+#include "lobby.pb.h"
 #include "session.pb.h"
 #include "system.pb.h"
 
@@ -29,9 +30,11 @@ int g_checks = 0;
 
 using odyssey::client::network::payload::DecodeDisconnect;
 using odyssey::client::network::payload::DecodeLoginResponse;
+using odyssey::client::network::payload::DecodeMatchFound;
 using odyssey::client::network::payload::DecodePong;
 using odyssey::client::network::payload::DecodeWorldSnapshot;
 using odyssey::client::network::payload::EncodeLoginRequest;
+using odyssey::client::network::payload::EncodeMatchRequest;
 using odyssey::client::network::payload::EncodePing;
 using odyssey::client::network::payload::EncodePlayerInput;
 using odyssey::client::network::payload::LoginRequestData;
@@ -126,6 +129,23 @@ void TestLoginResponseRejected() {
     CHECK(login.message == "version mismatch");
     CHECK(login.session_id == 0);
     CHECK(login.player_id == 0);
+}
+
+void TestMatchmakingWire() {
+    const auto request_bytes = EncodeMatchRequest();
+    odyssey::protocol::v1::MatchRequest request;
+    CHECK(request.ParseFromArray(request_bytes.data(), static_cast<int>(request_bytes.size())));
+
+    odyssey::protocol::v1::MatchFound found;
+    found.set_room_id(77);
+    found.set_room_token("room-77");
+    found.add_teammates(9);
+    odyssey::client::network::payload::MatchFoundData decoded;
+    CHECK(DecodeMatchFound(Serialize(found), decoded));
+    CHECK(decoded.room_id == 77);
+    CHECK(decoded.room_token == "room-77");
+    CHECK(decoded.teammates.size() == 1);
+    CHECK(decoded.teammates[0] == 9);
 }
 
 void TestPlayerInputWire() {
@@ -232,6 +252,7 @@ int main() {
     TestLoginRequestWire();
     TestLoginResponseOk();
     TestLoginResponseRejected();
+    TestMatchmakingWire();
     TestPlayerInputWire();
     TestWorldSnapshotDecode();
     TestDisconnectDecode();

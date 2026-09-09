@@ -12,15 +12,19 @@ import (
 	"flag"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/config"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
@@ -57,15 +61,16 @@ func main() {
 	logger := newLogger(cfg.LogLevel)
 	logger.Info("gameserver starting", "env", cfg.Env, "tcp", cfg.TCPAddr, "tick_hz", cfg.TickHz)
 
-	ids := &idAllocator{}
-
-	// handler runs on each connection's Reader goroutine. It validates the
-	// message against the session state machine, then dispatches.
-	handler := func(c *network.Connection, h network.Header, payload []byte) error {
-		return routeMessage(c, h, payload, ids, logger)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	metricSet := metrics.New()
+	app, err := newGameApplication(ctx, logger, metricSet)
+	if err != nil {
+		logger.Error("failed to initialize application", "err", err)
+		os.Exit(1)
 	}
-
-	srv := network.NewServer(handler, logger)
+	srv := network.NewServer(app.handle, logger)
+	srv.OnDisconnect(app.disconnected)
 	ln, err := net.Listen("tcp", cfg.TCPAddr)
 	if err != nil {
 		logger.Error("failed to listen", "addr", cfg.TCPAddr, "err", err)
@@ -73,8 +78,10 @@ func main() {
 	}
 	logger.Info("listening", "addr", cfg.TCPAddr)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	metricsServer := &http.Server{Addr: cfg.MetricsAddr, Handler: metricSet.Handler(), ReadHeaderTimeout: 2 * time.Second}
+	pprofServer := &http.Server{Addr: cfg.PprofAddr, Handler: http.DefaultServeMux, ReadHeaderTimeout: 2 * time.Second}
+	go serveHTTP(metricsServer, "metrics", logger, stop)
+	go serveHTTP(pprofServer, "pprof", logger, stop)
 
 	go func() {
 		if err := srv.Serve(ctx, ln); err != nil {
@@ -85,6 +92,19 @@ func main() {
 
 	<-ctx.Done()
 	logger.Info("shutting down", "active_conns", srv.ActiveConns())
+	srv.CloseConnections()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = metricsServer.Shutdown(shutdownCtx)
+	_ = pprofServer.Shutdown(shutdownCtx)
+}
+
+func serveHTTP(server *http.Server, name string, logger *slog.Logger, stop context.CancelFunc) {
+	logger.Info(name+" listening", "addr", server.Addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error(name+" server stopped", "err", err)
+		stop()
+	}
 }
 
 // routeMessage decodes the payload by MessageType, validates it against the

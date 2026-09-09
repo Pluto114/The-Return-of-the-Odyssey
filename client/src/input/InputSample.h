@@ -73,6 +73,7 @@ public:
 
     std::uint32_t LastSequence() const { return sequence_; }
     bool HasSent() const { return sequence_ > 0; }
+    void Reset() { sequence_ = 0; }
 
 private:
     std::uint32_t sequence_ = 0;

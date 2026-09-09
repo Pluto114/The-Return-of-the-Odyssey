@@ -70,6 +70,9 @@ void TestSequencerCountsEveryTick() {
     CHECK(second.vector.x == 0.0f);
     CHECK(second.vector.z == 0.0f);
     CHECK(sequencer.LastSequence() == 2);
+    sequencer.Reset();
+    CHECK(!sequencer.HasSent());
+    CHECK(sequencer.Tick(InputSample{}).sequence == 1);
 }
 
 void TestGameViewApplyAndRemoveMissing() {
@@ -86,6 +89,7 @@ void TestGameViewApplyAndRemoveMissing() {
     CHECK(view.RoomId() == 10);
     CHECK(view.ServerTick() == 100);
     CHECK(view.PlayerCount() == 2);
+    CHECK(view.Players().size() == 2);
 
     const PlayerView* self = view.Find(1);
     CHECK(self != nullptr);

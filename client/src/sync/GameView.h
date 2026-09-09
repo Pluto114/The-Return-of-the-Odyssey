@@ -30,8 +30,8 @@ struct PlayerView {
 };
 
 struct SnapshotView {
-    std::uint32_t room_id = 0;
-    std::uint32_t server_tick = 0;
+    std::uint64_t room_id = 0;
+    std::uint64_t server_tick = 0;
     bool closed = false;
     std::vector<PlayerView> players;  // expected sorted ascending by id
 };
@@ -46,8 +46,18 @@ public:
 
     std::size_t PlayerCount() const { return players_.size(); }
 
-    std::uint32_t RoomId() const { return room_id_; }
-    std::uint32_t ServerTick() const { return server_tick_; }
+    std::uint64_t RoomId() const { return room_id_; }
+    std::uint64_t ServerTick() const { return server_tick_; }
+
+    std::vector<PlayerView> Players() const {
+        std::vector<PlayerView> result;
+        result.reserve(players_.size());
+        for (const auto& [id, player] : players_) {
+            (void)id;
+            result.push_back(player);
+        }
+        return result;
+    }
     bool IsClosed() const { return closed_; }
 
     // Latest acknowledged input sequence for a given player id.
@@ -55,8 +65,8 @@ public:
 
 private:
     std::map<std::uint64_t, PlayerView> players_;
-    std::uint32_t room_id_ = 0;
-    std::uint32_t server_tick_ = 0;
+    std::uint64_t room_id_ = 0;
+    std::uint64_t server_tick_ = 0;
     bool closed_ = false;
 };
 
