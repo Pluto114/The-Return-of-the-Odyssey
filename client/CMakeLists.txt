@@ -8,12 +8,15 @@ find_package(asio CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+# raylib's static build does not propagate its glfw dependency; link it
+# explicitly (harmless for the dynamic case where raylib.dll loads glfw3.dll).
+find_package(glfw3 CONFIG REQUIRED)
 
 add_library(odyssey_client_dependencies INTERFACE)
 target_compile_features(odyssey_client_dependencies INTERFACE cxx_std_20)
 target_compile_definitions(odyssey_client_dependencies INTERFACE ASIO_STANDALONE)
 target_link_libraries(odyssey_client_dependencies INTERFACE
-    raylib asio::asio protobuf::libprotobuf imgui::imgui Threads::Threads)
+    raylib glfw asio::asio protobuf::libprotobuf imgui::imgui Threads::Threads)
 
 # Only generated protocol code is compiled in the scaffolding phase.
 set(protocol_sources)
