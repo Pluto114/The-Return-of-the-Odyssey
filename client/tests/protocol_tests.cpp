@@ -30,6 +30,7 @@ int g_checks = 0;
 using odyssey::client::network::payload::DecodeDisconnect;
 using odyssey::client::network::payload::DecodeLoginResponse;
 using odyssey::client::network::payload::DecodePong;
+using odyssey::client::network::payload::DecodeWorldSnapshot;
 using odyssey::client::network::payload::EncodeLoginRequest;
 using odyssey::client::network::payload::EncodePing;
 using odyssey::client::network::payload::EncodePlayerInput;
@@ -159,6 +160,58 @@ void TestPlayerInputWire() {
     }
 }
 
+void TestWorldSnapshotDecode() {
+    odyssey::protocol::v1::WorldSnapshot proto;
+    proto.set_server_tick(1234);
+    proto.set_last_processed_input(55);
+
+    auto* self = proto.mutable_self();
+    self->set_player_id(10);
+    self->mutable_position()->set_x(2.0f);
+    self->mutable_position()->set_y(3.0f);
+    self->mutable_velocity()->set_x(0.5f);
+    self->set_hp(90.0f);
+    self->set_max_hp(100.0f);
+    self->set_alive(true);
+
+    auto* other1 = proto.add_players();
+    other1->set_player_id(1);
+    other1->mutable_position()->set_x(5.0f);
+    other1->mutable_position()->set_y(6.0f);
+    auto* other2 = proto.add_players();
+    other2->set_player_id(2);
+    other2->mutable_position()->set_x(-1.0f);
+    other2->mutable_position()->set_y(-2.0f);
+
+    proto.add_monsters()->set_monster_id(900);
+    const auto bytes = Serialize(proto);
+
+    odyssey::client::network::payload::WorldSnapshotView view;
+    CHECK(DecodeWorldSnapshot(bytes, view));
+    CHECK(view.server_tick == 1234);
+    CHECK(view.last_processed_input == 55);
+    CHECK(view.has_self);
+    if (view.has_self) {
+        CHECK(view.self.id == 10);
+        CHECK(view.self.pos_x == 2.0f);
+        CHECK(view.self.pos_z == 3.0f);
+        CHECK(view.self.vel_x == 0.5f);
+        CHECK(view.self.hp == 90.0f);
+        CHECK(view.self.max_hp == 100.0f);
+        CHECK(view.self.alive);
+    }
+    CHECK(view.others.size() == 2);
+    if (view.others.size() == 2) {
+        CHECK(view.others[0].id == 1);
+        CHECK(view.others[0].pos_x == 5.0f);
+        CHECK(view.others[0].pos_z == 6.0f);
+        CHECK(view.others[1].id == 2);
+        CHECK(view.others[1].pos_x == -1.0f);
+        CHECK(view.others[1].pos_z == -2.0f);
+    }
+    CHECK(view.monster_count == 1);
+}
+
 void TestDisconnectDecode() {
     odyssey::protocol::v1::Disconnect proto;
     proto.set_reason(odyssey::protocol::v1::REASON_EVENT_BACKPRESSURE);
@@ -180,6 +233,7 @@ int main() {
     TestLoginResponseOk();
     TestLoginResponseRejected();
     TestPlayerInputWire();
+    TestWorldSnapshotDecode();
     TestDisconnectDecode();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

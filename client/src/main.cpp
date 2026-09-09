@@ -53,6 +53,8 @@ using odyssey::client::network::payload::LoginRequestData;
 using odyssey::client::network::payload::LoginResponseData;
 using odyssey::client::network::payload::PingData;
 using odyssey::client::network::payload::PongData;
+using odyssey::client::network::payload::SnapshotPlayerView;
+using odyssey::client::network::payload::WorldSnapshotView;
 using odyssey::client::sync::GameView;
 
 struct DemoState {
@@ -85,6 +87,9 @@ struct DemoState {
 
     // Server-pushed note (Disconnect reason etc.).
     std::string server_note;
+
+    // WorldSnapshot ingestion stats.
+    std::uint64_t snapshots_received = 0;
 };
 
 }  // namespace
@@ -214,6 +219,35 @@ int main() {
                         } else {
                             demo.server_note = "server disconnect (payload decode failed)";
                         }
+                    } else if (event->message.message_type == kWorldSnapshot) {
+                        // Authoritative full snapshot: replace the whole view.
+                        WorldSnapshotView snap;
+                        if (payload::DecodeWorldSnapshot(event->message.payload, snap)) {
+                            ++demo.snapshots_received;
+                            odyssey::client::sync::SnapshotView sv;
+                            sv.server_tick = static_cast<std::uint32_t>(snap.server_tick);
+                            sv.room_id = 0;  // v0 DTO has no room id; set when routed
+                            sv.closed = false;
+                            const auto add = [&sv, &snap](const SnapshotPlayerView& p) {
+                                odyssey::client::sync::PlayerView v;
+                                v.id = p.id;
+                                v.x = p.pos_x;
+                                v.z = p.pos_z;
+                                v.vx = p.vel_x;
+                                v.vz = p.vel_z;
+                                if (snap.has_self && p.id == snap.self.id) {
+                                    v.last_processed_input_seq = snap.last_processed_input;
+                                }
+                                sv.players.push_back(v);
+                            };
+                            if (snap.has_self) {
+                                add(snap.self);
+                            }
+                            for (const auto& other : snap.others) {
+                                add(other);
+                            }
+                            game_view.Apply(sv);
+                        }
                     }
                     break;
                 case NetEvent::Kind::kOutboundDropped:
@@ -294,7 +328,8 @@ int main() {
         const std::string view_line =
             "View: players=" + std::to_string(game_view.PlayerCount()) +
             " room=" + std::to_string(game_view.RoomId()) +
-            " tick=" + std::to_string(game_view.ServerTick()) + " (awaiting snapshot slice)";
+            " tick=" + std::to_string(game_view.ServerTick()) +
+            " snaps=" + std::to_string(demo.snapshots_received);
         DrawText(view_line.c_str(), 24, 310, 20, GRAY);
 
         DrawText("R: retry connect   |   ESC / close window: quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);

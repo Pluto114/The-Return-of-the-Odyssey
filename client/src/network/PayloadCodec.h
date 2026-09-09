@@ -72,6 +72,66 @@ inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) 
     return out;
 }
 
+// ---- WorldSnapshot (S -> C, 10Hz authoritative) ----------------------------
+
+struct SnapshotPlayerView {
+    std::uint64_t id = 0;
+    float pos_x = 0.0f;  // server x -> client x
+    float pos_z = 0.0f;  // server y -> client z
+    float vel_x = 0.0f;
+    float vel_z = 0.0f;
+    float hp = 0.0f;
+    float max_hp = 0.0f;
+    bool alive = true;
+};
+
+struct WorldSnapshotView {
+    std::uint64_t server_tick = 0;
+    std::uint32_t last_processed_input = 0;  // self ack (server-applied input_seq)
+    bool has_self = false;
+    SnapshotPlayerView self;
+    std::vector<SnapshotPlayerView> others;  // ascending by id
+    std::size_t monster_count = 0;           // D2: decoded later with combat UI
+};
+
+inline SnapshotPlayerView MapPlayer(const odyssey::protocol::v1::PlayerSnapshot& p) {
+    SnapshotPlayerView out;
+    out.id = p.player_id();
+    if (p.has_position()) {
+        out.pos_x = p.position().x();
+        out.pos_z = p.position().y();
+    }
+    if (p.has_velocity()) {
+        out.vel_x = p.velocity().x();
+        out.vel_z = p.velocity().y();
+    }
+    out.hp = p.hp();
+    out.max_hp = p.max_hp();
+    out.alive = p.alive();
+    return out;
+}
+
+inline bool DecodeWorldSnapshot(const std::vector<std::uint8_t>& payload,
+                                WorldSnapshotView& out) {
+    odyssey::protocol::v1::WorldSnapshot proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.server_tick = proto.server_tick();
+    out.last_processed_input = proto.last_processed_input();
+    out.has_self = proto.has_self();
+    if (proto.has_self()) {
+        out.self = MapPlayer(proto.self());
+    }
+    out.others.clear();
+    out.others.reserve(proto.players_size());
+    for (int i = 0; i < proto.players_size(); ++i) {
+        out.others.push_back(MapPlayer(proto.players(i)));
+    }
+    out.monster_count = static_cast<std::size_t>(proto.monsters_size());
+    return true;
+}
+
 // ---- Disconnect ------------------------------------------------------------
 
 struct DisconnectData {
