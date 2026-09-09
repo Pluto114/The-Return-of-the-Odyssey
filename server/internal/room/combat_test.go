@@ -26,7 +26,7 @@ func TestConcurrentCombatConsumers(t *testing.T) {
 		result(t, receipt, nil)
 		var workers sync.WaitGroup
 		workers.Go(func() {
-			for seq := uint64(1); seq <= 40; seq++ {
+			for seq := uint32(1); seq <= 40; seq++ {
 				err := r.Input(11, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true})
 				if err != nil && !errors.Is(err, room.ErrClosed) {
 					t.Errorf("input: %v", err)

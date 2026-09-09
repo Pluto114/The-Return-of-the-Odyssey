@@ -21,7 +21,7 @@ type Player struct {
 	ID                      ID
 	Position                Vec2
 	Velocity                Vec2
-	LastProcessedInputSeq   uint64
+	LastProcessedInputSeq   uint32
 	BaseStats, CurrentStats CombatStats
 	Health                  float64
 	Alive                   bool

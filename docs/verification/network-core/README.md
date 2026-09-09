@@ -1,57 +1,58 @@
-# A/B 协议集成验证
+# A/B 网络与战斗集成验证
 
-验证日期：2026-09-08。结论：A 的 TCP/Protobuf/开发登录可以连接 B 的 Room 并返回双人移动快照；这是测试装配通过，正式游戏入口与完整战斗联调尚未完成。
+更新日期：2026-09-09。结论：已同步 A 的 `feature/network` 最新提交 `fe4d84c`。A 新增的正式 DTO 转换、Room Join/Leave、按玩家快照分发、七类战斗事件分发、最新快照槽和房间关闭通知，已与 B 核心合并到 `codex/network-core-integration`。测试装配已跑通双 TCP 客户端的登录、入房、移动、开关卡、射击、伤害、死亡与清场事件；正式 gameserver 与 D 的匹配器仍未接线。
 
-## 版本与工作区
+## 版本与处理原则
 
-- A：`origin/feature/network`，`0558a601ca0759256758be0b4cb5fd7950e8fe4b`，包含 `91fdf06` 的 v0 协议。
-- B：`775fb5a07909e483ba0bdfdfcdc00ce4f9210754`。
-- 合并提交：`aa983d3`，无冲突；本记录对应其后的适配与测试变更，分支 `codex/network-core-integration`。
-- 本机使用独立工作区 `E:\The-Return-of-the-Odyssey-integration`。原 `E:\The-Return-of-the-Odyssey` 的 B 分支和未提交 go.mod/go.sum 修改保留。工具目录通过本机忽略的 junction 复用，不属于交付文件。
-- 本轮未改 `.proto`，不替 A/C 决定协议语义。生成产物保持忽略，每台机器从协议源重新生成。
+- A 基线：`fe4d84cf29fd93422d961f3b73a9b3ff34ffd3c8`。
+- B 基线：`775fb5a07909e483ba0bdfdfcdc00ce4f9210754`。
+- 集成分支：`codex/network-core-integration`，独立工作区 `E:\The-Return-of-the-Odyssey-integration`。
+- A 已把 B 的两个核心提交带入自己的分支。合并冲突以 A 的新协议和正式 `convert/router` 实现为基准，删除昨日临时 `protocolbridge`，避免保留两套 DTO 边界。
+- 原工作区 `E:\The-Return-of-the-Odyssey` 中用户未提交的 `CMakePresets.json`、`server/go.mod`、`server/go.sum` 均未改动。
+- 本轮未修改 `.proto` 的字段或 Message ID；协议仍由 A 审核、C 确认客户端兼容性。
 
-## 已做的适配与修复
+## 本轮发现并处理的问题
 
-1. `game.Input.Seq` / `Player.LastProcessedInputSeq` 改为 uint64，保留 Frame Sequence 的 uint32；超过 32 位的序号有 Protobuf 往返和 World 应用验证。
-2. 新增 `server/internal/protocolbridge`，不让 game/room 依赖 Protobuf。Input 转换角度、校验有限数/移动长度、重复或超大序号跨度，药水请求明确返回未实现。调用方只在 Room.Input 入队成功后推进 lastAccepted，不能使用快照 ack 或 Frame Sequence 代替。
-3. Snapshot 按接收者区分 self/其他实体，并使用该玩家实际应用的输入确认；保留高半区实体 ID。怪物 archetype_id 必须由配置提供映射，HP 不能无损转为 int32 时返回错误，不静默取整。
-4. 复现并修复 A 的一个网络退出缺陷：Reader EOF 关闭发送 channel 后，Writer 仍阻塞，此时 Send 会 `panic: send on closed channel`。修复前新增回归测试稳定失败；修复后通过。通过锁将队列准入与关闭串行化，关闭队列时同步拒绝新发送；待 A 复核此最小修复。
-5. 修正协议生成脚本的成功提示，避免生成了消息后仍提示空 schema。
+1. A 已将协议重新对齐 B：Input Sequence 为 uint32、Aim 为 Vec2；快照使用 float HP 并携带玩家属性、怪物和 StageState；七类 B 事件均有 wire 消息。昨日为旧协议做的 uint64/角度/整型 HP 适配已撤销。
+2. 保留并合并 EOF/Send 并发回归修复：Reader 关闭可靠队列时，Send 不会再出现 `send on closed channel`；队列准入与关闭由同一把锁串行化。
+3. gameserver 的 `sendMessage` 原先忽略可靠队列拒绝，调用方会把失败当成功。现已在 `Send=false` 时返回明确错误。
+4. A 的 Input converter 注释要求药水未实现时不能静默丢弃，但代码实际忽略 `use_potion=true`。现已返回 `ErrPotionUnsupported` 并增加测试。
+5. A 的 EventDispatcher 原先从 10Hz `LatestSnapshot()` 读取关卡编号。StartStage 在非快照 Tick 执行时会把 `StageStartedEvent.stage_index` 发成旧值。B 的 `game.Event` 现直接携带权威 `StageIndex`，StageStarted/StageCleared/TeamDefeated 均在产生事件时写入；converter 与 dispatcher 不再依赖滞后快照。
+6. 协议生成脚本成功提示已与实际消息生成结果一致。
 
-## 已执行检查
+## 验证范围
 
-| 检查 | 结果与边界 |
-| --- | --- |
-| 协议生成 | Go、C++、descriptor set 生成成功 |
-| `go test -count=1 -timeout=90s ./server/...` | 全部通过，包含 A 的网络/Session、B 的移动/战斗、桥接与真实 TCP 测试 |
-| `go vet ./server/...` | 通过 |
-| server / bot `go mod verify` | 均通过；Bot 尚无业务源码 |
-| Linux `go test -race -count=1 -timeout=90s ./...` | server 全包通过，包含新增 TCP 与 EOF 回归 |
-| 离线 core-demo | 仍为第 25 Tick 清场，HP 100、怪物 0、死亡 2、命中 4、开火 5 |
-| C++ 协议库构建 | 编译进行中，结果待补；不等于真实 C++ 客户端联调 |
+`server/cmd/gameserver/integration_test.go` 使用真实 loopback TCP、A 的 Frame codec/network.Server、开发登录、Session、convert、SnapshotDispatcher、EventDispatcher，以及 B 的 Room。测试侧仅用固定房间 99 代替 D 的匹配器。
 
-真实 TCP 用例见 `server/cmd/gameserver/integration_test.go`：使用 A 的 Frame codec、network.Server、真实 Ping/Login handler 和 Session，测试侧替代 D 的匹配器分配固定房间 99，等待 B 的 Join 回执再切换 InRoom。两个 Go 测试端通过 loopback TCP 发包，覆盖分段写入 Ping、登录、匹配响应、输入入队、权威 Tick、按接收者发送快照，并比较相同 ServerTick 的双方位置。输入序号 1 与 Frame Sequence 900/1000 分开验证。
+双连接测试覆盖：分片 Ping、登录、等待 Join 回执、MatchFound、两名玩家分别移动、相同 ServerTick 的双方视图一致、Input Sequence 与 Frame Sequence 分离、StartStage、ProjectileSpawn/Destroy、Damage、Death、StageCleared。两端都必须收到同一个关卡编号和完整事件类型集合。
 
-测试装配仅验证正常路径；无真实 C++ 玩家、正式匹配、鉴权、断线 Leave 重试、战斗事件 dispatcher 或慢 Socket 队列策略。测试结束显式关闭连接，不能据此认定 A 的服务停机资源回收已完善。测试 handler 的错误退出不是生产用输入拒绝策略，接线时需实现下表的不掉线处理。
+当前已通过：
 
-## 必须对齐的事项
+- 协议 Go/C++/descriptor 重新生成。
+- Windows `go test -count=1 -timeout=90s ./server/...`。
+- Windows `go vet ./server/...`。
+- Linux/WSL `go test -race -count=1 -timeout=90s ./...`；初次暴露 Router 测试读取未发布 Stats 的时序假设，修正等待 Tick 收尾后全包通过。
+- server、bot `go mod verify`；Bot 仍无业务源码。
+- core-demo 固定结果：第 25 Tick 清场，HP 100、怪物 0、死亡 2、命中 4、开火 5。
+- C++ `odyssey_protocol` 在 MSVC 14.51 / vcpkg x64-windows 下重新编译通过。这只验证生成代码编译，不代表真实 C++ 客户端联调。
 
-| 负责人 | 差异 / 当前处理 | 下一步完成标准 |
+## 尚未完成及需要 A/D 决策的事项
+
+| 负责人 | 当前问题 | 完成标准 |
 | --- | --- | --- |
-| A/B/C | wire HP/maxHP/Damage 为 int32，B 权威 HP/伤害为 float64，允许小数。目前 Snapshot 对小数 HP 返回 ErrLossyHealth | 明确浮点、定点或一致的舍入语义，覆盖小数伤害与存活显示；当前适配不能用于任意战斗配置 |
-| A/B/C | WorldSnapshot 无 Room ID、Stage/Failed/Closed，且无明确团灭消息 | 确定会话房间上下文、阶段恢复和团灭/异常关闭的表达，真实两端终局一致 |
-| A/B/C | StageStarted.seed 与 StageCleared.difficulty_score 为 uint32；B Plan 对应值为 int64/float64，领域事件未含完整阶段元数据 | 明确范围与转换，并提供 stage index、seed、数量等来源；不截断强转 |
-| A/B/C | B 事件无完整 archetype/子弹销毁原因，边界与清场回收也需映射；武器系统未实现 | 配置提供稳定 archetype；确认 reason、weapon_id 和 alive flags（当前暂按示例 alive=1、weapon_id=0）；补战斗事件桥接 |
-| A/C | 协议要求输入跨度 >64 拒绝且不掉线并校正，但缺少明确的非终止拒绝/校正反馈约定 | 路由处理 ErrInputGap、重复输入、药水未实现和队列满，定义客户端恢复；禁止把所有适配错误直接用作断线原因 |
-| A/D | events.md 建议 Reliable 满时丢最早且无 v1 补发，和原架构/B 的可靠事件溢出关闭策略不同。当前实际网络是单个 FIFO256，Send 满时返回 false，而 main.sendMessage 忽略返回值 | 统一可靠投递/失败语义；拆分最新快照槽与可靠队列，处理发送失败；慢连接饱和测试证明事件不会静默丢失或伪报成功 |
-| A/D | 正式 gameserver 只完成 Ping/Login/Session 校验，Match/Input 尚无 Room 接线；测试只用固定房间 | 接入真实匹配、Join 回执、输入游标、单消费者 dispatcher、Leave 重试、Done 注销、客户端关闭通知 |
-| A/C/D | 尚无 Go↔C++ 固定字节样例互解、两个真实客户端移动/战斗、Bot 压力和监控证据 | 按前三天计划执行并记录提交、日志、实际结果；本次不宣称全组验收通过 |
+| A/D | 正式 gameserver 仍只处理 Ping/Login；Match/Input 分支未连接 A 新增 router/dispatcher，断线 Leave 与房间注册也未接入 | D 提供房间分配/注册接口后，入口异步等待 Join 回执，订阅输出，EOF 重试 Leave，Done 注销 |
+| A/D | main.sendMessage 已返回发送拒绝，但 EventDispatcher 和 CloseWatcher 仍忽略 `sink.Send=false`，战斗事件或关闭通知仍可能静默丢失 | 统一 v1 策略并处理 dispatcher 返回值；慢 Socket 饱和测试证明要么完整投递，要么明确断开/恢复，不能静默丢失 |
+| A/B/C | `docs/protocol/events.md` 仍写可靠队列满时“丢最早且不要断连”，与 B 的 event_backpressure 关闭约定及“可靠”语义冲突 | A/D 选定策略并同步文档、代码、指标和客户端恢复流程 |
+| A/C | `sequence.md` 仍要求 gap >64 拒绝和强制校正；新 proto 注释也写拒绝 gap，但 converter/World 只拒绝 0、重复和倒退，没有实现跨度 64 | 决定保留或删除 gap 规则；若保留，定义非断线反馈并增加跨 Router 的恢复测试 |
+| A/B/C | proto 注释写移动长度 <=1.05 由服务端拒绝；B 实际对任意有限向量归一化，converter 不做长度拒绝 | 选择“拒绝”或“归一化”作为唯一契约，更新文档和跨语言样例 |
+| A | Server 取消只关闭 listener；现有连接、Writer 失败后的 Reader 唤醒、CloseAfterFlush 排空超时仍需生命周期测试 | 停服能在限定时间内关闭 listener 与全部连接，无 goroutine/房间绑定泄漏 |
+| C/D | 尚无真实 C++ 客户端、Bot、鉴权/恢复、跨房隔离、5 分钟双人运行和压力/监控证据 | 按前三天计划记录提交、协议版本、环境、日志及实际结果后，才算全组联调通过 |
 
-另有仅通过代码检查发现的 A 网络生命周期待查项：Serve 取消只关闭 listener；Writer 写失败和 CloseAfterFlush 完成后没有主动唤醒仍在读取的 Reader，run 先等待 Reader；发送排空未设超时。这些不属于本次已修复的 EOF/Send panic，需 A 增加独立回归后处理。
+本次 TCP 测试中的固定房间不是生产匹配实现，Join 当前在测试 handler 内等待，不能直接复制进 Reader goroutine。正式接线应把可能阻塞到下个 Tick 的 Join/Leave 编排移出 Reader。
 
 ## 复现
 
-在本集成分支仓库根目录运行（PowerShell 7，先完成 SETUP 工具配置）：
+在集成工作区根目录运行：
 
 ```powershell
 . ./scripts/env.ps1
@@ -62,10 +63,10 @@ go run ./server/cmd/core-demo
 pwsh -File scripts/build/build.ps1 -Target client
 ```
 
-Linux/WSL 配置兼容的 Go 与 C 编译器，先生成协议，再在 server 目录执行：
+Linux/WSL 在 `server` 目录运行：
 
 ```sh
 GOWORK=off CGO_ENABLED=1 go test -race -count=1 -timeout=90s ./...
 ```
 
-不依赖 Docker/MySQL/Redis，因此上述结果不代表之前 Docker Hub 拉取问题已解决。完整协作顺序见 [最新协作需求](../../plans/CURRENT-COLLABORATION.md)。
+以上检查不依赖 Docker/MySQL/Redis，不代表之前 Docker Hub 拉取问题已解决。协作入口见 [最新需求](../../plans/CURRENT-COLLABORATION.md)。

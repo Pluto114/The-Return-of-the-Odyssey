@@ -12,105 +12,157 @@ import "common.proto";
 // Message IDs: 300..399 (see common.proto::MessageType).
 // Owned by Role A for protocol; Room implementation owned by Role B.
 // Sending authoritative state here is a bug. See docs/protocol/snapshots.md.
+//
+// Field semantics are aligned with B's server/internal/game domain types
+// (game.Input, game.Snapshot, game.Event) as of codex/game-core-phase1.
+//   - Input sequences are uint32, strictly increasing from 1, never wrap.
+//   - Aim is a server-plane Vec2 (X/Y), not an angle. When Shoot is true the
+//     Aim vector must be non-zero.
 // ============================================================================
 
 // C -> S. Local-player intent. Sent at the client's input rate (typically the
 // server tick rate, 30Hz). The Input Sequence lives here; the Frame Sequence
 // in the header is unrelated and must not be reused for input gating.
 message PlayerInput {
-  // Strictly increasing per-session counter. Server treats gaps > 64 as
-  // ReasonableRejectInvalidInputGapTooLarge to bound rewind cost.
-  uint64 input_seq = 1;
+  // Strictly increasing per-session counter, starting at 1 and never wrapping.
+  // 0 is reserved for "unacknowledged". Server rejects stale/duplicate/gap.
+  uint32 input_seq = 1;
   // Local clock at capture. Informational only; server does not gate on it.
   uint64 client_tick_ms = 2;
-  // Normalized move vector (WASD). Length is server-validated (<= 1.05).
+  // Move intent as a server-plane 2D vector (WASD). Length is server-validated
+  // (<= 1.05); zero means "stop moving". NaN/Inf rejected.
   Vec2 move = 3;
-  // Aim heading in degrees, 0..360 around +X. Server normalizes.
-  float aim_deg = 4;
-  // Shoot button held this tick.
+  // Aim heading as a server-plane 2D vector (X/Y). Must be finite; when
+  // shoot == true it must be non-zero. Server normalizes to unit length for
+  // projectile velocity, but stores the finite vector.
+  Vec2 aim = 4;
+  // Shoot button held this tick (auto-fire handled by server cooldown).
   bool shoot = 5;
-  // Use-potion trigger. Server checks Potion availability.
+  // Use-potion trigger. Server checks Potion availability. Reserved for a
+  // later combat extension; not yet consumed by the room.
   bool use_potion = 6;
 }
 
-// S -> C. Authoritative world state, 10Hz. Includes a self-snapshot and an
-// entity list. Reliable delivery; the Snapshot Queue (Latest Wins) drops
-// stale frames before they hit the wire.
+// S -> C. Authoritative world state, 10Hz. Includes a self-snapshot plus the
+// full set of other players and monsters. Reliable delivery; the Snapshot
+// Queue (Latest Wins) drops stale frames before they hit the wire.
 message WorldSnapshot {
   // Server tick number, monotonically increasing per room.
   uint64 server_tick = 1;
   // Last input_seq the server has applied for THIS player. Clients use this
   // for reconciliation (see docs/protocol/sequence.md).
-  uint64 last_processed_input = 2;
-  // Full self snapshot (Position/Velocity/HP/Weapon/etc.).
+  uint32 last_processed_input = 2;
+  // Full self snapshot (Position/Velocity/HP/Stats/Aim).
   PlayerSnapshot self = 3;
-  // All other live entities (other players + monsters + projectiles if any).
-  // Order is stable within a tick but NOT preserved across ticks.
-  repeated EntitySnapshot entities = 4;
+  // All other live players, ordered by player ID ascending (stable).
+  repeated PlayerSnapshot players = 4;
+  // All live monsters in this room. Full-set semantics: a monster missing
+  // from this list is gone and the client must remove it. Projectiles are NOT
+  // included here — they travel as ProjectileSpawn/Destroy events only.
+  repeated MonsterSnapshot monsters = 5;
+  // Stage state (index / seed / state / monsters remaining).
+  StageState stage = 6;
 }
 
-// Snapshot row for the receiving player. Includes everything the HUD + the
-// prediction engine need.
+// Snapshot row for a player. Includes everything the HUD + prediction engine
+// need. Other players and self share this shape.
 message PlayerSnapshot {
   uint64 player_id = 1;
   Vec2 position = 2;
   Vec2 velocity = 3;
-  float aim_deg = 4;
-  int32 hp = 5;
-  int32 max_hp = 6;
-  uint32 weapon_id = 7;     // static id; client resolves display
-  uint32 state_flags = 8;   // bitfield, defined per release (e.g. ALIVE=1)
+  Vec2 aim = 4;              // finite aim vector (server plane)
+  float hp = 5;
+  float max_hp = 6;
+  // Base stats resolved for display; see common.proto::StatModifier for the
+  // modifier model. Attack/defense/move-speed are floats.
+  float attack = 7;
+  float defense = 8;
+  float move_speed = 9;
+  bool alive = 10;           // false => dead, input suppressed for this entity
 }
 
-// Compact snapshot for non-self entities (other players + monsters). Mirrors
-// PlayerSnapshot but is allowed to drop fields that only the local player
-// needs. Adding fields here is backwards-compatible; removing is not.
-message EntitySnapshot {
-  uint64 entity_id = 1;
-  uint32 archetype_id = 2; // monster archetype or 0 for players
-  Vec2 position = 3;
-  Vec2 velocity = 4;
-  float aim_deg = 5;
-  int32 hp = 6;
-  int32 max_hp = 7;
-  uint32 state_flags = 8;
+// Compact snapshot for a monster. Mirrors B's game.MonsterView. Only what the
+// client needs to render and show HP; no target/AI internals.
+message MonsterSnapshot {
+  uint64 monster_id = 1;
+  Vec2 position = 2;
+  Vec2 velocity = 3;
+  float hp = 4;
+  float max_hp = 5;
+  // Monster state: 0 idle / 1 chase / 2 attack / 3 dead. Aligned with
+  // entity.MonsterState enum.
+  uint32 state = 6;
 }
 
-// S -> C. Reliable event. A hit landed. The client renders the number pop;
-// the actual HP is updated via the next WorldSnapshot.
-message DamageEvent {
-  uint64 attacker_id = 1;
-  uint64 victim_id = 2;
-  int32 amount = 3;
-  // Weapon or monster archetype that caused the damage (used for FX).
-  uint32 cause_archetype = 4;
+// Stage state embedded in WorldSnapshot. Aligned with game/stage.View.
+message StageState {
+  uint32 index = 1;
+  // Seed recorded in the stage plan; informational for deterministic replay.
+  int64 seed = 2;
+  // Stage lifecycle state: 0 waiting / 1 playing / 2 clear / 3 reward /
+  // 4 preparing next / 5 failed / 6 closed. Aligned with stage.State.
+  uint32 state = 3;
+  uint32 monsters_remaining = 4;
 }
 
-// S -> C. Reliable event. An entity died. The HP row may still show >0 until
-// the next snapshot arrives; the client should suppress input for the victim.
-message DeathEvent {
-  uint64 victim_id = 1;
-  uint32 cause_archetype = 2;
+// ---------------------------------------------------------------------------
+// Reliable events. One message per B's game.EventKind. The server stamps
+// ServerTick; the client must not silently drop these (see events.md).
+// ---------------------------------------------------------------------------
+
+// S -> C. A new stage began playing (monsters spawned). Reliable.
+message StageStartedEvent {
+  uint32 stage_index = 1;
+  uint64 server_tick = 2;
 }
 
-// S -> C. Reliable event. A projectile entered the world. The client creates
-// a Visual Projectile from this; the authoritative one lives in Room.
+// S -> C. A projectile entered the world. The client creates a visual
+// projectile from this; the authoritative one lives in Room.
 message ProjectileSpawnEvent {
   uint64 projectile_id = 1;
   uint64 owner_id = 2;
-  uint32 archetype_id = 3;
-  Vec2 position = 4;
-  Vec2 velocity = 5;
+  Vec2 position = 3;
+  Vec2 velocity = 4;
+  // Server tick at which this projectile expires if it hits nothing.
+  uint64 expires_at_tick = 5;
+  uint64 server_tick = 6;
 }
 
-// S -> C. Reliable event. A projectile left the world (hit/expired/owner dead).
+// S -> C. A projectile left the world (hit, expired, or owner dead). B emits
+// no reason code here; clients play a single destroy effect. Reliable.
 message ProjectileDestroyEvent {
   uint64 projectile_id = 1;
-  ReasonCode reason = 2;
+  uint64 owner_id = 2;
+  Vec2 position = 3;
+  uint64 server_tick = 4;
 }
 
-// S -> C. Reliable event. An entity left the visible set (despawned, not a
-// kill). Separate from DeathEvent so clients can play despawn vs death FX.
-message EntityRemovedEvent {
-  uint64 entity_id = 1;
+// S -> C. Damage was applied. The actual HP updates via the next snapshot;
+// this drives the number pop / hit FX. Reliable.
+message DamageEvent {
+  uint64 source_id = 1;   // attacker (player or monster)
+  uint64 target_id = 2;   // victim (player or monster)
+  float amount = 3;
+  float remaining_health = 4; // victim HP after this damage
+  uint64 server_tick = 5;
+}
+
+// S -> C. An entity died (player OR monster — unified in B's domain). The HP
+// row may still show >0 until the next snapshot; suppress input for the victim.
+message DeathEvent {
+  uint64 entity_id = 1;   // who died
+  uint64 killer_id = 2;   // who killed it (0 if environmental/expired)
+  uint64 server_tick = 3;
+}
+
+// S -> C. The stage was cleared (all monsters dead). Reliable.
+message StageClearedEvent {
+  uint32 stage_index = 1;
+  uint64 server_tick = 2;
+}
+
+// S -> C. The team was defeated (all players dead). Reliable.
+message TeamDefeatedEvent {
+  uint32 stage_index = 1;
+  uint64 server_tick = 2;
 }

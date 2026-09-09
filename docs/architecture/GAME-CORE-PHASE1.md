@@ -28,7 +28,7 @@ World 本身不是并发对象；线上只通过 Room 调用。A/D 不得保留�
 | 速度 | 5 单位/秒；长度小于 1 的模拟摇杆方向保留幅度；较长向量限制至单位长度 |
 | 非法浮点数 | NaN / Inf 拒绝，极大但有限的向量正常限长且不溢出 |
 | 停止 | 零输入在下一次模拟应用；输入入队后满 200ms 失效，在随后第一次 Tick 停止（正常调度约 200–233.34ms） |
-| 输入序号 | uint64，与 A 的 v0 PlayerInput 对齐；从 1 开始，严格递增，0 保留给未确认，不接受回绕。重连使用新会话；Frame Sequence 仍为 uint32 |
+| 输入序号 | uint32，从 1 开始，严格递增；0 保留给未确认，不接受回绕。重连使用新会话，A/C 须对齐 wire 字段 |
 | 入退房队列 | 容量 64，每 Tick 最多处理 16 条，先于移动输入处理 |
 | 输入队列 | 容量 256，每 Tick 最多处理 128 条，入队满时返回 ErrQueueFull |
 | 快照出口 | 容量 1，未消费的旧快照被替换；另可读取 LatestSnapshot 的独立副本 |
@@ -60,7 +60,7 @@ Bot 继续通过协议访问网络入口，不直接 import 该包。
 | `r.TickSamples()` / `r.Stats()` | D 消费耗时样本和统计，不把 Prometheus 回调或网络操作放入 Room |
 | `r.Done()` / `r.Close()` | D 监听 Done 后从注册表移除房间；Close 可重复调用并等待清理；父 context 取消也会关闭 |
 
-完整示例见 [可执行示例](../../server/internal/room/example_test.go)。本集成分支已合入 A 的生成协议、Session 和 TCP 入口；测试装配与正式接线的区别见 [A/B 联调记录](../verification/network-core/README.md)。匹配算法仍由 D 实现。
+完整示例见 [可执行示例](../../server/internal/room/example_test.go)。A 已实现生成协议、Session、TCP 基础入口和 Room 编排组件；正式入口与 D 的匹配算法尚未接线，当前状态见 [A/B 集成验证](../verification/network-core/README.md)。
 
 ### 入退房结果与错误处理
 

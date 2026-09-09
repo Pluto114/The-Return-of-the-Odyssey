@@ -29,6 +29,7 @@ import (
 // unwind after a graceful rejection (the Disconnect frame has been queued and
 // will be flushed by the writer before the socket closes).
 var errClosing = errors.New("gameserver: closing connection after rejection")
+var errSendRejected = errors.New("gameserver: reliable send queue rejected frame")
 
 // serverIDAllocator issues sequential session/player IDs for development
 // login. Atomic counters are enough for Phase 1 (no persistence).
@@ -199,7 +200,9 @@ func sendMessage(c *network.Connection, h network.Header, mt protocol.MessageTyp
 	if err != nil {
 		return err
 	}
-	c.Send(frame)
+	if !c.Send(frame) {
+		return errSendRejected
+	}
 	return nil
 }
 

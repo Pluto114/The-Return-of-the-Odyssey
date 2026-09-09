@@ -54,12 +54,12 @@ Reward / PreparingNextStage 枚举仅保留给后续状态转换，没有虚构�
 
 实体 ID 使用 uint64：玩家 ID 范围为 1 到 2^63−1，怪物/子弹使用高半区并在同一 World 内单调分配。A/C 需要保留 64 位，不可缩窄到 uint32。
 这里的 State / EventKind 都是领域枚举，A 应显式映射到自己维护的协议枚举和消息 ID，不直接当成 wire 编号。
-游戏内没有 Proto、Socket、数据库或 Prometheus 依赖。集成分支通过独立的 protocolbridge 包适配 A 的 DTO；协议源未改动，战斗事件映射仍待字段对齐，见 [A/B 联调记录](../verification/network-core/README.md)。
+游戏内没有 Proto、Socket、数据库或 Prometheus 依赖。A 的 `server/internal/convert` 和 `router` 在领域层外完成协议映射；正式服务入口仍待接线。
 
 ## 4. 状态与事件出口
 
 事件包括 StageStarted、ProjectileSpawned、ProjectileDestroyed、DamageDealt、EntityDied、StageCleared、TeamDefeated。
-它们携带 ServerTick、相关实体 ID，以及事件需要的位置/速度/伤害/剩余生命。A 可按事件类型拆分为正式协议消息。
+它们携带 ServerTick、StageIndex、相关实体 ID，以及事件需要的位置/速度/伤害/剩余生命。A 已按七类事件拆分正式协议消息；StageIndex 由事件产生时写入，不能从滞后的快照推断。
 子弹不进入 WorldSnapshot，符合原架构的视觉子弹策略；C 根据 Spawn / Destroy 事件维护视觉效果。
 怪物快照只含 ID、位置、速度、HP/MaxHP 和 State，不暴露目标 ID、攻击冷却计时或内部决策状态。
 
@@ -70,7 +70,7 @@ Room 的事件队列默认容纳 64 个 Tick 批次，只有一个消费者，�
 
 ## 5. 明确留待后续的部分
 
-- A：射击/战斗事件协议、消息路由、Session 可靠发送与断线通知。
+- A：将已完成的射击/战斗事件映射接入正式入口，补 Session 可靠发送失败与断线通知。
 - C：怪物/HP 展示、视觉子弹、事件效果、预测与插值。
 - D：匹配调用、监控映射、真实 Bot / 联调 / 性能验证。
 - B：装备修改器、药水、奖励选择、下一关转换、Director 规则、逐阶段性能采样和优化。

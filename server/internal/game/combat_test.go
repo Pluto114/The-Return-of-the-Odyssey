@@ -55,7 +55,7 @@ func countEvents(events []game.Event, kind game.EventKind) int {
 func TestProjectileDamageDeathAndStageClear(t *testing.T) {
 	w := encounter(t, game.DefaultConfig(), target(13, 10, 40))
 	var events []game.Event
-	for seq := uint64(1); seq <= 30; seq++ {
+	for seq := uint32(1); seq <= 30; seq++ {
 		events = append(events, stepInput(t, w, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true})...)
 	}
 	s := w.Snapshot()
@@ -65,6 +65,11 @@ func TestProjectileDamageDeathAndStageClear(t *testing.T) {
 	for kind, want := range map[game.EventKind]int{game.StageStarted: 1, game.DamageDealt: 2, game.EntityDied: 1, game.StageCleared: 1, game.TeamDefeated: 0} {
 		if got := countEvents(events, kind); got != want {
 			t.Fatalf("event %d: %d, want %d", kind, got, want)
+		}
+	}
+	for _, e := range events {
+		if (e.Kind == game.StageStarted || e.Kind == game.StageCleared) && e.StageIndex != 1 {
+			t.Fatalf("stage event %d has index %d, want 1", e.Kind, e.StageIndex)
 		}
 	}
 	spawns, destroys := map[entity.ID]bool{}, map[entity.ID]bool{}
@@ -95,7 +100,7 @@ func TestProjectileDamageDeathAndStageClear(t *testing.T) {
 func TestFireCooldownIndependentOfPacketRate(t *testing.T) {
 	for _, packets := range []int{1, 10} {
 		w := encounter(t, game.DefaultConfig(), target(19, 19, 1e6))
-		var seq uint64
+		var seq uint32
 		var events []game.Event
 		for range 30 {
 			now := time.Unix(100, 0).Add(time.Duration(w.Tick()) * game.TickInterval)
@@ -219,8 +224,13 @@ func TestTeamDefeatStopsCombatAndDeadPlayerMovement(t *testing.T) {
 	if w.Snapshot().Stage.State != stage.Failed || w.Snapshot().Players[0].Alive || countEvents(events, game.TeamDefeated) != 1 {
 		t.Fatal("team wipe missing")
 	}
+	for _, e := range events {
+		if e.Kind == game.TeamDefeated && e.StageIndex != 1 {
+			t.Fatalf("team defeat has stage index %d, want 1", e.StageIndex)
+		}
+	}
 	pos := w.Snapshot().Players[0].Position
-	for seq := uint64(2); seq < 30; seq++ {
+	for seq := uint32(2); seq < 30; seq++ {
 		e := stepInput(t, w, game.Input{Seq: seq, Direction: entity.Vec2{X: 1}, Aim: entity.Vec2{X: 1}, Shoot: true})
 		if len(e) != 0 {
 			t.Fatal("combat continued after defeat")
@@ -249,7 +259,7 @@ func TestProjectileCapacityAndLifetime(t *testing.T) {
 	c.Combat.PlayerStats.AttackCooldownTicks = 1
 	w := encounter(t, c, target(19, 19, 100))
 	active, maxActive := 0, 0
-	for seq := uint64(1); seq <= 25; seq++ {
+	for seq := uint32(1); seq <= 25; seq++ {
 		for _, e := range stepInput(t, w, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true}) {
 			if e.Kind == game.ProjectileSpawned {
 				active++
@@ -307,7 +317,7 @@ func TestCombatReplayIsDeterministic(t *testing.T) {
 		m.Stats.Attack = 10
 		w := encounter(t, game.DefaultConfig(), m, target(17, 12, 100))
 		var events []game.Event
-		for seq := uint64(1); seq <= 180; seq++ {
+		for seq := uint32(1); seq <= 180; seq++ {
 			events = append(events, stepInput(t, w, game.Input{Seq: seq, Aim: entity.Vec2{X: 1}, Shoot: true})...)
 		}
 		return events, w.Snapshot()

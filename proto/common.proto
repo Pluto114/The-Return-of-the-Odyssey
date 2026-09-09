@@ -41,11 +41,17 @@ enum MessageType {
   // ---- 300..399: Game / Entity / Combat ----------------------------------
   MSG_PLAYER_INPUT = 300;
   MSG_WORLD_SNAPSHOT = 310;
+  // Reliable events, aligned with B's game.EventKind (7 kinds). The four v0
+  // names below keep their original numbers; three stage-level events are
+  // appended. MSG_ENTITY_REMOVED is retained for future despawn semantics.
   MSG_PROJECTILE_SPAWN = 320;
   MSG_PROJECTILE_DESTROY = 321;
-  MSG_DAMAGE_EVENT = 322;
-  MSG_DEATH_EVENT = 323;
-  MSG_ENTITY_REMOVED = 324;
+  MSG_DAMAGE_EVENT = 322;        // B: DamageDealt
+  MSG_DEATH_EVENT = 323;         // B: EntityDied
+  MSG_ENTITY_REMOVED = 324;      // reserved for despawn (not yet emitted)
+  MSG_STAGE_STARTED_EVENT = 325; // B: StageStarted
+  MSG_STAGE_CLEARED_EVENT = 326; // B: StageCleared
+  MSG_TEAM_DEFEATED_EVENT = 327; // B: TeamDefeated
 
   // ---- 400..499: Stage / Reward ------------------------------------------
   MSG_STAGE_STARTED = 400;
@@ -97,6 +103,12 @@ enum ReasonCode {
   REASON_PROJECTILE_EXPIRED = 300;
   REASON_PROJECTILE_HIT = 301;
   REASON_OWNER_DEAD = 302;
+
+  // room / event backpressure (aligned with B's room.CloseReason)
+  REASON_ROOM_CLOSED = 310;          // "requested" — room shut down on demand
+  REASON_ROOM_IDLE = 311;            // "idle" — empty room reclaimed
+  REASON_EVENT_BACKPRESSURE = 312;   // "event_backpressure" — reliable event
+                                     //   queue saturated; room closed
 }
 
 // Session lifecycle state owned by the server. Clients read this back from

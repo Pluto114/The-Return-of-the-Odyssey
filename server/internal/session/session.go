@@ -114,6 +114,7 @@ type Session struct {
 	state     State
 	sessionID uint64
 	playerID  uint64
+	roomID    uint64
 }
 
 // New returns a Session in the Connected state with no identity.
@@ -133,6 +134,24 @@ func (s *Session) Identity() (sessionID, playerID uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sessionID, s.playerID
+}
+
+// RoomID returns the room the session is bound to, or 0 when not in a room.
+// The router (not this package) is the sole writer; it stores the raw room.ID
+// as uint64 to avoid importing the room package into the state machine.
+func (s *Session) RoomID() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.roomID
+}
+
+// BindRoom records the room binding. It is called by the router after a
+// successful Join receipt (nil result). A non-zero id marks the session as
+// in-room; zero clears the binding on leave.
+func (s *Session) BindRoom(id uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.roomID = id
 }
 
 // Accept validates whether mt is legal in the current state, returning the

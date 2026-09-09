@@ -30,7 +30,7 @@ func run() error {
 		return err
 	}
 	counts := map[string]int{}
-	for seq := uint64(1); seq <= 300; seq++ {
+	for seq := uint32(1); seq <= 300; seq++ {
 		s := w.Snapshot()
 		if s.Stage.State != stage.Playing {
 			break

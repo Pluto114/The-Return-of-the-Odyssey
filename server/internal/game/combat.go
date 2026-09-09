@@ -51,6 +51,7 @@ const (
 // protobuf references. Projectile state intentionally stays out of snapshots.
 type Event struct {
 	Kind                         EventKind
+	StageIndex                   uint32
 	ServerTick                   uint64
 	EntityID, SourceID, TargetID entity.ID
 	Position, Velocity           entity.Vec2
@@ -103,7 +104,7 @@ func (w *World) StartStage(plan stage.Plan) error {
 		w.monsters[id] = &monsterState{monster: entity.Monster{ID: id, Position: spawn.Position, BaseStats: spawn.Stats, CurrentStats: spawn.Stats,
 			Health: spawn.Stats.MaxHealth, Radius: spawn.Radius, AttackRange: spawn.AttackRange, State: entity.MonsterIdle}}
 	}
-	w.emit(Event{Kind: StageStarted, ServerTick: w.tick + 1})
+	w.emit(Event{Kind: StageStarted, StageIndex: plan.Index, ServerTick: w.tick + 1})
 	return nil
 }
 
@@ -253,10 +254,10 @@ func (w *World) stepCombat() {
 	// A simultaneous final kill and team wipe is defeat; no rewards are granted.
 	if w.livingPlayers() == 0 {
 		w.stage.State = stage.Failed
-		w.emit(Event{Kind: TeamDefeated})
+		w.emit(Event{Kind: TeamDefeated, StageIndex: w.stage.Index})
 	} else if len(w.monsters) == 0 {
 		w.stage.State = stage.StageClear
-		w.emit(Event{Kind: StageCleared})
+		w.emit(Event{Kind: StageCleared, StageIndex: w.stage.Index})
 	}
 	if w.stage.State != stage.Playing {
 		for _, m := range w.monsters {

@@ -12,17 +12,19 @@ import (
 	"time"
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/convert"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
-	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/protocolbridge"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/router"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 	"google.golang.org/protobuf/proto"
 )
 
-// This test-only assembly reuses A's actual TCP codec, login handlers and Session
-// with B's actual Room. Fixed room assignment replaces D's missing matchmaker;
-// it is NOT a production matchmaking implementation or a C++ client test.
+// This test-only assembly reuses A's TCP codec, login handlers, Session,
+// convert and dispatchers with B's Room. Fixed room assignment replaces D's
+// missing matchmaker; it is not a production matcher or a C++ client test.
 func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r, err := room.Start(ctx, 99, room.DefaultConfig())
@@ -32,7 +34,8 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ids := &idAllocator{}
 	var conns sync.Map
-	var cursors sync.Map
+	snapshots := router.NewSnapshotDispatcher()
+	events := router.NewEventDispatcher()
 	handler := func(c *network.Connection, h network.Header, b []byte) error {
 		conns.Store(c, true)
 		mt := pb.MessageType(h.MessageType)
@@ -55,43 +58,28 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 			if !sess.Transition(session.StateMatching) {
 				return fmt.Errorf("match transition failed")
 			}
-			joined, err := r.Join(room.SessionID(sid), entity.ID(pid))
-			if err != nil {
+			if err := router.Join(sess, r, 99); err != nil {
 				return err
 			}
-			select {
-			case err := <-joined:
-				if err != nil {
-					return err
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			// Queue MatchFound before exposing InRoom to the snapshot dispatcher.
+			// Queue MatchFound before subscribing the connection to room output.
 			if err := sendMessage(c, h, pb.MessageType_MSG_MATCH_FOUND, &pb.MatchFound{RoomId: 99}); err != nil {
 				return err
 			}
-			if !sess.Transition(session.StateInRoom) {
-				return fmt.Errorf("join transition failed")
-			}
+			snapshots.Subscribe(entity.ID(pid), c)
+			events.Subscribe(entity.ID(pid), c)
 			return nil
 		}
 		var input pb.PlayerInput
 		if err := proto.Unmarshal(b, &input); err != nil {
 			return err
 		}
-		var last uint64
-		if old, ok := cursors.Load(c); ok {
-			last = old.(uint64)
-		}
-		intent, err := protocolbridge.Input(&input, last)
+		intent, err := convert.Input(&input)
 		if err != nil {
 			return err
 		}
 		if err := r.Input(room.SessionID(sid), intent); err != nil {
 			return err
 		}
-		cursors.Store(c, intent.Seq)
 		return nil
 	}
 	srv := network.NewServer(handler, logger)
@@ -103,32 +91,21 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 	}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.Serve(ctx, ln) }()
-	pumpDone := make(chan struct{})
+	snapshotDone := make(chan struct{})
 	go func() {
-		defer close(pumpDone)
-		for s := range r.Snapshots() {
-			conns.Range(func(key, value any) bool {
-				c := key.(*network.Connection)
-				sess, ok := c.Context().(*session.Session)
-				if !ok || sess.State() != session.StateInRoom {
-					return true
-				}
-				_, pid := sess.Identity()
-				out, err := protocolbridge.Snapshot(s, entity.ID(pid), nil)
-				if err != nil {
-					return true
-				}
-				if err := sendMessage(c, network.Header{}, pb.MessageType_MSG_WORLD_SNAPSHOT, out); err != nil {
-					t.Errorf("snapshot send: %v", err)
-				}
-				return true
-			})
-		}
+		defer close(snapshotDone)
+		snapshots.Run(r)
+	}()
+	eventDone := make(chan struct{})
+	go func() {
+		defer close(eventDone)
+		events.Run(r)
 	}()
 	defer func() {
 		cancel()
 		r.Close()
-		<-pumpDone
+		<-snapshotDone
+		<-eventDone
 		conns.Range(func(key, value any) bool { key.(*network.Connection).Close(); return true })
 		select {
 		case err := <-serveDone:
@@ -215,15 +192,15 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 		}
 		peers = append(peers, p)
 	}
-	send(peers[0], pb.MessageType_MSG_PLAYER_INPUT, 900, &pb.PlayerInput{InputSeq: 1, Move: &pb.Vec2{X: 1}, AimDeg: 90}, false)
-	send(peers[1], pb.MessageType_MSG_PLAYER_INPUT, 1000, &pb.PlayerInput{InputSeq: 1, Move: &pb.Vec2{Y: 1}, AimDeg: 180}, false)
+	send(peers[0], pb.MessageType_MSG_PLAYER_INPUT, 900, &pb.PlayerInput{InputSeq: 1, Move: &pb.Vec2{X: 1}, Aim: &pb.Vec2{Y: 1}}, false)
+	send(peers[1], pb.MessageType_MSG_PLAYER_INPUT, 1000, &pb.PlayerInput{InputSeq: 1, Move: &pb.Vec2{Y: 1}, Aim: &pb.Vec2{X: -1}}, false)
 	states := []map[uint64]*pb.WorldSnapshot{{}, {}}
 	var common uint64
 	for attempt := 0; attempt < 15 && common == 0; attempt++ {
 		for i, p := range peers {
 			var s pb.WorldSnapshot
 			read(p, pb.MessageType_MSG_WORLD_SNAPSHOT, &s)
-			if s.LastProcessedInput == 1 && len(s.Entities) == 1 {
+			if s.LastProcessedInput == 1 && len(s.Players) == 1 {
 				states[i][s.ServerTick] = &s
 				if states[1-i][s.ServerTick] != nil {
 					common = s.ServerTick
@@ -239,10 +216,68 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 	if a.Self.PlayerId != peers[0].id || b.Self.PlayerId != peers[1].id || a.Self.Position.X <= 10 || b.Self.Position.Y <= 10 {
 		t.Fatal("authoritative movement did not reach both recipients")
 	}
-	if !proto.Equal(a.Self.Position, b.Entities[0].Position) || !proto.Equal(b.Self.Position, a.Entities[0].Position) {
+	if !proto.Equal(a.Self.Position, b.Players[0].Position) || !proto.Equal(b.Self.Position, a.Players[0].Position) {
 		t.Fatal("same-tick views disagree")
 	}
 	if a.LastProcessedInput != 1 || b.LastProcessedInput != 1 {
 		t.Fatal("Frame Sequence contaminated input ack")
+	}
+
+	plan := stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{{
+		Position: entity.Vec2{X: 13, Y: 10}, Radius: 0.4, AttackRange: 1,
+		Stats: entity.CombatStats{MaxHealth: 20, AttackCooldownTicks: 30},
+	}}}
+	started, err := r.StartStage(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range peers {
+		var event pb.StageStartedEvent
+		read(p, pb.MessageType_MSG_STAGE_STARTED_EVENT, &event)
+		if event.StageIndex != 1 || event.ServerTick == 0 {
+			t.Fatalf("wrong stage-start event: index=%d tick=%d", event.StageIndex, event.ServerTick)
+		}
+	}
+
+	send(peers[0], pb.MessageType_MSG_PLAYER_INPUT, 901, &pb.PlayerInput{
+		InputSeq: 2, Aim: &pb.Vec2{X: 1}, Shoot: true,
+	}, false)
+	for _, p := range peers {
+		counts := make(map[pb.MessageType]int)
+		for attempt := 0; attempt < 64 && counts[pb.MessageType_MSG_STAGE_CLEARED_EVENT] == 0; attempt++ {
+			p.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			h, body, err := network.ReadFrame(p.reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mt := pb.MessageType(h.MessageType)
+			if mt == pb.MessageType_MSG_WORLD_SNAPSHOT {
+				continue
+			}
+			counts[mt]++
+			if mt == pb.MessageType_MSG_STAGE_CLEARED_EVENT {
+				var event pb.StageClearedEvent
+				if err := proto.Unmarshal(body, &event); err != nil {
+					t.Fatal(err)
+				}
+				if event.StageIndex != 1 || event.ServerTick == 0 {
+					t.Fatalf("wrong stage-clear event: index=%d tick=%d", event.StageIndex, event.ServerTick)
+				}
+			}
+		}
+		for _, mt := range []pb.MessageType{
+			pb.MessageType_MSG_PROJECTILE_SPAWN,
+			pb.MessageType_MSG_PROJECTILE_DESTROY,
+			pb.MessageType_MSG_DAMAGE_EVENT,
+			pb.MessageType_MSG_DEATH_EVENT,
+			pb.MessageType_MSG_STAGE_CLEARED_EVENT,
+		} {
+			if counts[mt] == 0 {
+				t.Fatalf("peer %d did not receive %s; counts=%v", p.id, mt, counts)
+			}
+		}
 	}
 }

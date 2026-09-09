@@ -71,11 +71,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 
 func (s *Server) newConnection(conn net.Conn) *Connection {
 	c := &Connection{
-		conn:    conn,
-		handler: s.handler,
-		logger:  s.logger,
-		out:     make(chan []byte, 256),
-		closed:  make(chan struct{}),
+		conn:     conn,
+		handler:  s.handler,
+		logger:   s.logger,
+		out:      make(chan []byte, 256),
+		snapshot: make(chan []byte, 1),
+		closed:   make(chan struct{}),
 	}
 	c.onClose = func() { s.untrack(c) }
 	return c
@@ -106,6 +107,12 @@ func (s *Server) ActiveConns() int {
 //
 // Only the Writer goroutine performs socket writes, so the Reader (and thus
 // the Room Tick via Handler) can never be blocked by a slow client.
+//
+// Outbound traffic is split into two queues with different loss policies:
+//   - out (reliable): bounded FIFO, every frame must reach the peer in order.
+//   - snapshot (latest-wins): capacity 1, a new snapshot replaces a pending
+//     stale one. Used for 10Hz world snapshots where only the newest state
+//     matters (docs/protocol/snapshots.md).
 type Connection struct {
 	conn    net.Conn
 	handler Handler
@@ -113,7 +120,10 @@ type Connection struct {
 
 	// out is the bounded outbound queue drained by the Writer goroutine.
 	out    chan []byte
-	sendMu sync.Mutex // serializes queue admission with queue closure
+	sendMu sync.Mutex // serializes reliable queue admission with queue closure
+	// snapshot is the latest-wins slot (capacity 1). A slow consumer drops
+	// stale snapshots, never blocks the publisher (the room tick).
+	snapshot chan []byte
 
 	closeOnce sync.Once // protects socket close + onClose
 	queueOnce sync.Once // protects close(c.out)
@@ -163,6 +173,34 @@ func (c *Connection) Send(frame []byte) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// SendSnapshot queues a latest-wins snapshot frame. If a previous snapshot is
+// still pending, it is replaced by the new one (stale world state is never
+// worth sending once a newer snapshot exists). It never blocks the caller
+// beyond the replace, so a slow consumer cannot stall the room tick.
+//
+// The byte slice must not be mutated after SendSnapshot returns. It returns
+// false only when the connection has already closed.
+func (c *Connection) SendSnapshot(frame []byte) bool {
+	select {
+	case <-c.closed:
+		return false
+	default:
+	}
+	for {
+		select {
+		case c.snapshot <- frame:
+			return true
+		default:
+			// Slot full: evict the stale snapshot, then retry the send. The
+			// eviction loop is bounded by capacity 1, so this never spins.
+			select {
+			case <-c.snapshot:
+			default:
+			}
+		}
 	}
 }
 
@@ -237,16 +275,55 @@ func (c *Connection) readLoop(done chan<- struct{}) {
 func (c *Connection) writeLoop(done chan<- struct{}) {
 	defer close(done)
 	w := bufio.NewWriter(c.conn)
-	for frame := range c.out {
-		if _, err := w.Write(frame); err != nil {
-			c.logger.Debug("connection write failed", "err", err)
-			return
+	for {
+		// Prefer the latest snapshot (non-blocking) so stale world state never
+		// lingers behind the reliable queue.
+		select {
+		case frame := <-c.snapshot:
+			if !c.writeFrame(w, frame) {
+				return
+			}
+			continue
+		default:
 		}
-		// Flush per frame so a partially-written frame is never observed by
-		// the peer, and so backpressure propagates to the queue promptly.
-		if err := w.Flush(); err != nil {
-			c.logger.Debug("connection flush failed", "err", err)
-			return
+
+		select {
+		case frame, ok := <-c.out:
+			if !ok {
+				// Reliable queue closed: drain any pending snapshot, then exit.
+				for {
+					select {
+					case f := <-c.snapshot:
+						if !c.writeFrame(w, f) {
+							return
+						}
+					default:
+						return
+					}
+				}
+			}
+			if !c.writeFrame(w, frame) {
+				return
+			}
+		case frame := <-c.snapshot:
+			if !c.writeFrame(w, frame) {
+				return
+			}
 		}
 	}
+}
+
+// writeFrame writes a single frame and flushes it so a partial frame is never
+// observed by the peer. It reports false on any error, signalling the writer
+// to unwind.
+func (c *Connection) writeFrame(w *bufio.Writer, frame []byte) bool {
+	if _, err := w.Write(frame); err != nil {
+		c.logger.Debug("connection write failed", "err", err)
+		return false
+	}
+	if err := w.Flush(); err != nil {
+		c.logger.Debug("connection flush failed", "err", err)
+		return false
+	}
+	return true
 }

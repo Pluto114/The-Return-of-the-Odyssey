@@ -1,13 +1,13 @@
-# 最新协作需求：A/B 首次集成与剩余接线
+# 最新协作需求：A/B 网络与战斗集成
 
-同步日期：2026-09-08。B 原交付分支：`codex/game-core-phase1`；本轮集成分支：`codex/network-core-integration`。
+同步日期：2026-09-09。A 最新基线：`feature/network@fe4d84c`；B 原基线：`codex/game-core-phase1@775fb5a`；集成分支：`codex/network-core-integration`。
 本页是本轮协作入口；详细接口以 [首关战斗契约](../architecture/COMBAT-CORE.md) 为准，移动基础见 [原移动契约](../architecture/GAME-CORE-PHASE1.md)。
 
 ## 当前可用成果
 
 B 已实现权威移动、房间生命周期、玩家生命、怪物追击/攻击、子弹碰撞、伤害/死亡事件和首关清场/团灭。
 普通测试、go vet 和 Linux race 检查通过，39 个顶层测试及 1 个示例覆盖移动与战斗核心；[验证范围与限制](../verification/combat-core/README.md) 已记录。
-本轮已合入 A 的 `feature/network`（`0558a60`），完成 uint64 输入序号、角度输入与按接收者生成快照的 B 适配，并用两个 Go TCP 测试连接验证移动链路；全量 Go 测试、vet 和 Linux race 通过。正式入口尚未接入 Room/匹配，C 的真实客户端与战斗事件链路尚未验收。具体证据、限制和 A/B 待决事项见 [A/B 联调记录](../verification/network-core/README.md)。
+A 已交付 v0 协议、TCP/Session、DTO 转换、Join/Leave 编排、快照/事件 dispatcher 和关闭通知。集成测试已用两个 Go TCP 连接跑通移动及首关清场事件，详见 [A/B 集成验证](../verification/network-core/README.md)。正式 gameserver、D 匹配器和 C++ 客户端仍未联调，不能视为全组验收通过。
 原 [前三天计划](PHASE1-DAYS1-3.md) 仍保留为全组移动闭环验收基准；B 已按用户授权先行推进独立战斗代码。
 
 无需网络即可查看战斗结果：在仓库根目录打开 PowerShell 7，执行：
@@ -28,27 +28,27 @@ go run ./server/cmd/core-demo
 
 | 负责人 | 需要完成的工作 | 完成标准 / 交付给谁 |
 | --- | --- | --- |
-| A：协议、网络、Session | 复核本分支的 EOF/Send 修复；与 B/C 对齐 HP 精度、阶段/团灭状态、事件元数据、输入拒绝与可靠队列策略；将 protocolbridge 接入正式 Join/Leave 和输入路由 | Go↔C++ 固定样例通过；Join 成功回执后才切换 InRoom；发送失败不被忽略，快照槽与可靠队列分开；战斗事件不静默丢失。详见联调记录 |
+| A：协议、网络、Session | 把已完成的 convert/router 接入正式 gameserver；处理 Send=false、断线 Leave、停服连接回收；与 B/D 统一可靠队列策略 | Join 成功回执后才 InRoom；Reader 不阻塞；慢连接不静默丢事件；生命周期测试通过。协议字段同步 C/D |
 | C：客户端、联调 | 移动与瞄准/射击输入；显示自己/队友/怪物 HP；消费完整快照和视觉子弹事件；关闭与断连处理 | 两个真实客户端可同房移动、攻击同一批怪物、看到一致清场/团灭状态；同 Room/ServerTick 对齐状态，提供日志或录像 |
 | D：匹配、平台、验证 | 房间注册与分配；监听 Done 注销；断线 Leave 重试；从 TickSamples/Stats 接指标；组织 Bot 与异常验证 | 两名玩家成功入房后再触发本轮双人战斗；玩家/房间计数可回收；事件拥塞有关闭原因；提交真实联调与监控证据。负责 B 代码评审 |
-| B：游戏核心 | 维护已完成的 Input/Snapshot 适配；与 A 对齐 HP 和阶段/事件元数据后补战斗事件桥接；继续装备修改器、药水、奖励状态、下一关和 Director 算法 | 接口变更同步 A/C/D；领域测试与 race 通过；药水及奖励/下一关真正实现前不提供假成功返回 |
+| B：游戏核心 | 维护 StageIndex 等领域事件元数据；配合正式入口联调；继续装备修改器、药水、奖励状态、下一关和 Director 算法 | 双 TCP 战斗回归、领域测试和 race 通过；接口变更同步 A/C/D；未实现玩法不提供假成功返回 |
 
 ## 接口对齐项
 
-以下为当前 B 实现的约束；A 的 v0 协议已到位，但仍有字段与策略差异需要 A/B/C/D 对齐。这里不自行修改 wire 消息 ID 或精度定义。
+以下为 A/B 当前共同实现；仍有差异的条目以集成验证记录为准，不在 B 分支自行改 Message ID。
 
 | 项目 | 当前约束与接入要求 |
 | --- | --- |
 | 实体身份 | uint64；玩家 ID 为 1..2^63−1，怪物/子弹使用高半区。C++ 使用 64 位；展示到 JavaScript/JSON 时避免 Number 精度损失 |
-| 输入 | Seq 已对齐 uint64，从 1 严格递增、不回绕；protocolbridge 将 wire aim_deg 转为领域 Aim 向量，校验移动长度与序号跨度；Shoot 表示按住状态，UsePotion 暂返回未支持 |
+| 输入 | Seq 从 1 严格递增、不回绕；Direction / Aim 是二维向量，Shoot 表示按住状态；客户端不发送权威位置或伤害 |
 | 输入确认 | 返回已在 Tick 中实际应用的最新意图序号；不表示之前每个输入包各模拟过一次。C 的预测/重放需按此语义设计 |
 | 坐标与频率 | 服务端 X/Y → 客户端 X/Z；30Hz 模拟、10Hz 完整快照；释放键发送零移动/Shoot=false，200ms 输入超时后在下一 Tick 停止 |
 | 配置 | 使用 room.DefaultConfig() 后覆盖值；新增 Combat / EventCapacity 不可漏填为零。B 不负责 .env 加载 |
 | 启动关卡 | StartStage 是可信服务端编排命令，复制 Plan 并返回回执；只允许 Waiting 且至少一名存活玩家。本轮双人联调由编排方等待两人 Join 成功 |
 | 中途加入 | Playing / StageClear / Failed 不接收新玩家；lobby 应选择可加入房间。既有 Session/Player 重复绑定仍幂等 |
 | 快照 | 一个 dispatcher 消费再分发；含玩家、MonsterView、Stage，全量集合缺失的怪物要移除；不含子弹列表 |
-| 事件 | 一个 dispatcher 消费 Events；显式映射领域枚举，补 Room ID。Spawn/Destroy 驱动视觉子弹，Damage/Death/Stage 事件驱动反馈 |
-| 拥塞与关闭 | B 快照可替换旧值，事件出口满时 Room 关闭并记录 event_backpressure。A events.md 的满队列丢最早策略与此不同，实际 Send 满时返回 false 且入口忽略结果；需 A/D 统一后验收，不能当作可靠投递完成 |
+| 事件 | A 已实现单 dispatcher 和七类消息映射；StageIndex 由 B 事件产生时携带，不能从可能滞后的 10Hz 快照推断。Spawn/Destroy 驱动视觉子弹，Damage/Death/Stage 驱动反馈 |
+| 拥塞与关闭 | 快照已有 capacity=1 的 Latest Wins；Room 事件出口满时关闭并记录 event_backpressure。网络可靠队列的 Send=false 目前仍被 dispatcher 忽略，A/D 必须完成策略和慢 Socket 验收 |
 | 留白 | Director 只有 Planner 接口；Seed 尚不生成随机布局；Reward/PreparingNextStage 只有预留枚举。StageClear/Failed 后不能直接重开下一关 |
 
 ## 联调顺序与验收记录

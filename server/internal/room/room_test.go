@@ -139,7 +139,7 @@ func TestQueueLimitsAndPerTickBudgets(t *testing.T) {
 		r := start(t, 1, config)
 		defer r.Close()
 		join(t, r, 11, 101)
-		for seq := uint64(1); seq <= 3; seq++ {
+		for seq := uint32(1); seq <= 3; seq++ {
 			if err := r.Input(11, game.Input{Seq: seq}); err != nil {
 				t.Fatal(err)
 			}
@@ -178,7 +178,7 @@ func TestInputFloodCannotStarveLeave(t *testing.T) {
 		r := start(t, 1, room.DefaultConfig())
 		defer r.Close()
 		join(t, r, 11, 101)
-		for seq := uint64(1); seq <= 256; seq++ {
+		for seq := uint32(1); seq <= 256; seq++ {
 			if err := r.Input(11, game.Input{Seq: seq, Direction: entity.Vec2{X: 1}}); err != nil {
 				t.Fatal(err)
 			}
@@ -232,7 +232,7 @@ func TestBackloggedInputUsesArrivalTime(t *testing.T) {
 		r := start(t, 1, config)
 		defer r.Close()
 		join(t, r, 11, 101)
-		for seq := uint64(1); seq <= 3; seq++ {
+		for seq := uint32(1); seq <= 3; seq++ {
 			if err := r.Input(11, game.Input{Seq: seq, Direction: entity.Vec2{X: 1}}); err != nil {
 				t.Fatal(err)
 			}
@@ -255,7 +255,7 @@ func TestTwoPlayersAndRoomIsolation(t *testing.T) {
 		join(t, moving, 12, 102)
 		join(t, still, 21, 201)
 		join(t, still, 22, 202)
-		for seq := uint64(1); seq <= 30; seq++ {
+		for seq := uint32(1); seq <= 30; seq++ {
 			if err := moving.Input(11, game.Input{Seq: seq, Direction: entity.Vec2{X: 1}}); err != nil {
 				t.Fatal(err)
 			}
@@ -404,7 +404,7 @@ func TestConcurrentCommandsSnapshotsAndClose(t *testing.T) {
 		var workers sync.WaitGroup
 		for worker := range 8 {
 			workers.Go(func() {
-				for seq := uint64(1); seq <= 60; seq++ {
+				for seq := uint32(1); seq <= 60; seq++ {
 					err := r.Input(room.SessionID(11+worker%2), game.Input{Seq: seq, Direction: entity.Vec2{X: 1}})
 					if err != nil && !errors.Is(err, room.ErrClosed) && !errors.Is(err, room.ErrQueueFull) {
 						t.Errorf("input: %v", err)
