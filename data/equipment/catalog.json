@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": 1001,
+      "key": "iron_sidearm",
+      "name": "Iron Sidearm",
+      "description": "Attack +5",
+      "slot": "weapon",
+      "modifiers": [
+        { "stat": "attack", "operation": "add", "value": 5 }
+      ]
+    },
+    {
+      "id": 1002,
+      "key": "rapid_sidearm",
+      "name": "Rapid Sidearm",
+      "description": "Attack speed x1.2",
+      "slot": "weapon",
+      "modifiers": [
+        { "stat": "attack_speed", "operation": "multiply", "value": 1.2 }
+      ]
+    },
+    {
+      "id": 2001,
+      "key": "vitality_relic",
+      "name": "Vitality Relic",
+      "description": "Max health +25",
+      "slot": "relic",
+      "modifiers": [
+        { "stat": "max_health", "operation": "add", "value": 25 }
+      ]
+    },
+    {
+      "id": 2002,
+      "key": "wind_relic",
+      "name": "Wind Relic",
+      "description": "Move speed x1.1",
+      "slot": "relic",
+      "modifiers": [
+        { "stat": "move_speed", "operation": "multiply", "value": 1.1 }
+      ]
+    },
+    {
+      "id": 3001,
+      "key": "healing_potion",
+      "name": "Healing Potion",
+      "description": "Restore 30 health",
+      "slot": "potion",
+      "heal": 30
+    },
+    {
+      "id": 3002,
+      "key": "greater_healing_potion",
+      "name": "Greater Healing Potion",
+      "description": "Restore 60 health",
+      "slot": "potion",
+      "heal": 60
+    }
+  ]
+}
