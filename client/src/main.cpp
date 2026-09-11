@@ -406,6 +406,9 @@ int main() {
         DrawFPS(kScreenWidth - 90, 12);
 
         EndDrawing();
+        // This raylib build enables SUPPORT_CUSTOM_FRAME_CONTROL: EndDrawing
+        // flushes drawing commands, but presenting the frame is our job.
+        SwapScreenBuffer();
 
         // Manual frame pacing fallback: hold each frame to ~1/60s even when
         // raylib's built-in timing is not applied by the linked build.

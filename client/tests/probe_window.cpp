@@ -35,6 +35,8 @@ int main() {
         DrawText("probe text 64px", 60, 180, 64, BLACK);
         DrawText("probe window", 24, 24, 24, DARKGRAY);
         EndDrawing();
+        // Match the client's manual frame control for this raylib build.
+        SwapScreenBuffer();
         if (frame == 1) {
             TakeScreenshot("probe_shot.png");  // dump actual rendered frame
             std::printf("probe: screenshot saved\n"); fflush(stdout);
