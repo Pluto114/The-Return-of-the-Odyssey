@@ -161,7 +161,7 @@ func (w *World) stepCombat() {
 	for _, id := range monsterIDs {
 		m := w.monsters[id]
 		m.previous = m.monster.Position
-		if (w.tick-1)%SnapshotEvery == 0 {
+		if (w.tick-1)%AIDecisionEvery == 0 {
 			m.target = 0
 			nearest := math.Inf(1)
 			for _, pid := range playerIDs {

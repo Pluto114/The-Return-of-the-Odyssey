@@ -13,8 +13,8 @@
 go run ./server/cmd/core-demo
 ```
 
-演示使用一个玩家和两只怪物、固定关卡计划、自动产生瞄准/射击输入；通过同一个 World.Step 执行真实战斗逻辑。
-当前固定场景在第 25 Tick 清场：玩家 HP=100，击杀 2，命中 4，开火 5。
+演示使用一个玩家和 `NewFirstStagePlan(DefaultConfig(), 42)` 生成的三只怪物，自动产生瞄准/射击输入；通过同一个 World.Step 执行真实战斗逻辑。
+当前固定场景在第 49 Tick 清场：玩家 HP=100，击杀 3，命中 6，开火 9。
 这是离线固定步模拟，没有网络连接，不是 Go Bot、真实客户端联调或性能测试。
 
 ## 2. 已实现行为
@@ -34,13 +34,14 @@ go run ./server/cmd/core-demo
 属性和几何输入会校验：不允许 NaN/Inf、负生命/防御/攻击、零冷却。坐标范围限制在 ±1e6 内，避免碰撞运算溢出。
 默认最多 64 怪物、256 子弹；配置硬上限分别为 128、1024，防止单房无界生成实体。
 出生配置、实体遍历和最近目标平局规则固定后，相同计划和输入产生相同事件与快照。
-当前 Seed 只记录在关卡计划/视图中；怪物出生位置由 Plan 显式给定，尚未实现按 Seed 随机生成布局。
+首关生成器使用进程内私有的 SplitMix64 序列，从地图边缘的八个相对锚点中按 Seed 选择并排序三处出生点；不使用全局随机源。相同配置和 Seed 会得到逐字段一致的 Plan，不同房间可用 room_id 等服务器可信值派生 Seed。
 
 ## 3. A / C / D 需要接入的地方
 
 | 接口 | 接入方式 |
 | --- | --- |
 | `room.Config` / `game.Config` | 从 DefaultConfig 获取配置，再覆盖必要字段；新增 Combat / EventCapacity 有校验，不能用旧的零值字面量漏填 |
+| `game.NewFirstStagePlan(config, seed)` | B 提供的首关计划入口；传入 `room.Config.World` 和服务端 Seed，返回经过 `ValidateStage` 的三怪 Plan；怪物容量小于 3 时明确报错 |
 | `r.StartStage(stage.Plan)` | 服务端可信关卡编排入口；先入房，再提交计划并等成功回执；计划含 Index / Seed / DifficultyScore / Monsters，提交时复制 |
 | `game.Input.Aim / Shoot` | A 从协议 DTO 转换，C 提供瞄准向量和按键状态；释放发送 Shoot=false，输入超时同样停止射击 |
 | `r.Events()` | A 用单个 dispatcher 消费，再封装 Room ID、映射消息 ID/DTO，并投递 Session 可靠队列 |
@@ -49,6 +50,7 @@ go run ./server/cmd/core-demo
 | `director.Planner` | 仅声明 Generate(previous Plan, PerformanceMetrics) → (Plan, error)；具体规则算法尚未实现 |
 
 StartStage 只能在 Waiting 且至少有一名存活玩家时成功；进入战斗后不允许新增玩家，重复绑定现有玩家仍幂等。
+正式入口应先完成两名玩家的 Join 和事件订阅，再生成首关 Plan、提交 StartStage 并等待 receipt；任何一步失败都按房间创建失败清理，不能向客户端宣称关卡已开始。
 奖励处理和进入下一关尚未实现；StageClear / Failed 不能再次 StartStage，调用会返回 ErrStageState。
 Reward / PreparingNextStage 枚举仅保留给后续状态转换，没有虚构成功路径。完整战斗关卡编排仍属 B 后续工作。
 
@@ -73,6 +75,6 @@ Room 的事件队列默认容纳 64 个 Tick 批次，只有一个消费者，�
 - A：将已完成的射击/战斗事件映射接入正式入口，补 Session 可靠发送失败与断线通知。
 - C：怪物/HP 展示、视觉子弹、事件效果、预测与插值。
 - D：匹配调用、监控映射、真实 Bot / 联调 / 性能验证。
-- B：装备修改器、药水、奖励选择、下一关转换、Director 规则、逐阶段性能采样和优化。
+- B：装备修改器、药水、奖励选择、下一关转换、Director 规则、逐阶段性能采样和优化；首关生成器和显式 10Hz AI 决策周期已完成。
 
 本轮只实现 B 的首关原型，尚未完成架构中的完整 Roguelike 循环。验证结果见 [本轮记录](../verification/combat-core/README.md)。

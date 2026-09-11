@@ -15,10 +15,12 @@ import (
 )
 
 const (
-	TickRate      = 30
-	SnapshotEvery = 3
-	StepSeconds   = 1.0 / TickRate
-	TickInterval  = time.Second / TickRate
+	TickRate        = 30
+	SnapshotEvery   = 3
+	AIDecisionRate  = 10
+	AIDecisionEvery = TickRate / AIDecisionRate
+	StepSeconds     = 1.0 / TickRate
+	TickInterval    = time.Second / TickRate
 )
 
 var (

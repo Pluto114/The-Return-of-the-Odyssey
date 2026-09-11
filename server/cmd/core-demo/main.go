@@ -21,10 +21,9 @@ func run() error {
 	if err = w.AddPlayer(1); err != nil {
 		return err
 	}
-	plan := stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1}
-	for _, position := range []entity.Vec2{{X: 13, Y: 10}, {X: 15, Y: 12}} {
-		plan.Monsters = append(plan.Monsters, stage.Spawn{Position: position, Radius: 0.4, AttackRange: 1,
-			Stats: entity.CombatStats{Attack: 8, MaxHealth: 40, MoveSpeed: 1, AttackCooldownTicks: 30}})
+	plan, err := game.NewFirstStagePlan(game.DefaultConfig(), 42)
+	if err != nil {
+		return err
 	}
 	if err = w.StartStage(plan); err != nil {
 		return err
