@@ -54,6 +54,8 @@ func (w *World) freezePerformance() {
 		EquipmentPower:   w.performance.equipmentPower,
 	}
 	w.performance.ready = true
+	w.completedStages = append(w.completedStages, StageSummary{Index: w.currentPlan.Index, Seed: w.currentPlan.Seed,
+		DifficultyScore: w.currentPlan.DifficultyScore, ClearTick: w.tick, Performance: w.performance.frozen})
 }
 
 func (w *World) PerformanceMetrics() (director.PerformanceMetrics, error) {

@@ -125,6 +125,12 @@ func (w *World) StartStage(plan stage.Plan) error {
 		}
 		w.rewardRound = nil
 	}
+	if initial {
+		w.runStarted = true
+		w.runStartedAtTick = w.tick
+		w.runEndedAtTick = 0
+		w.completedStages = nil
+	}
 	w.performance = stagePerformance{startedAtTick: w.tick, equipmentPower: w.equipmentPower()}
 	w.currentPlan = plan.Clone()
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
@@ -282,6 +288,7 @@ func (w *World) stepCombat() {
 	w.stage.MonstersRemaining = len(w.monsters)
 	// A simultaneous final kill and team wipe is defeat; no rewards are granted.
 	if w.livingPlayers() == 0 {
+		w.runEndedAtTick = w.tick
 		w.stage.State = stage.Failed
 		w.emit(Event{Kind: TeamDefeated, StageIndex: w.stage.Index})
 	} else if len(w.monsters) == 0 {

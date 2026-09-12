@@ -43,7 +43,7 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 
 客户端依赖验证与基础设施启动见 [SETUP.md](docs/SETUP.md)。
 当前 gameserver 入口可运行 Ping/Login，但正式 Match/Input/Room 尚未接线；Bot 和游戏客户端尚无可执行入口。不要将环境构建成功视为游戏已可运行。
-角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；战斗、装备奖励和连续关卡接口分别见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)、[装备与奖励领域接口](docs/architecture/EQUIPMENT-REWARD.md) 和 [Director 接口](docs/architecture/DIRECTOR.md)。
+角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；战斗、装备奖励、连续关卡和恢复结果接口分别见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)、[装备与奖励领域接口](docs/architecture/EQUIPMENT-REWARD.md)、[Director 接口](docs/architecture/DIRECTOR.md) 和 [恢复与结果接口](docs/architecture/RESUME-GAME-RESULT.md)。
 
 ## 固定架构边界
 

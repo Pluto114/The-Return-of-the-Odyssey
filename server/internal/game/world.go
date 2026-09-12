@@ -102,21 +102,25 @@ type playerState struct {
 // World is deliberately not concurrent. Only its Room goroutine may call its
 // methods. Snapshot returns detached values suitable for publication.
 type World struct {
-	config         Config
-	tick           uint64
-	players        map[entity.ID]*playerState
-	monsters       map[entity.ID]*monsterState
-	projectiles    map[entity.ID]entity.Projectile
-	nextEntity     entity.ID
-	stage          stage.View
-	events         []Event
-	eventOverflow  bool
-	rewardRound    *reward.Round
-	rewardCatalog  equipment.Catalog
-	rewardUpdates  []RewardUpdate
-	rewardOverflow bool
-	performance    stagePerformance
-	currentPlan    stage.Plan
+	config           Config
+	tick             uint64
+	players          map[entity.ID]*playerState
+	monsters         map[entity.ID]*monsterState
+	projectiles      map[entity.ID]entity.Projectile
+	nextEntity       entity.ID
+	stage            stage.View
+	events           []Event
+	eventOverflow    bool
+	rewardRound      *reward.Round
+	rewardCatalog    equipment.Catalog
+	rewardUpdates    []RewardUpdate
+	rewardOverflow   bool
+	performance      stagePerformance
+	currentPlan      stage.Plan
+	completedStages  []StageSummary
+	runStarted       bool
+	runStartedAtTick uint64
+	runEndedAtTick   uint64
 }
 
 func NewWorld(config Config) (*World, error) {
@@ -163,6 +167,10 @@ func (w *World) Clear() {
 	w.rewardOverflow = false
 	w.performance = stagePerformance{}
 	w.currentPlan = stage.Plan{}
+	w.completedStages = nil
+	w.runStarted = false
+	w.runStartedAtTick = 0
+	w.runEndedAtTick = 0
 	w.stage = stage.View{}
 }
 func (w *World) Close()           { w.Clear(); w.stage.State = stage.Closed }

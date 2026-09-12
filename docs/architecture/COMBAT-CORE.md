@@ -49,6 +49,7 @@ go run ./server/cmd/core-demo
 | `r.Snapshots()` | 仍为 10Hz 完整快照；新增 MonsterView 和 Stage，玩家新增生命/属性/瞄准；C 按 ID 对齐并移除缺失怪物 |
 | `Stats.CloseReason` | D 可观察 requested / idle / event_backpressure；触发关闭后注销房间、通知对应 Session |
 | `director.RuleBasedPlanner` | 使用 `Room.CompletedStage()` 的冻结 Plan/PerformanceMetrics 生成下一关；规则、上下限与 Decision 见 [Director 接口](DIRECTOR.md) |
+| `r.ResumeState(sessionID)` / `r.GameResult(outcome)` | D8 的完整权威恢复查询与异步持久化值；Token、连接重绑和数据库仍在 Room 外，见 [恢复与结果接口](RESUME-GAME-RESULT.md) |
 
 StartStage 只能在 Waiting 且至少有一名存活玩家时成功；进入战斗后不允许新增玩家，重复绑定现有玩家仍幂等。
 正式入口应先完成两名玩家的 Join 和事件订阅，再生成首关 Plan、提交 StartStage 并等待 receipt；任何一步失败都按房间创建失败清理，不能向客户端宣称关卡已开始。

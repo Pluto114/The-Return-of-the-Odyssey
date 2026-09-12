@@ -1,5 +1,5 @@
-// Package stage defines server-owned stage plans, not wire messages. Reward and
-// Director orchestration are explicit future integration points.
+// Package stage defines server-owned stage plans, not wire messages. Reward,
+// Director and next-stage orchestration remain outside the stage value types.
 package stage
 
 import (

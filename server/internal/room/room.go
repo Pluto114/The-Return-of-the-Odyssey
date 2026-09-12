@@ -98,6 +98,9 @@ type control struct {
 	rewardStart  *rewardStart
 	rewardChoice equipment.ID
 	stageResult  chan StageResultReceipt
+	resumeState  chan ResumeStateReceipt
+	gameOutcome  game.GameOutcome
+	gameResult   chan GameResultReceipt
 }
 
 type rewardStart struct {
@@ -108,6 +111,30 @@ type rewardStart struct {
 
 type StageResultReceipt struct {
 	Result game.StageResult
+	Err    error
+}
+
+type ResumeState struct {
+	Snapshot Snapshot
+	Reward   *game.RewardUpdate
+}
+
+func (s ResumeState) clone() ResumeState {
+	s.Snapshot = s.Snapshot.clone()
+	if s.Reward != nil {
+		copy := s.Reward.Clone()
+		s.Reward = &copy
+	}
+	return s
+}
+
+type ResumeStateReceipt struct {
+	State ResumeState
+	Err   error
+}
+
+type GameResultReceipt struct {
+	Result game.GameResult
 	Err    error
 }
 
@@ -250,6 +277,49 @@ func (r *Room) CompletedStage() (<-chan StageResultReceipt, error) {
 	}
 }
 
+// ResumeState reconstructs a full authoritative snapshot and this player's
+// private reward state on the owner goroutine. Token validation and connection
+// replacement happen before this call in A/D; the SessionID itself is retained.
+func (r *Room) ResumeState(sessionID SessionID) (<-chan ResumeStateReceipt, error) {
+	if sessionID == 0 {
+		return nil, ErrInvalidSession
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan ResumeStateReceipt, 1)
+	select {
+	case r.controls <- control{sessionID: sessionID, resumeState: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
+}
+
+// GameResult returns a detached terminal value for asynchronous persistence.
+// The World validates the trusted outcome against its current stage state.
+func (r *Room) GameResult(outcome game.GameOutcome) (<-chan GameResultReceipt, error) {
+	if !outcome.Valid() {
+		return nil, game.ErrInvalidGameOutcome
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan GameResultReceipt, 1)
+	select {
+	case r.controls <- control{gameOutcome: outcome, gameResult: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
+}
+
 func (r *Room) submit(c control) (<-chan error, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -356,11 +426,28 @@ func (r *Room) tick(now time.Time) {
 	for range r.config.ControlsPerTick {
 		select {
 		case c := <-r.controls:
-			if c.stageResult != nil {
+			switch {
+			case c.stageResult != nil:
 				completed, err := r.world.CompletedStage()
 				c.stageResult <- StageResultReceipt{Result: completed.Clone(), Err: err}
 				close(c.stageResult)
-			} else {
+			case c.resumeState != nil:
+				r.mu.Lock()
+				member, joined := r.members[c.sessionID]
+				r.mu.Unlock()
+				if !joined {
+					c.resumeState <- ResumeStateReceipt{Err: ErrNotJoined}
+				} else {
+					state, err := r.world.ResumeState(member.playerID)
+					roomState := ResumeState{Snapshot: Snapshot{RoomID: r.id, Snapshot: state.Snapshot}, Reward: state.Reward}
+					c.resumeState <- ResumeStateReceipt{State: roomState.clone(), Err: err}
+				}
+				close(c.resumeState)
+			case c.gameResult != nil:
+				result, err := r.world.GameResult(c.gameOutcome)
+				c.gameResult <- GameResultReceipt{Result: result.Clone(), Err: err}
+				close(c.gameResult)
+			default:
 				err := r.applyControl(c)
 				c.result <- err
 				close(c.result)
@@ -494,10 +581,17 @@ func (r *Room) finish() {
 	for {
 		select {
 		case c := <-r.controls:
-			if c.stageResult != nil {
+			switch {
+			case c.stageResult != nil:
 				c.stageResult <- StageResultReceipt{Err: ErrClosed}
 				close(c.stageResult)
-			} else {
+			case c.resumeState != nil:
+				c.resumeState <- ResumeStateReceipt{Err: ErrClosed}
+				close(c.resumeState)
+			case c.gameResult != nil:
+				c.gameResult <- GameResultReceipt{Err: ErrClosed}
+				close(c.gameResult)
+			default:
 				c.result <- ErrClosed
 				close(c.result)
 			}

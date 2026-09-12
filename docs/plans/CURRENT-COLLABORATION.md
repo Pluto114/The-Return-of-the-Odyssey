@@ -31,7 +31,7 @@ go run ./server/cmd/core-demo
 | A：协议、网络、Session | 把已完成的 convert/router 接入正式 gameserver；处理 Send=false、断线 Leave、停服连接回收；与 B/D 统一可靠队列策略 | Join 成功回执后才 InRoom；Reader 不阻塞；慢连接不静默丢事件；生命周期测试通过。协议字段同步 C/D |
 | C：客户端、联调 | 移动与瞄准/射击输入；显示自己/队友/怪物 HP；消费完整快照和视觉子弹事件；关闭与断连处理 | 两个真实客户端可同房移动、攻击同一批怪物、看到一致清场/团灭状态；同 Room/ServerTick 对齐状态，提供日志或录像 |
 | D：匹配、平台、验证 | 房间注册与分配；监听 Done 注销；断线 Leave 重试；从 TickSamples/Stats 接指标；组织 Bot 与异常验证 | 两名玩家成功入房后再触发本轮双人战斗；玩家/房间计数可回收；事件拥塞有关闭原因；提交真实联调与监控证据。负责 B 代码评审 |
-| B：游戏核心 | 维护 StageIndex 等领域事件元数据；配合正式入口联调；已完成装备/药水/奖励/下一关/Director，并完成 D9 多房隔离、300Hz 输入和游戏核心性能基线 | 双 TCP 战斗回归、领域测试和 race 通过；接口变更同步 A/C/D；D9 全链路 100 Bot 仍由 D 验收 |
+| B：游戏核心 | 维护 StageIndex 等领域事件元数据；已完成装备/奖励/下一关/Director、D8 ResumeState/GameResult 和 D9 核心性能门，继续配合正式入口联调 | 领域测试和 race 通过；接口变更同步 A/C/D；Resume/持久化与 D9 全链路 100 Bot 仍由 A/D 验收 |
 
 ## 接口对齐项
 

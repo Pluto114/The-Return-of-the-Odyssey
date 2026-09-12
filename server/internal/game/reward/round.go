@@ -103,6 +103,20 @@ func (r *Round) Offers() []Offer {
 	return offers
 }
 
+// Offer returns one detached offer, including its current selection state.
+// Resume paths use it to reconstruct only the reconnecting player's private
+// reward state without exposing another player's options.
+func (r *Round) Offer(playerID entity.ID) (Offer, bool) {
+	if r == nil {
+		return Offer{}, false
+	}
+	offer := r.offers[playerID]
+	if offer == nil {
+		return Offer{}, false
+	}
+	return offer.Clone(), true
+}
+
 // ValidateChoice is read-only. The Room first applies the equipment to a
 // temporary value and calls Commit only after that succeeds.
 func (r *Round) ValidateChoice(playerID entity.ID, equipmentID equipment.ID, serverTick uint64) (Selection, error) {

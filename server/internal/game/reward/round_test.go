@@ -69,6 +69,17 @@ func TestRoundOffersAreDeterministicAndDetached(t *testing.T) {
 	if a.Offers()[0].EquipmentIDs[0] == 999 {
 		t.Fatal("Offers leaked mutable option storage")
 	}
+	one, ok := a.Offer(1)
+	if !ok || one.PlayerID != 1 {
+		t.Fatalf("Offer(1) = %+v, %v", one, ok)
+	}
+	one.EquipmentIDs[0] = 999
+	if again, _ := a.Offer(1); again.EquipmentIDs[0] == 999 {
+		t.Fatal("Offer leaked mutable option storage")
+	}
+	if _, ok := a.Offer(999); ok {
+		t.Fatal("unknown player returned an offer")
+	}
 }
 
 func TestChoiceDeadlineValidationAndDuplicateProtection(t *testing.T) {
