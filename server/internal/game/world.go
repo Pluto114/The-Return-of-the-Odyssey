@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/equipment"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/reward"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/systems"
 )
@@ -64,6 +66,7 @@ type Input struct {
 	Direction entity.Vec2
 	Aim       entity.Vec2
 	Shoot     bool
+	UsePotion bool
 }
 
 func (i Input) Validate() error {
@@ -93,20 +96,25 @@ type playerState struct {
 	pending    bool
 	nextShot   uint64
 	firing     bool
+	loadout    equipment.Loadout
 }
 
 // World is deliberately not concurrent. Only its Room goroutine may call its
 // methods. Snapshot returns detached values suitable for publication.
 type World struct {
-	config        Config
-	tick          uint64
-	players       map[entity.ID]*playerState
-	monsters      map[entity.ID]*monsterState
-	projectiles   map[entity.ID]entity.Projectile
-	nextEntity    entity.ID
-	stage         stage.View
-	events        []Event
-	eventOverflow bool
+	config         Config
+	tick           uint64
+	players        map[entity.ID]*playerState
+	monsters       map[entity.ID]*monsterState
+	projectiles    map[entity.ID]entity.Projectile
+	nextEntity     entity.ID
+	stage          stage.View
+	events         []Event
+	eventOverflow  bool
+	rewardRound    *reward.Round
+	rewardCatalog  equipment.Catalog
+	rewardUpdates  []RewardUpdate
+	rewardOverflow bool
 }
 
 func NewWorld(config Config) (*World, error) {
@@ -135,13 +143,22 @@ func (w *World) AddPlayer(id entity.ID) error {
 	return nil
 }
 
-func (w *World) RemovePlayer(id entity.ID) { delete(w.players, id) }
+func (w *World) RemovePlayer(id entity.ID) {
+	delete(w.players, id)
+	if w.rewardRound != nil && w.rewardRound.RemovePlayer(id) && w.stage.State == stage.Reward && w.PlayerCount() > 0 && w.rewardRound.Complete() {
+		w.stage.State = stage.PreparingNextStage
+	}
+}
 func (w *World) Clear() {
 	clear(w.players)
 	clear(w.monsters)
 	clear(w.projectiles)
 	w.events = nil
 	w.eventOverflow = false
+	w.rewardRound = nil
+	w.rewardCatalog = equipment.Catalog{}
+	w.rewardUpdates = nil
+	w.rewardOverflow = false
 	w.stage = stage.View{}
 }
 func (w *World) Close()           { w.Clear(); w.stage.State = stage.Closed }
@@ -178,13 +195,18 @@ func (w *World) Step(now time.Time) {
 		direction := entity.Vec2{}
 		fresh := p.input.Seq != 0 && !now.Before(p.receivedAt) && now.Sub(p.receivedAt) < w.config.InputTimeout
 		if fresh {
-			direction = p.input.Direction
-			p.firing = p.input.Shoot
+			if w.stage.State == stage.Waiting || w.stage.State == stage.Playing {
+				direction = p.input.Direction
+			}
+			p.firing = w.stage.State == stage.Playing && p.input.Shoot
 			if p.input.Aim.X != 0 || p.input.Aim.Y != 0 {
 				p.player.Aim = systems.UnitDirection(p.input.Aim)
 			}
 			if p.pending {
 				p.player.LastProcessedInputSeq = p.input.Seq
+				if w.stage.State == stage.Playing && p.input.UsePotion {
+					w.usePotion(p)
+				}
 			}
 		}
 		if !now.Before(p.receivedAt) {
@@ -194,6 +216,7 @@ func (w *World) Step(now time.Time) {
 	}
 	w.tick++
 	w.stepCombat()
+	w.stepReward()
 }
 
 // Snapshot is full-state and deterministically ordered by player ID. Callers

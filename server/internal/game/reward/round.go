@@ -172,6 +172,19 @@ func (r *Round) Complete() bool {
 	return true
 }
 
+// RemovePlayer drops a pending or completed offer when the Room permanently
+// removes that player. Resume flows should keep the player in World instead.
+func (r *Round) RemovePlayer(playerID entity.ID) bool {
+	if r == nil {
+		return false
+	}
+	if _, exists := r.offers[playerID]; !exists {
+		return false
+	}
+	delete(r.offers, playerID)
+	return true
+}
+
 func next(state *uint64) uint64 {
 	*state += 0x9e3779b97f4a7c15
 	z := *state

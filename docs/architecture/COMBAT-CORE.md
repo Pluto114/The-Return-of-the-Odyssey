@@ -45,14 +45,14 @@ go run ./server/cmd/core-demo
 | `r.StartStage(stage.Plan)` | 服务端可信关卡编排入口；先入房，再提交计划并等成功回执；计划含 Index / Seed / DifficultyScore / Monsters，提交时复制 |
 | `game.Input.Aim / Shoot` | A 从协议 DTO 转换，C 提供瞄准向量和按键状态；释放发送 Shoot=false，输入超时同样停止射击 |
 | `r.Events()` | A 用单个 dispatcher 消费，再封装 Room ID、映射消息 ID/DTO，并投递 Session 可靠队列 |
+| `r.RewardUpdates()` | B 的定向可靠奖励出口；A 必须按 PlayerID 单播 RewardOptions/RewardApplied，不可使用战斗广播器 |
 | `r.Snapshots()` | 仍为 10Hz 完整快照；新增 MonsterView 和 Stage，玩家新增生命/属性/瞄准；C 按 ID 对齐并移除缺失怪物 |
 | `Stats.CloseReason` | D 可观察 requested / idle / event_backpressure；触发关闭后注销房间、通知对应 Session |
 | `director.Planner` | 仅声明 Generate(previous Plan, PerformanceMetrics) → (Plan, error)；具体规则算法尚未实现 |
 
 StartStage 只能在 Waiting 且至少有一名存活玩家时成功；进入战斗后不允许新增玩家，重复绑定现有玩家仍幂等。
 正式入口应先完成两名玩家的 Join 和事件订阅，再生成首关 Plan、提交 StartStage 并等待 receipt；任何一步失败都按房间创建失败清理，不能向客户端宣称关卡已开始。
-奖励处理和进入下一关尚未实现；StageClear / Failed 不能再次 StartStage，调用会返回 ErrStageState。
-Reward / PreparingNextStage 枚举仅保留给后续状态转换，没有虚构成功路径。完整战斗关卡编排仍属 B 后续工作。
+StageClear 经 StartReward 进入 Reward；所有选择或超时默认完成后进入 PreparingNextStage。此时 StartStage 只接受 `Index=上一关+1` 的合法计划；Failed 仍是终局。
 
 实体 ID 使用 uint64：玩家 ID 范围为 1 到 2^63−1，怪物/子弹使用高半区并在同一 World 内单调分配。A/C 需要保留 64 位，不可缩窄到 uint32。
 这里的 State / EventKind 都是领域枚举，A 应显式映射到自己维护的协议枚举和消息 ID，不直接当成 wire 编号。

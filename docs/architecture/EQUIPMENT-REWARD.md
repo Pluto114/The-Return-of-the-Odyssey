@@ -1,6 +1,6 @@
 # 角色 B：装备与奖励领域接口
 
-本增量实现 D6 的纯领域层：版本化装备目录、槽位替换、属性重算、药水消费，以及按玩家生成的确定性奖励轮次。代码不包含 protobuf、Socket、Session 或数据库访问，可在 A 完成 Room/Session 奖励编排前独立测试。
+本增量实现 D6 的领域层和 Room 单写者接线：版本化装备目录、槽位替换、属性重算、药水消费，以及按玩家生成的确定性奖励轮次。代码不包含 protobuf、Socket 或数据库访问；Room 只用可信 Session 绑定解析 PlayerID。
 
 ## 1. 单一静态数据源
 
@@ -45,11 +45,28 @@ if err == nil && applySucceeded {
 
 所有玩家提交后 `round.Complete()` 才返回 true。A 的 Session/Room 编排可据此从 Reward 进入 PreparingNextStage；客户端消息不能直接修改 Round、Loadout 或 CurrentStats。
 
-## 4. 尚待接线的边界
+## 4. World / Room 接口
 
-- B 下一增量：把 Catalog、Round 和玩家 Loadout 纳入 World/Room 单写者状态，提供开始奖励、选择和超时默认命令，并把装备 ID 放入权威快照。
-- A：将 RewardOptions/RewardChoice/RewardApplied 路由到 B 的 Room 命令；按 PlayerID 单播候选，不能用现有战斗事件广播器泄露其他玩家选项。
+清场后由服务端编排调用：
+
+```go
+receipt, err := rm.StartReward(catalog, rewardSeed, 30*10)
+err = <-receipt
+```
+
+World 会先验证目录中每个物品都能安全应用于每名当前玩家，全部成功后才从 StageClear 进入 Reward。候选通过 `rm.RewardUpdates()` 输出；该通道与战斗事件一样可靠且有界，但每条更新带 PlayerID，A 必须单播。通道饱和时 Room 以 `event_backpressure` 关闭，不能静默丢失。
+
+选择由 `rm.ChooseReward(sessionID, equipmentID)` 提交。Room 在自身 goroutine 中查找 Session 绑定，World 再验证对应玩家的私有候选。成功选择或超时默认均产生 `RewardSelectionApplied`；全部在线玩家处理后，StageState 进入 PreparingNextStage。
+
+PreparingNextStage 状态可继续调用原有 `rm.StartStage(plan)`。下一关 Index 必须严格等于上一关加一；装备和存活玩家 HP 保留，所有玩家回到公共出生点，已死亡队友以当前 MaxHealth 的 50% 复活。旧移动、射击和药水触发会被清空。Reward 阶段玩家不移动。
+
+Player 快照已增加 EquipmentState，包含 WeaponID、RelicID 和 PotionID。`game.Input.UsePotion` 只在 Playing 中、且仅对一个新 InputSeq 处理一次；成功后清空 PotionID。A 的 protobuf 转换当前仍明确拒绝 UsePotion，需在正式入口接入本增量时解除该占位拒绝。
+
+## 5. 尚待接线的边界
+
+- B 下一增量：实现 PerformanceMetrics、Rule-Based Director 和 Ready 屏障所需的纯关卡转换接口。
+- A：将 RewardOptions/RewardChoice/RewardApplied 路由到上述 Room 命令；为 `RewardUpdates()` 建单播 dispatcher，并将装备 ID 加入协议快照；移除 UsePotion 的占位拒绝。
 - C：从同版本目录显示名称、描述和属性变化；仅在 RewardApplied 成功后更新 UI，最终仍以快照为准。
 - D：在进程启动阶段加载并校验目录，暴露目录版本和 offered/chosen/defaulted/invalid 指标；配置失败时禁止启动正式玩法。
 
-当前增量不宣称 Reward 已进入 gameserver 正式流程。它冻结了 B 的数据和选择语义，使 A/C/D 可以并行接入而不各自实现一套规则。
+当前增量已完成 B 的 World/Room 规则，不宣称 Reward 已进入 gameserver TCP 正式流程。A 仍需调用入口、路由协议和转换快照。

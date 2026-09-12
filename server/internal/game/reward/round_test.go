@@ -169,3 +169,20 @@ func TestRoundRejectsInvalidShape(t *testing.T) {
 		}
 	}
 }
+
+func TestRemovePlayerDropsPendingOffer(t *testing.T) {
+	round, err := reward.NewRound(1, 1, 1, 10, []entity.ID{1, 2}, catalog(t), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := round.ValidateChoice(1, round.Offers()[0].EquipmentIDs[0], 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := round.Commit(selection); err != nil {
+		t.Fatal(err)
+	}
+	if !round.RemovePlayer(2) || round.RemovePlayer(2) || !round.Complete() {
+		t.Fatal("removing pending player did not complete remaining offers")
+	}
+}

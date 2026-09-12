@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
@@ -15,7 +16,10 @@ import (
 const FirstWorldEntityID entity.ID = 1 << 63
 const maxPendingEvents = 4096
 
-var ErrStageState = errors.New("stage can only start in Waiting with living players")
+var (
+	ErrStageState = errors.New("stage cannot start in the current state")
+	ErrStageIndex = errors.New("next stage index must increase by one")
+)
 
 type CombatConfig struct {
 	PlayerStats                       entity.CombatStats
@@ -95,8 +99,31 @@ func (w *World) StartStage(plan stage.Plan) error {
 	if err := ValidateStage(plan, w.config); err != nil {
 		return err
 	}
-	if w.stage.State != stage.Waiting || w.livingPlayers() == 0 {
+	initial := w.stage.State == stage.Waiting
+	next := w.stage.State == stage.PreparingNextStage && w.rewardRound != nil && w.rewardRound.Complete()
+	if (!initial && !next) || w.PlayerCount() == 0 || (initial && w.livingPlayers() == 0) {
 		return ErrStageState
+	}
+	if next && plan.Index != w.stage.Index+1 {
+		return ErrStageIndex
+	}
+	if next {
+		for _, player := range w.players {
+			player.player.Position = w.config.Spawn
+			player.player.Velocity = entity.Vec2{}
+			player.input.Direction = entity.Vec2{}
+			player.input.Aim = entity.Vec2{}
+			player.input.Shoot = false
+			player.input.UsePotion = false
+			player.receivedAt = time.Time{}
+			player.pending = false
+			player.firing = false
+			if !player.player.Alive {
+				player.player.Alive = true
+				player.player.Health = player.player.CurrentStats.MaxHealth * 0.5
+			}
+		}
+		w.rewardRound = nil
 	}
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
 	for _, spawn := range plan.Monsters {

@@ -19,6 +19,6 @@
 
 ## 接入门
 
-A/B 接入 World/Room 时必须执行 `ValidateChoice → equipment.Apply 到临时值 → Commit`。若 Apply 失败，不得 Commit，也不得发送成功的 RewardApplied。候选只单播给对应 PlayerID；现有战斗事件广播器不能直接复用。
+后续 World/Room 接线已按 `ValidateChoice → equipment.Apply 到临时值 → Commit` 实现。若 Apply 失败，不会 Commit，也不会产生成功的 RewardApplied。候选只单播给对应 PlayerID；现有战斗事件广播器不能直接复用。接线验证见 [D6 World / Room 记录](../week2-b-d6-world/README.md)。
 
 静态目录必须在进程启动阶段读取，禁止 Room Tick 访问磁盘。C 使用相同版本文件做显示映射，D 负责启动校验和真实指标。详细规则见 [装备与奖励领域接口](../../architecture/EQUIPMENT-REWARD.md)。
