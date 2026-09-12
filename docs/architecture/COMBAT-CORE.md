@@ -75,6 +75,6 @@ Room 的事件队列默认容纳 64 个 Tick 批次，只有一个消费者，�
 - A：将已完成的射击/战斗事件映射接入正式入口，补 Session 可靠发送失败与断线通知。
 - C：怪物/HP 展示、视觉子弹、事件效果、预测与插值。
 - D：匹配调用、监控映射、真实 Bot / 联调 / 性能验证。
-- B：装备/奖励、World/Room 接线、下一关转换、Director 规则和逐阶段性能采样已完成，分别见 [装备与奖励领域接口](EQUIPMENT-REWARD.md) 与 [Director 接口](DIRECTOR.md)；后续继续 D9 多房隔离、高频输入和性能验证。
+- B：装备/奖励、World/Room 接线、下一关转换、Director 规则和逐阶段性能采样已完成，分别见 [装备与奖励领域接口](EQUIPMENT-REWARD.md) 与 [Director 接口](DIRECTOR.md)；D9 多房隔离、300Hz 输入和核心性能基线见 [实测记录](../benchmark/WEEK2-B-D9.md)。
 
 首关原型验证见 [战斗核心记录](../verification/combat-core/README.md)，连续三关服务端核心验证见 [D7 记录](../verification/week2-b-d7/README.md)。正式网络入口的奖励、Ready 和下一关编排仍需 A/D 接线。
