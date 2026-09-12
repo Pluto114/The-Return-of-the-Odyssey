@@ -264,6 +264,77 @@ void TestCombatViewFeedback() {
     CHECK(!view.IsDead(900));
 }
 
+void TestParseEquipmentTable() {
+    EquipmentTable table;
+    const std::string text =
+        "# client display table\n"
+        "1,Blade of the Odyssey,Weapon,\"+10 Attack\"\n"
+        "\n"
+        "2,Glass Cannon,Relic,\"+20 Attack, -10 Defense\"\n"
+        "bogus line without id,name\n";
+    const std::size_t loaded = ParseEquipmentTable(text, table);
+    CHECK(loaded == 2);
+    CHECK(table.size() == 2);
+    const auto it = table.find(1);
+    CHECK(it != table.end());
+    if (it != table.end()) {
+        CHECK(it->second.name == "Blade of the Odyssey");
+        CHECK(it->second.slot == "Weapon");
+        CHECK(it->second.stats == "\"+10 Attack\"");
+    }
+    const auto second = table.find(2);
+    CHECK(second != table.end());
+    if (second != table.end()) {
+        // The stats column may itself contain commas.
+        CHECK(second->second.stats == "\"+20 Attack, -10 Defense\"");
+    }
+}
+
+void TestRewardViewFlow() {
+    EquipmentTable table;
+    ParseEquipmentTable("5,Vitality Relic,Relic,\"+25 Max HP\"\n", table);
+
+    RewardView view;
+    view.SetOptions({5, 99}, 4000, table);
+    CHECK(view.State() == RewardState::kOffered);
+    CHECK(view.Active());
+    CHECK(view.Options().size() == 2);
+    CHECK(view.Options()[0].display.name == "Vitality Relic");
+    // Unknown id degrades to a placeholder instead of inventing stats.
+    CHECK(view.Options()[1].display.name == "equipment#99");
+    CHECK(view.Options()[1].display.slot == "(config pending)");
+    CHECK(view.DeadlineTick() == 4000);
+
+    std::uint32_t chosen = 0;
+    CHECK(!view.ChooseByIndex(2, chosen));  // out of range: still offered
+    CHECK(view.State() == RewardState::kOffered);
+    CHECK(view.ChooseByIndex(0, chosen));
+    CHECK(chosen == 5);
+    CHECK(view.State() == RewardState::kChosen);
+    // A second choice is refused locally (single-shot).
+    CHECK(!view.ChooseByIndex(1, chosen));
+
+    // Refusal is reported honestly.
+    view.ApplyResult(false, 5, 200);
+    CHECK(view.State() == RewardState::kRejected);
+    CHECK(view.Note().find("refused") != std::string::npos);
+
+    // Deadline expiry only affects an unanswered offer.
+    RewardView timed;
+    timed.SetOptions({5}, 100, table);
+    timed.Timeout();
+    CHECK(timed.State() == RewardState::kTimedOut);
+    CHECK(!timed.Active());
+    timed.ApplyResult(true, 5, 1);
+    CHECK(timed.State() == RewardState::kApplied);
+
+    // Clearing resets everything (stage change / disconnect).
+    view.Clear();
+    CHECK(view.State() == RewardState::kNone);
+    CHECK(view.Options().empty());
+    CHECK(!view.Active());
+}
+
 }  // namespace
 
 int main() {
@@ -278,6 +349,8 @@ int main() {
     TestCombatViewProjectilesAndStage();
     TestGameViewCombatFields();
     TestCombatViewFeedback();
+    TestParseEquipmentTable();
+    TestRewardViewFlow();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
