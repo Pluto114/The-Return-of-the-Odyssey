@@ -3,6 +3,7 @@
 #include "input/InputSample.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 
 #include <cmath>
@@ -35,6 +36,8 @@ using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::ParseEquipmentTable;
 using odyssey::client::sync::PlayerView;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::RecoveryPhase;
+using odyssey::client::sync::RecoveryState;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotView;
@@ -335,6 +338,67 @@ void TestRewardViewFlow() {
     CHECK(!view.Active());
 }
 
+void TestRecoveryStateFlow() {
+    RecoveryState recovery;
+    recovery.SetToken({1, 2, 3});
+    CHECK(recovery.HasToken());
+
+    recovery.OnDisconnect(0.0);
+    CHECK(recovery.Phase() == RecoveryPhase::kWaitingToRetry);
+    CHECK(recovery.ShouldRetry(0.0));         // first retry immediately
+    recovery.MarkRetryStarted(0.0);
+    CHECK(recovery.Attempts() == 1);
+    CHECK(recovery.Phase() == RecoveryPhase::kConnecting);
+
+    // The attempt failed: the next retry honours the backoff (2s -> 4s ...)
+    // instead of resetting it, so repeated failures do not hammer the server.
+    recovery.OnDisconnect(1.0);
+    CHECK(!recovery.ShouldRetry(4.0));        // next attempt at 1.0 + 4.0
+    CHECK(recovery.ShouldRetry(5.0));
+
+    recovery.OnConnected();
+    CHECK(recovery.Phase() == RecoveryPhase::kResuming);
+    CHECK(recovery.WantsResumeRequest());
+    recovery.MarkResumeSent();
+    CHECK(!recovery.WantsResumeRequest());    // exactly one per connection
+
+    recovery.OnResumeResult(true);
+    CHECK(recovery.Phase() == RecoveryPhase::kRestored);
+    CHECK(!recovery.Active());
+    CHECK(recovery.Attempts() == 0);
+
+    // Refused token: cleared so the caller performs a fresh login and never
+    // replays the old session's inputs.
+    RecoveryState refused;
+    refused.SetToken({9});
+    refused.OnDisconnect(0.0);
+    refused.MarkRetryStarted(0.0);
+    refused.OnConnected();
+    refused.OnResumeResult(false);
+    CHECK(refused.Phase() == RecoveryPhase::kFailed);
+    CHECK(!refused.HasToken());
+
+    // Retries are bounded: after kMaxAttempts the loop must stop and ask the
+    // user (R) instead of hammering the server.
+    RecoveryState exhausted;
+    exhausted.OnDisconnect(0.0);
+    double now = 0.0;
+    for (int i = 0; i < RecoveryState::kMaxAttempts; ++i) {
+        CHECK(exhausted.ShouldRetry(now));
+        exhausted.MarkRetryStarted(now);
+        now += RecoveryState::kMaxBackoffSeconds;  // past this attempt's slot
+        if (i + 1 < RecoveryState::kMaxAttempts) {
+            exhausted.OnDisconnect(now);           // attempt failed
+            now += RecoveryState::kMaxBackoffSeconds;  // wait out the backoff
+        }
+    }
+    CHECK(exhausted.Exhausted());
+    CHECK(!exhausted.ShouldRetry(now + 1000.0));
+
+    recovery.Reset();
+    CHECK(recovery.Phase() == RecoveryPhase::kIdle);
+}
+
 }  // namespace
 
 int main() {
@@ -351,6 +415,7 @@ int main() {
     TestCombatViewFeedback();
     TestParseEquipmentTable();
     TestRewardViewFlow();
+    TestRecoveryStateFlow();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

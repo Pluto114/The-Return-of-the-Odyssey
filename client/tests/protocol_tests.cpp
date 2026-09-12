@@ -39,6 +39,8 @@ using odyssey::client::network::payload::DecodeProjectileSpawn;
 using odyssey::client::network::payload::DecodeRewardApplied;
 using odyssey::client::network::payload::DecodeRewardOptions;
 using odyssey::client::network::payload::EncodeRewardChoice;
+using odyssey::client::network::payload::DecodeResumeResponse;
+using odyssey::client::network::payload::EncodeResumeRequest;
 using odyssey::client::network::payload::DecodeStageEvent;
 using odyssey::client::network::payload::DecodeWorldSnapshot;
 using odyssey::client::network::payload::EncodeLoginRequest;
@@ -384,6 +386,37 @@ void TestRewardWire() {
           static_cast<std::uint32_t>(odyssey::protocol::v1::REASON_INVALID_STATE));
 }
 
+void TestResumeWire() {
+    const std::vector<std::uint8_t> token = {0xDE, 0xAD, 0xBE, 0xEF};
+    const auto bytes = EncodeResumeRequest(token, 1);
+    odyssey::protocol::v1::ResumeRequest parsed;
+    CHECK(parsed.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())));
+    CHECK(parsed.protocol_version() == 1);
+    CHECK(parsed.resume_token().size() == token.size());
+    CHECK(static_cast<std::uint8_t>(parsed.resume_token()[0]) == 0xDE);
+    CHECK(static_cast<std::uint8_t>(parsed.resume_token()[3]) == 0xEF);
+
+    odyssey::protocol::v1::ResumeResponse ok;
+    ok.set_reason(odyssey::protocol::v1::REASON_OK);
+    ok.set_session_id(77);
+    ok.set_player_id(9);
+    odyssey::client::network::payload::ResumeResponseData ok_view;
+    CHECK(DecodeResumeResponse(Serialize(ok), ok_view));
+    CHECK(ok_view.ok);
+    CHECK(ok_view.session_id == 77);
+    CHECK(ok_view.player_id == 9);
+
+    odyssey::protocol::v1::ResumeResponse expired;
+    expired.set_reason(odyssey::protocol::v1::REASON_RESUME_TOKEN_EXPIRED);
+    expired.set_message("token expired");
+    odyssey::client::network::payload::ResumeResponseData expired_view;
+    CHECK(DecodeResumeResponse(Serialize(expired), expired_view));
+    CHECK(!expired_view.ok);
+    CHECK(expired_view.reason ==
+          static_cast<std::uint32_t>(odyssey::protocol::v1::REASON_RESUME_TOKEN_EXPIRED));
+    CHECK(expired_view.message == "token expired");
+}
+
 void TestDisconnectDecode() {
     odyssey::protocol::v1::Disconnect proto;
     proto.set_reason(odyssey::protocol::v1::REASON_EVENT_BACKPRESSURE);
@@ -409,6 +442,7 @@ int main() {
     TestWorldSnapshotDecode();
     TestCombatEventsDecode();
     TestRewardWire();
+    TestResumeWire();
     TestDisconnectDecode();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

@@ -14,6 +14,7 @@
 #include "raylib.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 
 #include <cmath>
@@ -88,6 +89,7 @@ using odyssey::client::network::payload::ProjectileDestroyData;
 using odyssey::client::network::payload::ProjectileSpawnData;
 using odyssey::client::network::payload::RewardAppliedData;
 using odyssey::client::network::payload::RewardOptionsData;
+using odyssey::client::network::payload::ResumeResponseData;
 using odyssey::client::network::payload::StageEventData;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
@@ -96,6 +98,8 @@ using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::RecoveryPhase;
+using odyssey::client::sync::RecoveryState;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::StageInfo;
@@ -113,6 +117,8 @@ struct DemoState {
     std::uint64_t session_id = 0;
     std::uint64_t player_id = 0;
     std::string login_note = "not sent";
+    std::vector<std::uint8_t> resume_token;  // from LoginResponse; enables resume
+    bool resumed = false;                    // this session was re-attached
 
     // Matchmaking / room binding.
     bool match_sent = false;
@@ -187,6 +193,7 @@ int main() {
     GameView game_view;           // players from authoritative snapshots
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
     RewardView reward_view;       // treasure chest options / choice state
+    RecoveryState recovery;       // reconnect/resume state machine (D8)
     EquipmentTable equipment_table;
 
     // Optional local display table (static equipment data is never sent on the
@@ -260,7 +267,7 @@ int main() {
             demo.room_id = 0;
             demo.match_note = "not sent";
             demo.server_note.clear();
-            input_sequencer.Reset();
+            recovery.Reset();
             game_view = GameView{};
             combat_view.Clear();
             reward_view.Clear();
@@ -268,6 +275,17 @@ int main() {
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
             demo.ready_sent = false;
+            client.Connect(kServerHost, kServerPort);
+        }
+
+        // Automatic reconnect with bounded backoff after a transient outage.
+        // The window stays responsive: this only initiates an async connect.
+        if (demo.state != ConnectionState::kConnected && recovery.ShouldRetry(GetTime())) {
+            recovery.MarkRetryStarted(GetTime());
+            demo.state = ConnectionState::kIdle;
+            demo.state_detail = recovery.Note();
+            std::printf("main: %s\n", recovery.Note().c_str());
+            std::fflush(stdout);
             client.Connect(kServerHost, kServerPort);
         }
 
@@ -348,6 +366,10 @@ int main() {
                     fflush(stdout);
                     if (demo.state != ConnectionState::kConnected) {
                         // Fresh session on every reconnect; never reuse identity.
+                        // InputSeq is deliberately NOT reset here: a resumed
+                        // session must keep its sequence so the server never
+                        // sees a replayed/stale range.
+                        const bool had_session = demo.login_ok || !demo.resume_token.empty();
                         demo.login_sent = false;
                         demo.login_ok = false;
                         demo.session_id = 0;
@@ -357,7 +379,6 @@ int main() {
                         demo.in_room = false;
                         demo.room_id = 0;
                         demo.match_note = "not sent";
-                        input_sequencer.Reset();
                         game_view = GameView{};
                         combat_view.Clear();
                         reward_view.Clear();
@@ -365,6 +386,14 @@ int main() {
                         demo.banner.clear();
                         demo.banner_ttl = 0.0f;
                         demo.ready_sent = false;
+                        if (had_session) {
+                            recovery.OnDisconnect(GetTime());
+                            std::printf("main: connection lost -> recovery (%s)\n",
+                                        recovery.Note().c_str());
+                            std::fflush(stdout);
+                        } else {
+                            recovery.Reset();
+                        }
                     }
                     break;
                 case NetEvent::Kind::kMessage:
@@ -382,9 +411,48 @@ int main() {
                                                   ? "ok"
                                                   : ("reason=" + std::to_string(login.reason) +
                                                      " " + login.message);
+                            if (login.ok) {
+                                // Fresh session: InputSeq restarts at 1 and the
+                                // new resume token enables a later reconnect.
+                                demo.resume_token = login.resume_token;
+                                recovery.SetToken(login.resume_token);
+                                recovery.OnFreshLoginOk();
+                                demo.resumed = false;
+                                input_sequencer.Reset();
+                            }
                         } else {
                             demo.login_ok = false;
                             demo.login_note = "LoginResponse decode failed";
+                        }
+                    } else if (event->message.message_type == kResumeResponse) {
+                        ResumeResponseData resume;
+                        if (payload::DecodeResumeResponse(event->message.payload, resume)) {
+                            recovery.OnResumeResult(resume.ok);
+                            if (resume.ok) {
+                                demo.login_ok = true;
+                                demo.session_id = resume.session_id;
+                                demo.player_id = resume.player_id;
+                                demo.resumed = true;
+                                demo.in_room = true;
+                                demo.login_note = "resumed session";
+                                std::printf("main: session resumed session=%llu player=%llu\n",
+                                            static_cast<unsigned long long>(resume.session_id),
+                                            static_cast<unsigned long long>(resume.player_id));
+                                std::fflush(stdout);
+                            } else {
+                                // Refused (expired/forged/replayed). Never replay
+                                // old inputs: drop identity and log in fresh.
+                                demo.login_ok = false;
+                                demo.in_room = false;
+                                demo.login_sent = false;
+                                demo.match_sent = false;
+                                demo.resume_token.clear();
+                                demo.login_note = "resume refused reason=" +
+                                                  std::to_string(resume.reason) + " " +
+                                                  resume.message;
+                                std::printf("main: resume refused reason=%u\n", resume.reason);
+                                std::fflush(stdout);
+                            }
                         }
                     } else if (event->message.message_type == kMatchFound) {
                         MatchFoundData match;
@@ -610,8 +678,17 @@ int main() {
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
 
-            // Auto-login once per connection (dev mode: token accepted as-is).
-            if (!demo.login_sent) {
+            // Resume first when we still hold a token (D8); otherwise perform a
+            // fresh development login.
+            if (recovery.WantsResumeRequest()) {
+                recovery.MarkResumeSent();
+                demo.login_sent = true;
+                demo.login_note = "sending ResumeRequest";
+                SendPayload(kResumeRequest,
+                            payload::EncodeResumeRequest(recovery.Token(), kClientProtocolVersion));
+                std::printf("main: sent ResumeRequest token_bytes=%zu\n", recovery.Token().size());
+                std::fflush(stdout);
+            } else if (!demo.login_sent && recovery.Phase() != RecoveryPhase::kResuming) {
                 demo.login_sent = true;
                 demo.login_note = "sent, awaiting response";
                 LoginRequestData login;
@@ -659,6 +736,22 @@ int main() {
             std::string("Connection: ") + ToString(demo.state) + "  (" + demo.state_detail + ")";
         DrawText(state_line.c_str(), 24, 100, 20,
                  demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
+
+        const char* recovery_phase = "idle";
+        switch (recovery.Phase()) {
+            case RecoveryPhase::kIdle: recovery_phase = "idle"; break;
+            case RecoveryPhase::kWaitingToRetry: recovery_phase = "waiting"; break;
+            case RecoveryPhase::kConnecting: recovery_phase = "connecting"; break;
+            case RecoveryPhase::kResuming: recovery_phase = "resuming"; break;
+            case RecoveryPhase::kRestored: recovery_phase = "restored"; break;
+            case RecoveryPhase::kFailed: recovery_phase = "failed"; break;
+        }
+        const std::string recovery_line =
+            std::string("Recovery: ") + recovery_phase + " attempts=" +
+            std::to_string(recovery.Attempts()) + " token_bytes=" +
+            std::to_string(demo.resume_token.size()) +
+            (demo.resumed ? " (resumed session)" : "") + "  " + recovery.Note();
+        DrawText(recovery_line.c_str(), 24, 115, 18, GRAY);
 
         const std::string login_line =
             "Login: " + demo.login_note +

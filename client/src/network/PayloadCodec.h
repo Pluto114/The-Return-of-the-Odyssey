@@ -393,6 +393,40 @@ inline bool DecodeLoginResponse(const std::vector<std::uint8_t>& payload, LoginR
     return true;
 }
 
+// ---- Resume (reconnect after a transient disconnect) -----------------------
+
+struct ResumeResponseData {
+    std::uint32_t reason = 0;  // ReasonCode
+    std::string message;
+    std::uint64_t session_id = 0;
+    std::uint64_t player_id = 0;
+    bool ok = false;
+};
+
+inline std::vector<std::uint8_t> EncodeResumeRequest(const std::vector<std::uint8_t>& token,
+                                                     std::uint32_t protocol_version) {
+    odyssey::protocol::v1::ResumeRequest proto;
+    proto.set_resume_token(token.data(), token.size());
+    proto.set_protocol_version(protocol_version);
+    std::vector<std::uint8_t> out(proto.ByteSizeLong());
+    proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
+    return out;
+}
+
+inline bool DecodeResumeResponse(const std::vector<std::uint8_t>& payload,
+                                 ResumeResponseData& out) {
+    odyssey::protocol::v1::ResumeResponse proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.reason = static_cast<std::uint32_t>(proto.reason());
+    out.message = proto.message();
+    out.session_id = proto.session_id();
+    out.player_id = proto.player_id();
+    out.ok = (proto.reason() == odyssey::protocol::v1::REASON_OK);
+    return true;
+}
+
 // ---- Rewards (410-413) -----------------------------------------------------
 
 struct RewardOptionsData {
