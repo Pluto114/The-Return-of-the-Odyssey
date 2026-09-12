@@ -3,6 +3,8 @@
 #include "input/InputSample.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/Interpolation.h"
+#include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 
@@ -32,7 +34,11 @@ using odyssey::client::input::NormalizeInput;
 using odyssey::client::sync::CombatView;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::kArenaMax;
+using odyssey::client::sync::kSimulationStepSeconds;
 using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::MovementPredictor;
 using odyssey::client::sync::ParseEquipmentTable;
 using odyssey::client::sync::PlayerView;
 using odyssey::client::sync::ProjectileVisual;
@@ -41,7 +47,9 @@ using odyssey::client::sync::RecoveryState;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotView;
+using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
+using odyssey::client::sync::StepMovement;
 
 constexpr float kEps = 1e-5f;
 
@@ -399,6 +407,92 @@ void TestRecoveryStateFlow() {
     CHECK(recovery.Phase() == RecoveryPhase::kIdle);
 }
 
+void TestMovementPredictorReconciliation() {
+    MovementPredictor predictor;
+    // Two unconfirmed inputs at 30Hz, 5 units/s => 5/30 per tick.
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    predictor.RecordInput(InputCommand{2, 1.0f, 0.0f});
+    CHECK(predictor.HasPrediction());
+    CHECK(predictor.PendingCount() == 2);
+    CHECK(std::fabs(predictor.X() - (10.0f / 30.0f)) < kEps);
+
+    // Server confirms only input 1 and reports its own position: we snap there
+    // and replay the still-pending input 2.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 1);
+    CHECK(predictor.PendingCount() == 1);
+    CHECK(std::fabs(predictor.X() - (5.0f + 5.0f / 30.0f)) < kEps);
+    CHECK(std::fabs(predictor.Z() - 7.0f) < kEps);
+    CHECK(predictor.LastCorrectionDistance() > 0.0f);
+
+    // Server confirms everything: no pending inputs, exact authoritative pose.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 2);
+    CHECK(predictor.PendingCount() == 0);
+    CHECK(std::fabs(predictor.X() - 5.0f) < kEps);
+    CHECK(std::fabs(predictor.Z() - 7.0f) < kEps);
+
+    // Reset (new session / resume) drops predictions entirely.
+    predictor.Reset();
+    CHECK(!predictor.HasPrediction());
+    CHECK(predictor.PendingCount() == 0);
+}
+
+void TestStepMovementRules() {
+    // Diagonal is length-limited: 30 ticks diagonal == 30 ticks straight.
+    float dx = 0.0f;
+    float dz = 0.0f;
+    {
+        auto [x1, z1] = StepMovement(0.0f, 0.0f, 1.0f, 0.0f, 30.0f * kSimulationStepSeconds);
+        dx = x1;
+        dz = z1;
+    }
+    const auto [x2, z2] = StepMovement(0.0f, 0.0f, 1.0f, 1.0f, 30.0f * kSimulationStepSeconds);
+    const float diagonal_length = std::sqrt(x2 * x2 + z2 * z2);
+    CHECK(std::fabs(diagonal_length - 5.0f) < 1e-3f);
+    CHECK(std::fabs(dx - 5.0f) < 1e-3f);
+    CHECK(std::fabs(dz) < kEps);
+
+    // Zero intent does not move, and the arena clamps.
+    const auto [x3, z3] = StepMovement(3.0f, 4.0f, 0.0f, 0.0f, kSimulationStepSeconds);
+    CHECK(x3 == 3.0f);
+    CHECK(z3 == 4.0f);
+    const auto [x4, z4] = StepMovement(19.9f, 19.9f, 1.0f, 1.0f, kSimulationStepSeconds);
+    CHECK(x4 <= kArenaMax);
+    CHECK(z4 <= kArenaMax);
+}
+
+void TestSnapshotInterpolation() {
+    SnapshotInterpolator interpolator;
+    interpolator.SetDelayTicks(1.0);
+    CHECK(interpolator.ApplyEntities({{1, {0.0f, 0.0f}}}, 100).empty());
+    CHECK(interpolator.ApplyEntities({{1, {10.0f, 0.0f}}}, 110).empty());
+    CHECK(interpolator.LatestTick() == 110);
+    CHECK(interpolator.Count() == 1);
+    CHECK(interpolator.HasEntity(1));
+
+    // Render tick = latest - delay = 109 => one tick before the newest sample.
+    float x = 0.0f;
+    float z = 0.0f;
+    CHECK(interpolator.SampleEntity(1, x, z));
+    CHECK(std::fabs(x - 9.0f) < 1e-3f);
+    CHECK(std::fabs(z) < kEps);
+    CHECK(!interpolator.SampleEntity(42, x, z));
+
+    // Out-of-order samples are ignored instead of rewinding time.
+    CHECK(interpolator.ApplyEntities({{1, {1.0f, 0.0f}}}, 105).empty());
+    CHECK(interpolator.SampleEntity(1, x, z));
+    CHECK(std::fabs(x - 9.0f) < 1e-3f);
+
+    // Full-set semantics: an entity missing from the newest snapshot is gone.
+    const auto removed = interpolator.ApplyEntities({{2, {1.0f, 1.0f}}}, 120);
+    CHECK(removed.size() == 1);
+    CHECK(removed[0] == 1);
+    CHECK(!interpolator.HasEntity(1));
+    CHECK(interpolator.HasEntity(2));
+
+    interpolator.Clear();
+    CHECK(interpolator.Count() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -416,6 +510,9 @@ int main() {
     TestParseEquipmentTable();
     TestRewardViewFlow();
     TestRecoveryStateFlow();
+    TestMovementPredictorReconciliation();
+    TestStepMovementRules();
+    TestSnapshotInterpolation();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

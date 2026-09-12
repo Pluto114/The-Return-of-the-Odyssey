@@ -14,6 +14,8 @@
 #include "raylib.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/Interpolation.h"
+#include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 
@@ -21,8 +23,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -96,12 +100,15 @@ using odyssey::client::network::payload::WorldSnapshotView;
 using odyssey::client::sync::CombatView;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::InputCommand;
 using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::MovementPredictor;
 using odyssey::client::sync::ProjectileVisual;
 using odyssey::client::sync::RecoveryPhase;
 using odyssey::client::sync::RecoveryState;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
+using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
 
 struct DemoState {
@@ -194,6 +201,9 @@ int main() {
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
     RewardView reward_view;       // treasure chest options / choice state
     RecoveryState recovery;       // reconnect/resume state machine (D8)
+    MovementPredictor predictor;  // local prediction + reconciliation (D9)
+    SnapshotInterpolator remote_interp;   // other players (10Hz -> smooth)
+    SnapshotInterpolator monster_interp;  // monsters (10Hz -> smooth)
     EquipmentTable equipment_table;
 
     // Optional local display table (static equipment data is never sent on the
@@ -268,6 +278,9 @@ int main() {
             demo.match_note = "not sent";
             demo.server_note.clear();
             recovery.Reset();
+            predictor.Reset();
+            remote_interp.Clear();
+            monster_interp.Clear();
             game_view = GameView{};
             combat_view.Clear();
             reward_view.Clear();
@@ -347,6 +360,11 @@ int main() {
                     last_aim_x = aim_x;
                     last_aim_z = aim_z;
                     last_shoot = input.shoot;
+                    // Predict immediately and remember the input for replay
+                    // until the server confirms it via last_processed_input.
+                    predictor.RecordInput(InputCommand{last_report.sequence,
+                                                       last_report.vector.x,
+                                                       last_report.vector.z});
                     SendPayload(kPlayerInput, payload::EncodePlayerInput(input));
                 } else {
                     last_report.sequence = 0;
@@ -379,6 +397,9 @@ int main() {
                         demo.in_room = false;
                         demo.room_id = 0;
                         demo.match_note = "not sent";
+                        predictor.Reset();
+                        remote_interp.Clear();
+                        monster_interp.Clear();
                         game_view = GameView{};
                         combat_view.Clear();
                         reward_view.Clear();
@@ -559,7 +580,26 @@ int main() {
                                 demo.self_attack = snap.self.attack;
                                 demo.self_defense = snap.self.defense;
                                 demo.self_move_speed = snap.self.move_speed;
+                                // D9: snap to the authoritative position and
+                                // replay only the inputs the server has not
+                                // confirmed yet.
+                                predictor.ApplyAuthoritative(snap.self.pos_x, snap.self.pos_z,
+                                                             snap.last_processed_input);
                             }
+
+                            // D9: remote entities are rendered from an
+                            // interpolated 10Hz buffer (full-set semantics).
+                            std::map<std::uint64_t, std::pair<float, float>> others_positions;
+                            for (const auto& other : snap.others) {
+                                others_positions[other.id] = {other.pos_x, other.pos_z};
+                            }
+                            remote_interp.ApplyEntities(others_positions, snap.server_tick);
+
+                            std::map<std::uint64_t, std::pair<float, float>> monster_positions;
+                            for (const auto& m : snap.monsters) {
+                                monster_positions[m.id] = {m.pos_x, m.pos_z};
+                            }
+                            monster_interp.ApplyEntities(monster_positions, snap.server_tick);
                             // Local deadline guard: stop accepting choices once
                             // the authoritative tick passes the deadline. The
                             // server still applies its default.
@@ -820,7 +860,18 @@ int main() {
             "  Ready: " + (demo.ready_sent ? "sent" : "no") +
             "  seed=" + std::to_string(combat_view.Stage().seed);
         DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
-        DrawText(("Last event: " + demo.last_event_note).c_str(), 24, 430, 20, MAROON);
+        DrawText(("Last event: " + demo.last_event_note).c_str(), 470, 400, 18, MAROON);
+
+        char correction_text[32] = {0};
+        std::snprintf(correction_text, sizeof(correction_text), "%.3f",
+                      predictor.LastCorrectionDistance());
+        const std::string netcode_line =
+            "Netcode: pending=" + std::to_string(predictor.PendingCount()) +
+            " corr=" + correction_text +
+            " interpDelay=" + std::to_string(static_cast<int>(remote_interp.DelayTicks())) +
+            "t tracks=" + std::to_string(remote_interp.Count()) + "/" +
+            std::to_string(monster_interp.Count());
+        DrawText(netcode_line.c_str(), 24, 430, 20, GRAY);
 
         // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
         // projectiles gold. Projectiles exist only via spawn/destroy events.
@@ -835,8 +886,12 @@ int main() {
         }
 
         for (const auto& [id, monster] : combat_view.Monsters()) {
-            const float sx = to_screen_x(monster.x);
-            const float sy = to_screen_y(monster.z);
+            // D9: render monsters from the interpolated 10Hz buffer.
+            float mx = monster.x;
+            float mz = monster.z;
+            monster_interp.SampleEntity(id, mx, mz);
+            const float sx = to_screen_x(mx);
+            const float sy = to_screen_y(mz);
             const bool dead = combat_view.IsDead(id);
             DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
                           dead ? DARKGRAY : ORANGE);
@@ -858,26 +913,38 @@ int main() {
         }
 
         for (const auto& player : game_view.Players()) {
-            const float px = to_screen_x(player.x);
-            const float py = to_screen_y(player.z);
             const bool is_self = (player.id == demo.player_id);
-            DrawCircleV(Vector2{px, py}, 9.0f,
+            float px = player.x;
+            float pz = player.z;
+            if (is_self) {
+                // D9: draw our predicted position (reconciled each snapshot).
+                if (predictor.HasPrediction()) {
+                    px = predictor.X();
+                    pz = predictor.Z();
+                }
+            } else {
+                // D9: remote players come from the interpolated buffer.
+                remote_interp.SampleEntity(player.id, px, pz);
+            }
+            px = to_screen_x(px);
+            pz = to_screen_y(pz);
+            DrawCircleV(Vector2{px, pz}, 9.0f,
                         !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
             if (combat_view.IsHitFlashing(player.id)) {
-                DrawCircleLines(static_cast<int>(px), static_cast<int>(py), 13.0f, GOLD);
+                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f, GOLD);
             }
             // HP bar above every player (authoritative hp/max_hp from snapshot).
             const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(py) - 20, 24, 4, Fade(RED, 0.25f));
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(py) - 20,
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20,
                           static_cast<int>(24.0f * hp_ratio), 4, player.alive ? GREEN : GRAY);
             if (is_self) {
                 // Aim heading we are sending to the server.
-                DrawLineV(Vector2{px, py},
-                          Vector2{px + last_aim_x * 26.0f, py + last_aim_z * 26.0f}, DARKBLUE);
+                DrawLineV(Vector2{px, pz},
+                          Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f}, DARKBLUE);
             }
             DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
-                     static_cast<int>(py - 8), 16, DARKGRAY);
+                     static_cast<int>(pz - 8), 16, DARKGRAY);
         }
 
         if (!demo.banner.empty()) {
