@@ -14,10 +14,13 @@
 #include "raylib.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/RewardView.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -83,13 +86,18 @@ using odyssey::client::network::payload::PlayerInputData;
 using odyssey::client::network::payload::PongData;
 using odyssey::client::network::payload::ProjectileDestroyData;
 using odyssey::client::network::payload::ProjectileSpawnData;
+using odyssey::client::network::payload::RewardAppliedData;
+using odyssey::client::network::payload::RewardOptionsData;
 using odyssey::client::network::payload::StageEventData;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
 using odyssey::client::sync::CombatView;
+using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::RewardState;
+using odyssey::client::sync::RewardView;
 using odyssey::client::sync::StageInfo;
 
 struct DemoState {
@@ -146,6 +154,14 @@ struct DemoState {
     std::uint32_t damages = 0;
     std::uint32_t deaths = 0;
     std::string last_event_note = "(none)";
+
+    // Self base stats from the newest snapshot (reward effects show up here).
+    float self_attack = 0.0f;
+    float self_defense = 0.0f;
+    float self_move_speed = 0.0f;
+
+    // D7 readiness (client-side echo; the server owns the ready barrier).
+    bool ready_sent = false;
 };
 
 }  // namespace
@@ -170,6 +186,23 @@ int main() {
     double last_input_time = 0.0;
     GameView game_view;           // players from authoritative snapshots
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
+    RewardView reward_view;       // treasure chest options / choice state
+    EquipmentTable equipment_table;
+
+    // Optional local display table (static equipment data is never sent on the
+    // wire). Missing file simply means "equipment#<id>" placeholders.
+    for (const char* candidate : {"equipment.csv", "assets/data/equipment.csv",
+                                  "client/assets/data/equipment.csv"}) {
+        std::ifstream file(candidate);
+        if (file) {
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            const std::size_t loaded = odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
+            std::printf("main: loaded %zu equipment entries from %s\n", loaded, candidate);
+            std::fflush(stdout);
+            break;
+        }
+    }
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
     std::printf("main: starting net thread\n"); fflush(stdout);
@@ -230,10 +263,30 @@ int main() {
             input_sequencer.Reset();
             game_view = GameView{};
             combat_view.Clear();
+            reward_view.Clear();
             demo.prev_stage_index = 0;
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
+            demo.ready_sent = false;
             client.Connect(kServerHost, kServerPort);
+        }
+
+        // Reward choice: keys 1..3 pick one of the offered options. Only a
+        // candidate equipment_id is sent; the server validates and applies it.
+        if (demo.in_room && reward_view.State() == RewardState::kOffered) {
+            const int keys[3] = {KEY_ONE, KEY_TWO, KEY_THREE};
+            for (int index = 0; index < 3 &&
+                                index < static_cast<int>(reward_view.Options().size());
+                 ++index) {
+                if (IsKeyPressed(keys[index])) {
+                    std::uint32_t equipment_id = 0;
+                    if (reward_view.ChooseByIndex(static_cast<std::size_t>(index), equipment_id)) {
+                        SendPayload(kRewardChoice, payload::EncodeRewardChoice(equipment_id));
+                        std::printf("main: reward choice sent id=%u\n", equipment_id);
+                        std::fflush(stdout);
+                    }
+                }
+            }
         }
 
         // Sample and transmit intent at a fixed 30Hz after MatchFound. The
@@ -307,9 +360,11 @@ int main() {
                         input_sequencer.Reset();
                         game_view = GameView{};
                         combat_view.Clear();
+                        reward_view.Clear();
                         demo.prev_stage_index = 0;
                         demo.banner.clear();
                         demo.banner_ttl = 0.0f;
+                        demo.ready_sent = false;
                     }
                     break;
                 case NetEvent::Kind::kMessage:
@@ -433,6 +488,20 @@ int main() {
                             if (snap.has_self) {
                                 demo.self_hp = snap.self.hp;
                                 demo.self_max_hp = snap.self.max_hp;
+                                demo.self_attack = snap.self.attack;
+                                demo.self_defense = snap.self.defense;
+                                demo.self_move_speed = snap.self.move_speed;
+                            }
+                            // Local deadline guard: stop accepting choices once
+                            // the authoritative tick passes the deadline. The
+                            // server still applies its default.
+                            if (reward_view.State() == RewardState::kOffered &&
+                                reward_view.DeadlineTick() != 0 &&
+                                snap.server_tick > reward_view.DeadlineTick()) {
+                                reward_view.Timeout();
+                                std::printf("main: reward deadline passed (tick=%llu)\n",
+                                            static_cast<unsigned long long>(snap.server_tick));
+                                std::fflush(stdout);
                             }
                         }
                     } else if (event->message.message_type == kProjectileSpawn) {
@@ -496,12 +565,38 @@ int main() {
                             demo.banner_ttl = 2.5f;
                             if (event->message.message_type == kStageStartedEvent) {
                                 // A new stage begins: drop event-driven bullets
-                                // from the previous wave.
+                                // from the previous wave and any reward panel.
                                 combat_view.ClearProjectiles();
+                                reward_view.Clear();
+                                demo.ready_sent = false;
                             }
                             std::printf("main: %s stage=%u tick=%llu\n", kind,
                                         stage_event.stage_index,
                                         static_cast<unsigned long long>(stage_event.server_tick));
+                            std::fflush(stdout);
+                        }
+                    } else if (event->message.message_type == kRewardOptions) {
+                        RewardOptionsData options;
+                        if (payload::DecodeRewardOptions(event->message.payload, options)) {
+                            reward_view.SetOptions(options.equipment_ids,
+                                                   options.deadline_server_tick,
+                                                   equipment_table);
+                            demo.last_event_note = "reward options=" +
+                                                   std::to_string(options.equipment_ids.size());
+                            std::printf("main: reward options stage=%u count=%zu deadline=%llu\n",
+                                        options.stage_index, options.equipment_ids.size(),
+                                        static_cast<unsigned long long>(options.deadline_server_tick));
+                            std::fflush(stdout);
+                        }
+                    } else if (event->message.message_type == kRewardApplied) {
+                        RewardAppliedData applied;
+                        if (payload::DecodeRewardApplied(event->message.payload, applied)) {
+                            reward_view.ApplyResult(applied.ok, applied.equipment_id, applied.reason);
+                            demo.last_event_note = std::string("reward applied id=") +
+                                                   std::to_string(applied.equipment_id) +
+                                                   (applied.ok ? " ok" : " refused");
+                            std::printf("main: reward applied id=%u ok=%d reason=%u\n",
+                                        applied.equipment_id, applied.ok ? 1 : 0, applied.reason);
                             std::fflush(stdout);
                         }
                     }
@@ -540,6 +635,17 @@ int main() {
                 ping.nonce = ++demo.ping_nonce;
                 ++demo.pings_sent;
                 SendPayload(kPing, payload::EncodePing(ping));
+            }
+
+            // D7: while in the Reward state, ENTER reports "ready for the next
+            // stage". The server applies the ready barrier; repeat presses are
+            // idempotent server-side.
+            if (demo.in_room && demo.stage_state == 3 && IsKeyPressed(KEY_ENTER)) {
+                SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
+                demo.ready_sent = true;
+                demo.last_event_note = "next stage ready sent";
+                std::printf("main: next stage ready sent\n");
+                std::fflush(stdout);
             }
         }
 
@@ -613,7 +719,15 @@ int main() {
             std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
             std::to_string(demo.deaths);
         DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
-        DrawText(("Last event: " + demo.last_event_note).c_str(), 24, 400, 20, MAROON);
+
+        const std::string stats_line =
+            "Stats(snapshot): ATK=" + std::to_string(static_cast<int>(demo.self_attack)) +
+            " DEF=" + std::to_string(static_cast<int>(demo.self_defense)) +
+            " SPD=" + std::to_string(static_cast<int>(demo.self_move_speed)) +
+            "  Ready: " + (demo.ready_sent ? "sent" : "no") +
+            "  seed=" + std::to_string(combat_view.Stage().seed);
+        DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
+        DrawText(("Last event: " + demo.last_event_note).c_str(), 24, 430, 20, MAROON);
 
         // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
         // projectiles gold. Projectiles exist only via spawn/destroy events.
@@ -677,7 +791,23 @@ int main() {
             DrawText(demo.banner.c_str(), 300, 20, 32, MAROON);
         }
 
-        DrawText("WASD move | mouse aim | SPACE shoot | R retry | ESC quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);
+        if (reward_view.State() != RewardState::kNone) {
+            // Treasure chest panel: options come from the server; display text
+            // comes from the local static table (ids travel on the wire).
+            DrawRectangle(20, 452, 920, 72, Fade(LIGHTGRAY, 0.45f));
+            DrawText(("REWARD - " + reward_view.Note() + "   (keys 1-3 choose)").c_str(),
+                     30, 456, 20, MAROON);
+            std::string row;
+            const auto& options = reward_view.Options();
+            for (std::size_t i = 0; i < options.size(); ++i) {
+                row += "[" + std::to_string(i + 1) + "] " + options[i].display.name + " (" +
+                       options[i].display.slot + ") " + options[i].display.stats + "   ";
+            }
+            DrawText(row.c_str(), 30, 486, 18, DARKGRAY);
+        } else {
+            DrawText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
+                     24, kScreenHeight - 60, 20, LIGHTGRAY);
+        }
         DrawFPS(kScreenWidth - 90, 12);
 
         EndDrawing();

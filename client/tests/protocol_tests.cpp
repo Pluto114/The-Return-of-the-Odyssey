@@ -36,6 +36,9 @@ using odyssey::client::network::payload::DecodeMatchFound;
 using odyssey::client::network::payload::DecodePong;
 using odyssey::client::network::payload::DecodeProjectileDestroy;
 using odyssey::client::network::payload::DecodeProjectileSpawn;
+using odyssey::client::network::payload::DecodeRewardApplied;
+using odyssey::client::network::payload::DecodeRewardOptions;
+using odyssey::client::network::payload::EncodeRewardChoice;
 using odyssey::client::network::payload::DecodeStageEvent;
 using odyssey::client::network::payload::DecodeWorldSnapshot;
 using odyssey::client::network::payload::EncodeLoginRequest;
@@ -204,6 +207,9 @@ void TestWorldSnapshotDecode() {
     self->mutable_velocity()->set_x(0.5f);
     self->set_hp(90.0f);
     self->set_max_hp(100.0f);
+    self->set_attack(12.0f);
+    self->set_defense(4.0f);
+    self->set_move_speed(5.0f);
     self->set_alive(true);
 
     auto* other1 = proto.add_players();
@@ -240,6 +246,9 @@ void TestWorldSnapshotDecode() {
         CHECK(view.self.vel_x == 0.5f);
         CHECK(view.self.hp == 90.0f);
         CHECK(view.self.max_hp == 100.0f);
+        CHECK(view.self.attack == 12.0f);
+        CHECK(view.self.defense == 4.0f);
+        CHECK(view.self.move_speed == 5.0f);
         CHECK(view.self.alive);
     }
     CHECK(view.others.size() == 2);
@@ -335,6 +344,46 @@ void TestCombatEventsDecode() {
     CHECK(stage_view.server_tick == 200);
 }
 
+void TestRewardWire() {
+    // RewardOptions (S -> C)
+    odyssey::protocol::v1::RewardOptions options;
+    options.set_stage_index(2);
+    options.add_equipment_ids(11);
+    options.add_equipment_ids(12);
+    options.add_equipment_ids(13);
+    options.set_deadline_server_tick(5000);
+    odyssey::client::network::payload::RewardOptionsData options_view;
+    CHECK(DecodeRewardOptions(Serialize(options), options_view));
+    CHECK(options_view.stage_index == 2);
+    CHECK(options_view.equipment_ids.size() == 3);
+    CHECK(options_view.equipment_ids[1] == 12);
+    CHECK(options_view.deadline_server_tick == 5000);
+
+    // RewardChoice (C -> S): only the candidate id travels.
+    const auto choice_bytes = EncodeRewardChoice(12);
+    odyssey::protocol::v1::RewardChoice choice;
+    CHECK(choice.ParseFromArray(choice_bytes.data(), static_cast<int>(choice_bytes.size())));
+    CHECK(choice.equipment_id() == 12);
+
+    // RewardApplied ok + refused.
+    odyssey::protocol::v1::RewardApplied applied;
+    applied.set_reason(odyssey::protocol::v1::REASON_OK);
+    applied.set_equipment_id(12);
+    odyssey::client::network::payload::RewardAppliedData applied_view;
+    CHECK(DecodeRewardApplied(Serialize(applied), applied_view));
+    CHECK(applied_view.ok);
+    CHECK(applied_view.equipment_id == 12);
+
+    odyssey::protocol::v1::RewardApplied refused;
+    refused.set_reason(odyssey::protocol::v1::REASON_INVALID_STATE);
+    refused.set_equipment_id(99);
+    odyssey::client::network::payload::RewardAppliedData refused_view;
+    CHECK(DecodeRewardApplied(Serialize(refused), refused_view));
+    CHECK(!refused_view.ok);
+    CHECK(refused_view.reason ==
+          static_cast<std::uint32_t>(odyssey::protocol::v1::REASON_INVALID_STATE));
+}
+
 void TestDisconnectDecode() {
     odyssey::protocol::v1::Disconnect proto;
     proto.set_reason(odyssey::protocol::v1::REASON_EVENT_BACKPRESSURE);
@@ -359,6 +408,7 @@ int main() {
     TestPlayerInputWire();
     TestWorldSnapshotDecode();
     TestCombatEventsDecode();
+    TestRewardWire();
     TestDisconnectDecode();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

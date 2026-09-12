@@ -9,6 +9,7 @@
 #include "game.pb.h"
 #include "lobby.pb.h"
 #include "session.pb.h"
+#include "stage.pb.h"
 #include "system.pb.h"
 
 #include <cstdint>
@@ -115,6 +116,11 @@ struct SnapshotPlayerView {
     float hp = 0.0f;
     float max_hp = 0.0f;
     bool alive = true;
+    // Base stats resolved by the server (shown in the HUD; reward effects
+    // become visible here after the next snapshot).
+    float attack = 0.0f;
+    float defense = 0.0f;
+    float move_speed = 0.0f;
 };
 
 struct SnapshotMonsterView {
@@ -159,6 +165,9 @@ inline SnapshotPlayerView MapPlayer(const odyssey::protocol::v1::PlayerSnapshot&
     out.hp = p.hp();
     out.max_hp = p.max_hp();
     out.alive = p.alive();
+    out.attack = p.attack();
+    out.defense = p.defense();
+    out.move_speed = p.move_speed();
     return out;
 }
 
@@ -382,6 +391,59 @@ inline bool DecodeLoginResponse(const std::vector<std::uint8_t>& payload, LoginR
     out.resume_token.assign(proto.resume_token().begin(), proto.resume_token().end());
     out.ok = (proto.reason() == odyssey::protocol::v1::REASON_OK);
     return true;
+}
+
+// ---- Rewards (410-413) -----------------------------------------------------
+
+struct RewardOptionsData {
+    std::uint32_t stage_index = 0;
+    std::vector<std::uint32_t> equipment_ids;
+    std::uint64_t deadline_server_tick = 0;
+};
+
+struct RewardAppliedData {
+    std::uint32_t reason = 0;  // ReasonCode; REASON_OK == 1
+    std::uint32_t equipment_id = 0;
+    bool ok = false;
+};
+
+inline bool DecodeRewardOptions(const std::vector<std::uint8_t>& payload,
+                                RewardOptionsData& out) {
+    odyssey::protocol::v1::RewardOptions proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.stage_index = proto.stage_index();
+    out.equipment_ids.assign(proto.equipment_ids().begin(), proto.equipment_ids().end());
+    out.deadline_server_tick = proto.deadline_server_tick();
+    return true;
+}
+
+inline std::vector<std::uint8_t> EncodeRewardChoice(std::uint32_t equipment_id) {
+    odyssey::protocol::v1::RewardChoice proto;
+    proto.set_equipment_id(equipment_id);
+    std::vector<std::uint8_t> out(proto.ByteSizeLong());
+    proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
+    return out;
+}
+
+inline bool DecodeRewardApplied(const std::vector<std::uint8_t>& payload,
+                                RewardAppliedData& out) {
+    odyssey::protocol::v1::RewardApplied proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.reason = static_cast<std::uint32_t>(proto.reason());
+    out.equipment_id = proto.equipment_id();
+    out.ok = (proto.reason() == odyssey::protocol::v1::REASON_OK);
+    return true;
+}
+
+inline std::vector<std::uint8_t> EncodeNextStageRequest() {
+    odyssey::protocol::v1::NextStageRequest proto;
+    std::vector<std::uint8_t> out(proto.ByteSizeLong());
+    proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
+    return out;
 }
 
 }  // namespace odyssey::client::network::payload

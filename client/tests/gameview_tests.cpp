@@ -3,6 +3,7 @@
 #include "input/InputSample.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/RewardView.h"
 
 #include <cmath>
 #include <cstdint>
@@ -28,10 +29,14 @@ using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
 using odyssey::client::sync::CombatView;
+using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
 using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::ParseEquipmentTable;
 using odyssey::client::sync::PlayerView;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::RewardState;
+using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotView;
 using odyssey::client::sync::StageInfo;
 
