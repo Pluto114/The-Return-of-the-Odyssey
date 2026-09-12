@@ -45,6 +45,17 @@ func TestRoomRewardCommandsResolveSessionAndPublishTargetedUpdates(t *testing.T)
 		if r.LatestSnapshot().Stage.State != stage.StageClear {
 			t.Fatal("test room did not clear")
 		}
+		completedReceipt, err := r.CompletedStage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		completed := <-completedReceipt
+		if completed.Err != nil || completed.Result.Plan.Index != 1 || completed.Result.Performance.ClearTimeSeconds <= 0 {
+			t.Fatalf("completed stage receipt = %+v", completed)
+		}
+		if _, open := <-completedReceipt; open {
+			t.Fatal("completed stage receipt did not close")
+		}
 
 		receipt, err := r.StartReward(roomRewardCatalog(t), 44, 30)
 		if err != nil {

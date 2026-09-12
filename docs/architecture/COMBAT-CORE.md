@@ -48,7 +48,7 @@ go run ./server/cmd/core-demo
 | `r.RewardUpdates()` | B 的定向可靠奖励出口；A 必须按 PlayerID 单播 RewardOptions/RewardApplied，不可使用战斗广播器 |
 | `r.Snapshots()` | 仍为 10Hz 完整快照；新增 MonsterView 和 Stage，玩家新增生命/属性/瞄准；C 按 ID 对齐并移除缺失怪物 |
 | `Stats.CloseReason` | D 可观察 requested / idle / event_backpressure；触发关闭后注销房间、通知对应 Session |
-| `director.Planner` | 仅声明 Generate(previous Plan, PerformanceMetrics) → (Plan, error)；具体规则算法尚未实现 |
+| `director.RuleBasedPlanner` | 使用 `Room.CompletedStage()` 的冻结 Plan/PerformanceMetrics 生成下一关；规则、上下限与 Decision 见 [Director 接口](DIRECTOR.md) |
 
 StartStage 只能在 Waiting 且至少有一名存活玩家时成功；进入战斗后不允许新增玩家，重复绑定现有玩家仍幂等。
 正式入口应先完成两名玩家的 Join 和事件订阅，再生成首关 Plan、提交 StartStage 并等待 receipt；任何一步失败都按房间创建失败清理，不能向客户端宣称关卡已开始。
@@ -75,6 +75,6 @@ Room 的事件队列默认容纳 64 个 Tick 批次，只有一个消费者，�
 - A：将已完成的射击/战斗事件映射接入正式入口，补 Session 可靠发送失败与断线通知。
 - C：怪物/HP 展示、视觉子弹、事件效果、预测与插值。
 - D：匹配调用、监控映射、真实 Bot / 联调 / 性能验证。
-- B：装备/奖励纯领域接口已进入 [装备与奖励领域接口](EQUIPMENT-REWARD.md)；World/Room 接线、下一关转换、Director 规则、逐阶段性能采样和优化继续推进。首关生成器和显式 10Hz AI 决策周期已完成。
+- B：装备/奖励、World/Room 接线、下一关转换、Director 规则和逐阶段性能采样已完成，分别见 [装备与奖励领域接口](EQUIPMENT-REWARD.md) 与 [Director 接口](DIRECTOR.md)；后续继续 D9 多房隔离、高频输入和性能验证。
 
-本轮只实现 B 的首关原型，尚未完成架构中的完整 Roguelike 循环。验证结果见 [本轮记录](../verification/combat-core/README.md)。
+首关原型验证见 [战斗核心记录](../verification/combat-core/README.md)，连续三关服务端核心验证见 [D7 记录](../verification/week2-b-d7/README.md)。正式网络入口的奖励、Ready 和下一关编排仍需 A/D 接线。

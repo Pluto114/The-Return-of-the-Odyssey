@@ -31,7 +31,7 @@ go run ./server/cmd/core-demo
 | A：协议、网络、Session | 把已完成的 convert/router 接入正式 gameserver；处理 Send=false、断线 Leave、停服连接回收；与 B/D 统一可靠队列策略 | Join 成功回执后才 InRoom；Reader 不阻塞；慢连接不静默丢事件；生命周期测试通过。协议字段同步 C/D |
 | C：客户端、联调 | 移动与瞄准/射击输入；显示自己/队友/怪物 HP；消费完整快照和视觉子弹事件；关闭与断连处理 | 两个真实客户端可同房移动、攻击同一批怪物、看到一致清场/团灭状态；同 Room/ServerTick 对齐状态，提供日志或录像 |
 | D：匹配、平台、验证 | 房间注册与分配；监听 Done 注销；断线 Leave 重试；从 TickSamples/Stats 接指标；组织 Bot 与异常验证 | 两名玩家成功入房后再触发本轮双人战斗；玩家/房间计数可回收；事件拥塞有关闭原因；提交真实联调与监控证据。负责 B 代码评审 |
-| B：游戏核心 | 维护 StageIndex 等领域事件元数据；配合正式入口联调；继续装备修改器、药水、奖励状态、下一关和 Director 算法 | 双 TCP 战斗回归、领域测试和 race 通过；接口变更同步 A/C/D；未实现玩法不提供假成功返回 |
+| B：游戏核心 | 维护 StageIndex 等领域事件元数据；配合正式入口联调；已完成装备修改器、药水、奖励状态、下一关、性能指标和 Rule-Based Director，继续 D9 性能与隔离验证 | 双 TCP 战斗回归、领域测试和 race 通过；接口变更同步 A/C/D；未实现玩法不提供假成功返回 |
 
 ## 接口对齐项
 
@@ -49,7 +49,7 @@ go run ./server/cmd/core-demo
 | 快照 | 一个 dispatcher 消费再分发；含玩家、MonsterView、Stage，全量集合缺失的怪物要移除；不含子弹列表 |
 | 事件 | A 已实现单 dispatcher 和七类消息映射；StageIndex 由 B 事件产生时携带，不能从可能滞后的 10Hz 快照推断。Spawn/Destroy 驱动视觉子弹，Damage/Death/Stage 驱动反馈 |
 | 拥塞与关闭 | 快照已有 capacity=1 的 Latest Wins；Room 事件出口满时关闭并记录 event_backpressure。网络可靠队列的 Send=false 目前仍被 dispatcher 忽略，A/D 必须完成策略和慢 Socket 验收 |
-| 留白 | Director 只有 Planner 接口；Seed 尚不生成随机布局；Reward/PreparingNextStage 只有预留枚举。StageClear/Failed 后不能直接重开下一关 |
+| 奖励与下一关 | B 已提供 StartReward、ChooseReward、定向 RewardUpdates、CompletedStage 和确定性 Director。A 仍需接协议路由、单播奖励出口、在线玩家 Ready 屏障和正式 gameserver 编排；C/D 按对应接口接入 |
 
 ## 联调顺序与验收记录
 

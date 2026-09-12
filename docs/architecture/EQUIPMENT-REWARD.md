@@ -64,7 +64,7 @@ Player 快照已增加 EquipmentState，包含 WeaponID、RelicID 和 PotionID�
 
 ## 5. 尚待接线的边界
 
-- B 下一增量：实现 PerformanceMetrics、Rule-Based Director 和 Ready 屏障所需的纯关卡转换接口。
+- B：PerformanceMetrics、Rule-Based Director 和连续关卡核心已完成，见 [Director 接口](DIRECTOR.md)。
 - A：将 RewardOptions/RewardChoice/RewardApplied 路由到上述 Room 命令；为 `RewardUpdates()` 建单播 dispatcher，并将装备 ID 加入协议快照；移除 UsePotion 的占位拒绝。
 - C：从同版本目录显示名称、描述和属性变化；仅在 RewardApplied 成功后更新 UI，最终仍以快照为准。
 - D：在进程启动阶段加载并校验目录，暴露目录版本和 offered/chosen/defaulted/invalid 指标；配置失败时禁止启动正式玩法。

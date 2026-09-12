@@ -115,6 +115,8 @@ type World struct {
 	rewardCatalog  equipment.Catalog
 	rewardUpdates  []RewardUpdate
 	rewardOverflow bool
+	performance    stagePerformance
+	currentPlan    stage.Plan
 }
 
 func NewWorld(config Config) (*World, error) {
@@ -159,6 +161,8 @@ func (w *World) Clear() {
 	w.rewardCatalog = equipment.Catalog{}
 	w.rewardUpdates = nil
 	w.rewardOverflow = false
+	w.performance = stagePerformance{}
+	w.currentPlan = stage.Plan{}
 	w.stage = stage.View{}
 }
 func (w *World) Close()           { w.Clear(); w.stage.State = stage.Closed }

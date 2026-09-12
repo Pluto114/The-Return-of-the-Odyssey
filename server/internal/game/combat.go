@@ -125,6 +125,8 @@ func (w *World) StartStage(plan stage.Plan) error {
 		}
 		w.rewardRound = nil
 	}
+	w.performance = stagePerformance{startedAtTick: w.tick, equipmentPower: w.equipmentPower()}
+	w.currentPlan = plan.Clone()
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
 	for _, spawn := range plan.Monsters {
 		id := w.allocateID()
@@ -283,6 +285,7 @@ func (w *World) stepCombat() {
 		w.stage.State = stage.Failed
 		w.emit(Event{Kind: TeamDefeated, StageIndex: w.stage.Index})
 	} else if len(w.monsters) == 0 {
+		w.freezePerformance()
 		w.stage.State = stage.StageClear
 		w.emit(Event{Kind: StageCleared, StageIndex: w.stage.Index})
 	}
@@ -327,13 +330,18 @@ func (w *World) applyDamage(request systems.DamageRequest) {
 		p := w.players[request.TargetID]
 		p.player.Health = resolved.RemainingHealth
 		p.player.Alive = !resolved.Killed
+		w.performance.damageTaken += resolved.Amount
 		if resolved.Killed {
+			w.performance.deathCount++
 			p.player.Velocity = entity.Vec2{}
 			p.firing = false
 		}
 	} else {
 		m := w.monsters[request.TargetID]
 		m.monster.Health = resolved.RemainingHealth
+		if _, playerSource := w.players[request.SourceID]; playerSource {
+			w.performance.damageDealt += resolved.Amount
+		}
 		if resolved.Killed {
 			m.monster.State = entity.MonsterDead
 		}

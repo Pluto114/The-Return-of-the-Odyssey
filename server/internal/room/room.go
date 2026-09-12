@@ -97,12 +97,18 @@ type control struct {
 	stagePlan    *stage.Plan
 	rewardStart  *rewardStart
 	rewardChoice equipment.ID
+	stageResult  chan StageResultReceipt
 }
 
 type rewardStart struct {
 	catalog       equipment.Catalog
 	seed          int64
 	durationTicks uint64
+}
+
+type StageResultReceipt struct {
+	Result game.StageResult
+	Err    error
 }
 
 type movement struct {
@@ -226,6 +232,24 @@ func (r *Room) ChooseReward(sessionID SessionID, equipmentID equipment.ID) (<-ch
 	return r.submit(control{sessionID: sessionID, rewardChoice: equipmentID})
 }
 
+// CompletedStage reads the immutable plan and frozen metrics through the Room
+// owner. Director orchestration can use the result without accessing World.
+func (r *Room) CompletedStage() (<-chan StageResultReceipt, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan StageResultReceipt, 1)
+	select {
+	case r.controls <- control{stageResult: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
+}
+
 func (r *Room) submit(c control) (<-chan error, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -332,9 +356,15 @@ func (r *Room) tick(now time.Time) {
 	for range r.config.ControlsPerTick {
 		select {
 		case c := <-r.controls:
-			err := r.applyControl(c)
-			c.result <- err
-			close(c.result)
+			if c.stageResult != nil {
+				completed, err := r.world.CompletedStage()
+				c.stageResult <- StageResultReceipt{Result: completed.Clone(), Err: err}
+				close(c.stageResult)
+			} else {
+				err := r.applyControl(c)
+				c.result <- err
+				close(c.result)
+			}
 			sample.Controls++
 		default:
 			goto inputs
@@ -464,8 +494,13 @@ func (r *Room) finish() {
 	for {
 		select {
 		case c := <-r.controls:
-			c.result <- ErrClosed
-			close(c.result)
+			if c.stageResult != nil {
+				c.stageResult <- StageResultReceipt{Err: ErrClosed}
+				close(c.stageResult)
+			} else {
+				c.result <- ErrClosed
+				close(c.result)
+			}
 		default:
 			goto drainInputs
 		}
