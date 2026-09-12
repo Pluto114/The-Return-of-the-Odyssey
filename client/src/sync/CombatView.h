@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace odyssey::client::sync {
@@ -90,15 +91,43 @@ public:
     void SetStage(const StageInfo& stage) { stage_ = stage; }
     const StageInfo& Stage() const { return stage_; }
 
+    // ---- Combat feedback (D5) --------------------------------------------
+    // Damage/Death events drive short-lived client-side feedback only; the
+    // authoritative HP still comes from the next snapshot.
+    void ApplyDamageFx(std::uint64_t target_id) { hit_flash_[target_id] = kHitFlashSeconds; }
+    void ApplyDeath(std::uint64_t entity_id) { dead_.insert(entity_id); }
+
+    // Decays transient feedback (call once per frame with the frame delta).
+    void Tick(float dt) {
+        for (auto it = hit_flash_.begin(); it != hit_flash_.end();) {
+            it->second -= dt;
+            if (it->second <= 0.0f) {
+                it = hit_flash_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    bool IsDead(std::uint64_t id) const { return dead_.find(id) != dead_.end(); }
+    bool IsHitFlashing(std::uint64_t id) const { return hit_flash_.find(id) != hit_flash_.end(); }
+    std::size_t HitFlashCount() const { return hit_flash_.size(); }
+
     void Clear() {
         monsters_.clear();
         projectiles_.clear();
+        hit_flash_.clear();
+        dead_.clear();
         stage_ = StageInfo{};
     }
 
 private:
+    static constexpr float kHitFlashSeconds = 0.35f;
+
     std::map<std::uint64_t, MonsterEntity> monsters_;
     std::map<std::uint64_t, ProjectileVisual> projectiles_;
+    std::map<std::uint64_t, float> hit_flash_;
+    std::set<std::uint64_t> dead_;
     StageInfo stage_;
 };
 

@@ -47,6 +47,19 @@ constexpr std::uint32_t kClientProtocolVersion = 1;
 constexpr float kPingIntervalSeconds = 1.0f;
 constexpr double kFrameSeconds = 1.0 / 60.0;
 
+const char* StageStateName(std::uint32_t state) {
+    switch (state) {
+        case 0: return "waiting";
+        case 1: return "playing";
+        case 2: return "clear";
+        case 3: return "reward";
+        case 4: return "preparing";
+        case 5: return "failed";
+        case 6: return "closed";
+        default: return "?";
+    }
+}
+
 using namespace odyssey::client::network::ids;
 namespace payload = odyssey::client::network::payload;
 using odyssey::client::core::BoundedQueue;
@@ -125,6 +138,9 @@ struct DemoState {
     std::uint32_t stage_index = 0;
     std::uint32_t stage_state = 0;
     std::uint32_t monsters_remaining = 0;
+    std::uint32_t prev_stage_index = 0;
+    std::string banner;       // transient stage outcome message
+    float banner_ttl = 0.0f;
     std::uint32_t spawns = 0;
     std::uint32_t destroys = 0;
     std::uint32_t damages = 0;
@@ -180,6 +196,15 @@ int main() {
             break;
         }
         const double frame_start = GetTime();
+        // Decay transient combat feedback (hit flashes, banner).
+        const float frame_dt = GetFrameTime();
+        combat_view.Tick(frame_dt);
+        if (demo.banner_ttl > 0.0f) {
+            demo.banner_ttl -= frame_dt;
+            if (demo.banner_ttl <= 0.0f) {
+                demo.banner.clear();
+            }
+        }
         if ((frame_counter % 120) == 0) {
             std::printf("main: frame %d state=%s elapsed=%.1fs fps=%d\n", frame_counter,
                         ToString(demo.state), GetTime() - t_start, GetFPS());
@@ -205,6 +230,9 @@ int main() {
             input_sequencer.Reset();
             game_view = GameView{};
             combat_view.Clear();
+            demo.prev_stage_index = 0;
+            demo.banner.clear();
+            demo.banner_ttl = 0.0f;
             client.Connect(kServerHost, kServerPort);
         }
 
@@ -279,6 +307,9 @@ int main() {
                         input_sequencer.Reset();
                         game_view = GameView{};
                         combat_view.Clear();
+                        demo.prev_stage_index = 0;
+                        demo.banner.clear();
+                        demo.banner_ttl = 0.0f;
                     }
                     break;
                 case NetEvent::Kind::kMessage:
@@ -348,6 +379,9 @@ int main() {
                                 v.z = p.pos_z;
                                 v.vx = p.vel_x;
                                 v.vz = p.vel_z;
+                                v.hp = p.hp;
+                                v.max_hp = p.max_hp;
+                                v.alive = p.alive;
                                 if (snap.has_self && p.id == snap.self.id) {
                                     v.last_processed_input_seq = snap.last_processed_input;
                                 }
@@ -385,6 +419,14 @@ int main() {
                             stage.state = snap.stage.state;
                             stage.monsters_remaining = snap.stage.monsters_remaining;
                             combat_view.SetStage(stage);
+                            // New stage: old projectiles must not leak across
+                            // the transition (they are event-driven only).
+                            if (demo.prev_stage_index != 0 &&
+                                snap.stage.index != demo.prev_stage_index) {
+                                combat_view.ClearProjectiles();
+                                demo.last_event_note = "stage index changed -> projectiles cleared";
+                            }
+                            demo.prev_stage_index = snap.stage.index;
                             demo.stage_index = snap.stage.index;
                             demo.stage_state = snap.stage.state;
                             demo.monsters_remaining = snap.stage.monsters_remaining;
@@ -422,6 +464,7 @@ int main() {
                         DamageEventData damage;
                         if (payload::DecodeDamageEvent(event->message.payload, damage)) {
                             ++demo.damages;
+                            combat_view.ApplyDamageFx(damage.target_id);
                             demo.last_event_note = "damage target=" +
                                                    std::to_string(damage.target_id) + " amount=" +
                                                    std::to_string(damage.amount) + " hp=" +
@@ -431,6 +474,7 @@ int main() {
                         DeathEventData death;
                         if (payload::DecodeDeathEvent(event->message.payload, death)) {
                             ++demo.deaths;
+                            combat_view.ApplyDeath(death.entity_id);
                             demo.last_event_note = "death entity=" +
                                                    std::to_string(death.entity_id) + " killer=" +
                                                    std::to_string(death.killer_id);
@@ -447,6 +491,14 @@ int main() {
                                                           : "team defeated");
                             demo.last_event_note = std::string(kind) + " index=" +
                                                    std::to_string(stage_event.stage_index);
+                            demo.banner = std::string(kind) + "  stage " +
+                                          std::to_string(stage_event.stage_index);
+                            demo.banner_ttl = 2.5f;
+                            if (event->message.message_type == kStageStartedEvent) {
+                                // A new stage begins: drop event-driven bullets
+                                // from the previous wave.
+                                combat_view.ClearProjectiles();
+                            }
                             std::printf("main: %s stage=%u tick=%llu\n", kind,
                                         stage_event.stage_index,
                                         static_cast<unsigned long long>(stage_event.server_tick));
@@ -547,7 +599,7 @@ int main() {
 
         const std::string combat_line =
             "Stage: idx=" + std::to_string(demo.stage_index) +
-            " state=" + std::to_string(demo.stage_state) +
+            " state=" + StageStateName(demo.stage_state) +
             " remain=" + std::to_string(demo.monsters_remaining) +
             " | monsters=" + std::to_string(combat_view.MonsterCount()) +
             " bullets=" + std::to_string(combat_view.ProjectileCount());
@@ -578,11 +630,22 @@ int main() {
         for (const auto& [id, monster] : combat_view.Monsters()) {
             const float sx = to_screen_x(monster.x);
             const float sy = to_screen_y(monster.z);
-            DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14, ORANGE);
+            const bool dead = combat_view.IsDead(id);
+            DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
+                          dead ? DARKGRAY : ORANGE);
+            if (dead) {
+                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7,
+                         static_cast<int>(sx) + 7, static_cast<int>(sy) + 7, BLACK);
+                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) + 7,
+                         static_cast<int>(sx) + 7, static_cast<int>(sy) - 7, BLACK);
+            }
             const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
             DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4, Fade(RED, 0.25f));
             DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
                           static_cast<int>(20.0f * ratio), 4, LIME);
+            if (combat_view.IsHitFlashing(id)) {
+                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f, GOLD);
+            }
             DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 9,
                      static_cast<int>(sy) - 8, 12, DARKGRAY);
         }
@@ -591,7 +654,16 @@ int main() {
             const float px = to_screen_x(player.x);
             const float py = to_screen_y(player.z);
             const bool is_self = (player.id == demo.player_id);
-            DrawCircleV(Vector2{px, py}, 9.0f, is_self ? BLUE : RED);
+            DrawCircleV(Vector2{px, py}, 9.0f,
+                        !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
+            if (combat_view.IsHitFlashing(player.id)) {
+                DrawCircleLines(static_cast<int>(px), static_cast<int>(py), 13.0f, GOLD);
+            }
+            // HP bar above every player (authoritative hp/max_hp from snapshot).
+            const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(py) - 20, 24, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(py) - 20,
+                          static_cast<int>(24.0f * hp_ratio), 4, player.alive ? GREEN : GRAY);
             if (is_self) {
                 // Aim heading we are sending to the server.
                 DrawLineV(Vector2{px, py},
@@ -599,6 +671,10 @@ int main() {
             }
             DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
                      static_cast<int>(py - 8), 16, DARKGRAY);
+        }
+
+        if (!demo.banner.empty()) {
+            DrawText(demo.banner.c_str(), 300, 20, 32, MAROON);
         }
 
         DrawText("WASD move | mouse aim | SPACE shoot | R retry | ESC quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);

@@ -218,6 +218,47 @@ void TestCombatViewProjectilesAndStage() {
     CHECK(view.Stage().monsters_remaining == 3);
 }
 
+void TestGameViewCombatFields() {
+    GameView view;
+    SnapshotView snap;
+    snap.room_id = 1;
+    snap.server_tick = 10;
+    PlayerView player;
+    player.id = 7;
+    player.hp = 40.0f;
+    player.max_hp = 100.0f;
+    player.alive = false;
+    snap.players = {player};
+    view.Apply(snap);
+    const PlayerView* stored = view.Find(7);
+    CHECK(stored != nullptr);
+    if (stored) {
+        CHECK(stored->hp == 40.0f);
+        CHECK(stored->max_hp == 100.0f);
+        CHECK(!stored->alive);
+    }
+}
+
+void TestCombatViewFeedback() {
+    CombatView view;
+    // Damage feedback is transient: it decays away after the flash window.
+    view.ApplyDamageFx(900);
+    CHECK(view.IsHitFlashing(900));
+    CHECK(view.HitFlashCount() == 1);
+    view.Tick(0.1f);
+    CHECK(view.IsHitFlashing(900));
+    view.Tick(0.5f);
+    CHECK(!view.IsHitFlashing(900));
+    CHECK(view.HitFlashCount() == 0);
+
+    // Death marks persist until Clear (snapshot is authoritative for removal).
+    view.ApplyDeath(900);
+    CHECK(view.IsDead(900));
+    CHECK(!view.IsDead(901));
+    view.Clear();
+    CHECK(!view.IsDead(900));
+}
+
 }  // namespace
 
 int main() {
@@ -230,6 +271,8 @@ int main() {
     TestGameViewDefensiveSort();
     TestCombatViewMonstersFullSet();
     TestCombatViewProjectilesAndStage();
+    TestGameViewCombatFields();
+    TestCombatViewFeedback();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
