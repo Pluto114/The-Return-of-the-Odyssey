@@ -12,8 +12,10 @@
 #include "network/PayloadCodec.h"
 #include "network/ProtocolIds.h"
 #include "raylib.h"
+#include "sync/CombatView.h"
 #include "sync/GameView.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -25,8 +27,16 @@ constexpr int kScreenWidth = 960;
 constexpr int kScreenHeight = 540;
 constexpr int kFps = 60;
 
+// World [0,20]^2 arena mapped into this screen rectangle (shared by the aim
+// inverse mapping and the drawing code).
+constexpr float kWorldSize = 20.0f;
+constexpr float kArenaX = 560.0f;
+constexpr float kArenaY = 190.0f;
+constexpr float kArenaW = 340.0f;
+constexpr float kArenaH = 280.0f;
+
 // Gameserver endpoint reserved in the infra docs; read from config later.
-constexpr const char* kServerHost = "127.0.0.1";
+constexpr const char* kServerHost = "10.22.31.251";
 constexpr std::uint16_t kServerPort = 7777;
 
 // Development-mode login (Phase 1 has no real auth; server assigns identity).
@@ -49,6 +59,8 @@ using odyssey::client::network::ConnectionState;
 using odyssey::client::network::NetClient;
 using odyssey::client::network::NetEvent;
 using odyssey::client::network::ToString;
+using odyssey::client::network::payload::DamageEventData;
+using odyssey::client::network::payload::DeathEventData;
 using odyssey::client::network::payload::DisconnectData;
 using odyssey::client::network::payload::LoginRequestData;
 using odyssey::client::network::payload::LoginResponseData;
@@ -56,9 +68,16 @@ using odyssey::client::network::payload::MatchFoundData;
 using odyssey::client::network::payload::PingData;
 using odyssey::client::network::payload::PlayerInputData;
 using odyssey::client::network::payload::PongData;
+using odyssey::client::network::payload::ProjectileDestroyData;
+using odyssey::client::network::payload::ProjectileSpawnData;
+using odyssey::client::network::payload::StageEventData;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
+using odyssey::client::sync::CombatView;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::StageInfo;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -99,6 +118,18 @@ struct DemoState {
 
     // WorldSnapshot ingestion stats.
     std::uint64_t snapshots_received = 0;
+
+    // Combat (D4) state.
+    float self_hp = 0.0f;
+    float self_max_hp = 0.0f;
+    std::uint32_t stage_index = 0;
+    std::uint32_t stage_state = 0;
+    std::uint32_t monsters_remaining = 0;
+    std::uint32_t spawns = 0;
+    std::uint32_t destroys = 0;
+    std::uint32_t damages = 0;
+    std::uint32_t deaths = 0;
+    std::string last_event_note = "(none)";
 };
 
 }  // namespace
@@ -117,8 +148,12 @@ int main() {
     InputSequencer input_sequencer;
     InputSample last_sample;
     InputReport last_report;      // normalized vector + sequence (connected ticks)
+    float last_aim_x = 1.0f;      // aim heading sent to the server (for the HUD)
+    float last_aim_z = 0.0f;
+    bool last_shoot = false;
     double last_input_time = 0.0;
-    GameView game_view;           // filled once the WorldSnapshot decode slice lands
+    GameView game_view;           // players from authoritative snapshots
+    CombatView combat_view;       // monsters (snapshot) + projectiles (events)
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
     std::printf("main: starting net thread\n"); fflush(stdout);
@@ -169,6 +204,7 @@ int main() {
             demo.server_note.clear();
             input_sequencer.Reset();
             game_view = GameView{};
+            combat_view.Clear();
             client.Connect(kServerHost, kServerPort);
         }
 
@@ -181,11 +217,37 @@ int main() {
                 last_sample = input_sampler.SampleNow();
                 if (demo.in_room) {
                     last_report = input_sequencer.Tick(last_sample);
+                    // Aim heading: mouse position mapped back to world space,
+                    // relative to our own authoritative position. The client
+                    // never sends positions or hit results.
+                    const Vector2 mouse = GetMousePosition();
+                    const float mx = (mouse.x - kArenaX) / kArenaW * kWorldSize;
+                    const float mz = (mouse.y - kArenaY) / kArenaH * kWorldSize;
+                    float aim_x = 1.0f;
+                    float aim_z = 0.0f;
+                    if (const auto* self = game_view.Find(demo.player_id)) {
+                        aim_x = mx - self->x;
+                        aim_z = mz - self->z;
+                        const float length = std::sqrt(aim_x * aim_x + aim_z * aim_z);
+                        if (length > 1e-4f) {
+                            aim_x /= length;
+                            aim_z /= length;
+                        } else {
+                            aim_x = 1.0f;
+                            aim_z = 0.0f;
+                        }
+                    }
                     PlayerInputData input;
                     input.input_seq = last_report.sequence;
                     input.dir_x = last_report.vector.x;
                     input.dir_z = last_report.vector.z;
+                    input.aim_x = aim_x;
+                    input.aim_z = aim_z;
+                    input.shoot = IsKeyDown(KEY_SPACE);
                     input.client_tick_ms = static_cast<std::uint64_t>(now * 1000.0);
+                    last_aim_x = aim_x;
+                    last_aim_z = aim_z;
+                    last_shoot = input.shoot;
                     SendPayload(kPlayerInput, payload::EncodePlayerInput(input));
                 } else {
                     last_report.sequence = 0;
@@ -216,6 +278,7 @@ int main() {
                         demo.match_note = "not sent";
                         input_sequencer.Reset();
                         game_view = GameView{};
+                        combat_view.Clear();
                     }
                     break;
                 case NetEvent::Kind::kMessage:
@@ -297,6 +360,97 @@ int main() {
                                 add(other);
                             }
                             game_view.Apply(sv);
+
+                            // Monsters are a FULL set from the snapshot: a
+                            // monster missing from the newest one is removed.
+                            std::vector<MonsterEntity> monsters;
+                            monsters.reserve(snap.monsters.size());
+                            for (const auto& m : snap.monsters) {
+                                MonsterEntity entity;
+                                entity.id = m.id;
+                                entity.x = m.pos_x;
+                                entity.z = m.pos_z;
+                                entity.vx = m.vel_x;
+                                entity.vz = m.vel_z;
+                                entity.hp = m.hp;
+                                entity.max_hp = m.max_hp;
+                                entity.state = m.state;
+                                monsters.push_back(entity);
+                            }
+                            combat_view.ApplyMonsters(monsters);
+
+                            StageInfo stage;
+                            stage.index = snap.stage.index;
+                            stage.seed = snap.stage.seed;
+                            stage.state = snap.stage.state;
+                            stage.monsters_remaining = snap.stage.monsters_remaining;
+                            combat_view.SetStage(stage);
+                            demo.stage_index = snap.stage.index;
+                            demo.stage_state = snap.stage.state;
+                            demo.monsters_remaining = snap.stage.monsters_remaining;
+                            if (snap.has_self) {
+                                demo.self_hp = snap.self.hp;
+                                demo.self_max_hp = snap.self.max_hp;
+                            }
+                        }
+                    } else if (event->message.message_type == kProjectileSpawn) {
+                        ProjectileSpawnData spawn;
+                        if (payload::DecodeProjectileSpawn(event->message.payload, spawn)) {
+                            ProjectileVisual projectile;
+                            projectile.id = spawn.projectile_id;
+                            projectile.owner_id = spawn.owner_id;
+                            projectile.x = spawn.pos_x;
+                            projectile.z = spawn.pos_z;
+                            projectile.vx = spawn.vel_x;
+                            projectile.vz = spawn.vel_z;
+                            projectile.expires_at_tick = spawn.expires_at_tick;
+                            projectile.server_tick = spawn.server_tick;
+                            combat_view.SpawnProjectile(projectile);
+                            ++demo.spawns;
+                            demo.last_event_note = "projectile spawn id=" +
+                                                   std::to_string(spawn.projectile_id);
+                        }
+                    } else if (event->message.message_type == kProjectileDestroy) {
+                        ProjectileDestroyData destroy;
+                        if (payload::DecodeProjectileDestroy(event->message.payload, destroy)) {
+                            combat_view.DestroyProjectile(destroy.projectile_id);
+                            ++demo.destroys;
+                            demo.last_event_note = "projectile destroy id=" +
+                                                   std::to_string(destroy.projectile_id);
+                        }
+                    } else if (event->message.message_type == kDamageEvent) {
+                        DamageEventData damage;
+                        if (payload::DecodeDamageEvent(event->message.payload, damage)) {
+                            ++demo.damages;
+                            demo.last_event_note = "damage target=" +
+                                                   std::to_string(damage.target_id) + " amount=" +
+                                                   std::to_string(damage.amount) + " hp=" +
+                                                   std::to_string(damage.remaining_health);
+                        }
+                    } else if (event->message.message_type == kDeathEvent) {
+                        DeathEventData death;
+                        if (payload::DecodeDeathEvent(event->message.payload, death)) {
+                            ++demo.deaths;
+                            demo.last_event_note = "death entity=" +
+                                                   std::to_string(death.entity_id) + " killer=" +
+                                                   std::to_string(death.killer_id);
+                        }
+                    } else if (event->message.message_type == kStageStartedEvent ||
+                               event->message.message_type == kStageClearedEvent ||
+                               event->message.message_type == kTeamDefeatedEvent) {
+                        StageEventData stage_event;
+                        if (payload::DecodeStageEvent(event->message.payload, stage_event)) {
+                            const char* kind = event->message.message_type == kStageStartedEvent
+                                                   ? "stage started"
+                                                   : (event->message.message_type == kStageClearedEvent
+                                                          ? "stage cleared"
+                                                          : "team defeated");
+                            demo.last_event_note = std::string(kind) + " index=" +
+                                                   std::to_string(stage_event.stage_index);
+                            std::printf("main: %s stage=%u tick=%llu\n", kind,
+                                        stage_event.stage_index,
+                                        static_cast<unsigned long long>(stage_event.server_tick));
+                            std::fflush(stdout);
                         }
                     }
                     break;
@@ -391,18 +545,63 @@ int main() {
             " snaps=" + std::to_string(demo.snapshots_received);
         DrawText(view_line.c_str(), 24, 310, 20, GRAY);
 
-        // World [0,20]^2 mapped into a compact arena. Self is blue, peers red.
-        DrawRectangleLines(560, 190, 340, 280, LIGHTGRAY);
+        const std::string combat_line =
+            "Stage: idx=" + std::to_string(demo.stage_index) +
+            " state=" + std::to_string(demo.stage_state) +
+            " remain=" + std::to_string(demo.monsters_remaining) +
+            " | monsters=" + std::to_string(combat_view.MonsterCount()) +
+            " bullets=" + std::to_string(combat_view.ProjectileCount());
+        DrawText(combat_line.c_str(), 24, 340, 20, GRAY);
+
+        const std::string hp_line =
+            "HP self=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
+            std::to_string(static_cast<int>(demo.self_max_hp)) +
+            "  shoot=" + std::string(last_shoot ? "yes" : "no") +
+            "  events sp/dst/dmg/dth=" + std::to_string(demo.spawns) + "/" +
+            std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
+            std::to_string(demo.deaths);
+        DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
+        DrawText(("Last event: " + demo.last_event_note).c_str(), 24, 400, 20, MAROON);
+
+        // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
+        // projectiles gold. Projectiles exist only via spawn/destroy events.
+        DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
+                           static_cast<int>(kArenaW), static_cast<int>(kArenaH), LIGHTGRAY);
+        const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
+        const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
+
+        for (const auto& [id, projectile] : combat_view.Projectiles()) {
+            (void)id;
+            DrawCircleV(Vector2{to_screen_x(projectile.x), to_screen_y(projectile.z)}, 3.0f, GOLD);
+        }
+
+        for (const auto& [id, monster] : combat_view.Monsters()) {
+            const float sx = to_screen_x(monster.x);
+            const float sy = to_screen_y(monster.z);
+            DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14, ORANGE);
+            const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
+            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
+                          static_cast<int>(20.0f * ratio), 4, LIME);
+            DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 9,
+                     static_cast<int>(sy) - 8, 12, DARKGRAY);
+        }
+
         for (const auto& player : game_view.Players()) {
-            const float px = 560.0f + (player.x / 20.0f) * 340.0f;
-            const float py = 190.0f + (player.z / 20.0f) * 280.0f;
-            DrawCircleV(Vector2{px, py}, 9.0f,
-                        player.id == demo.player_id ? BLUE : RED);
+            const float px = to_screen_x(player.x);
+            const float py = to_screen_y(player.z);
+            const bool is_self = (player.id == demo.player_id);
+            DrawCircleV(Vector2{px, py}, 9.0f, is_self ? BLUE : RED);
+            if (is_self) {
+                // Aim heading we are sending to the server.
+                DrawLineV(Vector2{px, py},
+                          Vector2{px + last_aim_x * 26.0f, py + last_aim_z * 26.0f}, DARKBLUE);
+            }
             DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
                      static_cast<int>(py - 8), 16, DARKGRAY);
         }
 
-        DrawText("R: retry connect   |   ESC / close window: quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);
+        DrawText("WASD move | mouse aim | SPACE shoot | R retry | ESC quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);
         DrawFPS(kScreenWidth - 90, 12);
 
         EndDrawing();

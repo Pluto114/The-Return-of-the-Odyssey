@@ -80,8 +80,10 @@ inline bool DecodePong(const std::vector<std::uint8_t>& payload, PongData& out) 
 
 struct PlayerInputData {
     std::uint32_t input_seq = 0;  // client-side 30Hz seq (independent of Frame Seq)
-    float dir_x = 0.0f;           // world x (server x); normalized
-    float dir_z = 0.0f;           // world z (server y); normalized
+    float dir_x = 0.0f;           // move intent, world x (server x); normalized
+    float dir_z = 0.0f;           // move intent, world z (server y); normalized
+    float aim_x = 0.0f;           // aim heading, world x (finite; required when shoot)
+    float aim_z = 0.0f;           // aim heading, world z
     bool shoot = false;
     std::uint64_t client_tick_ms = 0;
 };
@@ -93,6 +95,9 @@ inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) 
     auto* move = proto.mutable_move();
     move->set_x(data.dir_x);
     move->set_y(data.dir_z);
+    auto* aim = proto.mutable_aim();
+    aim->set_x(data.aim_x);
+    aim->set_y(data.aim_z);
     proto.set_shoot(data.shoot);
     std::vector<std::uint8_t> out(proto.ByteSizeLong());
     proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
@@ -112,13 +117,32 @@ struct SnapshotPlayerView {
     bool alive = true;
 };
 
+struct SnapshotMonsterView {
+    std::uint64_t id = 0;
+    float pos_x = 0.0f;
+    float pos_z = 0.0f;
+    float vel_x = 0.0f;
+    float vel_z = 0.0f;
+    float hp = 0.0f;
+    float max_hp = 0.0f;
+    std::uint32_t state = 0;  // 0 idle / 1 chase / 2 attack / 3 dead
+};
+
+struct StageStateView {
+    std::uint32_t index = 0;
+    std::int64_t seed = 0;
+    std::uint32_t state = 0;  // 0 waiting/1 playing/2 clear/3 reward/4 prep/5 failed/6 closed
+    std::uint32_t monsters_remaining = 0;
+};
+
 struct WorldSnapshotView {
     std::uint64_t server_tick = 0;
     std::uint32_t last_processed_input = 0;  // self ack (server-applied input_seq)
     bool has_self = false;
     SnapshotPlayerView self;
-    std::vector<SnapshotPlayerView> others;  // ascending by id
-    std::size_t monster_count = 0;           // D2: decoded later with combat UI
+    std::vector<SnapshotPlayerView> others;    // ascending by id
+    std::vector<SnapshotMonsterView> monsters; // full set: missing => removed
+    StageStateView stage;
 };
 
 inline SnapshotPlayerView MapPlayer(const odyssey::protocol::v1::PlayerSnapshot& p) {
@@ -155,7 +179,146 @@ inline bool DecodeWorldSnapshot(const std::vector<std::uint8_t>& payload,
     for (int i = 0; i < proto.players_size(); ++i) {
         out.others.push_back(MapPlayer(proto.players(i)));
     }
-    out.monster_count = static_cast<std::size_t>(proto.monsters_size());
+    out.monsters.clear();
+    out.monsters.reserve(proto.monsters_size());
+    for (int i = 0; i < proto.monsters_size(); ++i) {
+        const auto& m = proto.monsters(i);
+        SnapshotMonsterView view;
+        view.id = m.monster_id();
+        if (m.has_position()) {
+            view.pos_x = m.position().x();
+            view.pos_z = m.position().y();
+        }
+        if (m.has_velocity()) {
+            view.vel_x = m.velocity().x();
+            view.vel_z = m.velocity().y();
+        }
+        view.hp = m.hp();
+        view.max_hp = m.max_hp();
+        view.state = m.state();
+        out.monsters.push_back(view);
+    }
+    if (proto.has_stage()) {
+        out.stage.index = proto.stage().index();
+        out.stage.seed = proto.stage().seed();
+        out.stage.state = proto.stage().state();
+        out.stage.monsters_remaining = proto.stage().monsters_remaining();
+    } else {
+        out.stage = StageStateView{};
+    }
+    return true;
+}
+
+// ---- Reliable combat events (320-327) --------------------------------------
+
+struct ProjectileSpawnData {
+    std::uint64_t projectile_id = 0;
+    std::uint64_t owner_id = 0;
+    float pos_x = 0.0f;
+    float pos_z = 0.0f;
+    float vel_x = 0.0f;
+    float vel_z = 0.0f;
+    std::uint64_t expires_at_tick = 0;
+    std::uint64_t server_tick = 0;
+};
+
+struct ProjectileDestroyData {
+    std::uint64_t projectile_id = 0;
+    std::uint64_t owner_id = 0;
+    float pos_x = 0.0f;
+    float pos_z = 0.0f;
+    std::uint64_t server_tick = 0;
+};
+
+struct DamageEventData {
+    std::uint64_t source_id = 0;
+    std::uint64_t target_id = 0;
+    float amount = 0.0f;
+    float remaining_health = 0.0f;
+    std::uint64_t server_tick = 0;
+};
+
+struct DeathEventData {
+    std::uint64_t entity_id = 0;
+    std::uint64_t killer_id = 0;
+    std::uint64_t server_tick = 0;
+};
+
+struct StageEventData {
+    std::uint32_t stage_index = 0;
+    std::uint64_t server_tick = 0;
+};
+
+inline bool DecodeProjectileSpawn(const std::vector<std::uint8_t>& payload,
+                                  ProjectileSpawnData& out) {
+    odyssey::protocol::v1::ProjectileSpawnEvent proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.projectile_id = proto.projectile_id();
+    out.owner_id = proto.owner_id();
+    if (proto.has_position()) {
+        out.pos_x = proto.position().x();
+        out.pos_z = proto.position().y();
+    }
+    if (proto.has_velocity()) {
+        out.vel_x = proto.velocity().x();
+        out.vel_z = proto.velocity().y();
+    }
+    out.expires_at_tick = proto.expires_at_tick();
+    out.server_tick = proto.server_tick();
+    return true;
+}
+
+inline bool DecodeProjectileDestroy(const std::vector<std::uint8_t>& payload,
+                                    ProjectileDestroyData& out) {
+    odyssey::protocol::v1::ProjectileDestroyEvent proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.projectile_id = proto.projectile_id();
+    out.owner_id = proto.owner_id();
+    if (proto.has_position()) {
+        out.pos_x = proto.position().x();
+        out.pos_z = proto.position().y();
+    }
+    out.server_tick = proto.server_tick();
+    return true;
+}
+
+inline bool DecodeDamageEvent(const std::vector<std::uint8_t>& payload, DamageEventData& out) {
+    odyssey::protocol::v1::DamageEvent proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.source_id = proto.source_id();
+    out.target_id = proto.target_id();
+    out.amount = proto.amount();
+    out.remaining_health = proto.remaining_health();
+    out.server_tick = proto.server_tick();
+    return true;
+}
+
+inline bool DecodeDeathEvent(const std::vector<std::uint8_t>& payload, DeathEventData& out) {
+    odyssey::protocol::v1::DeathEvent proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.entity_id = proto.entity_id();
+    out.killer_id = proto.killer_id();
+    out.server_tick = proto.server_tick();
+    return true;
+}
+
+// StageStartedEvent / StageClearedEvent / TeamDefeatedEvent share the same
+// shape (stage_index + server_tick).
+inline bool DecodeStageEvent(const std::vector<std::uint8_t>& payload, StageEventData& out) {
+    odyssey::protocol::v1::StageStartedEvent proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.stage_index = proto.stage_index();
+    out.server_tick = proto.server_tick();
     return true;
 }
 

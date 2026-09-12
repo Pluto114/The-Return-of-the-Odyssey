@@ -1,6 +1,7 @@
 // Headless tests for the D2-direction logic slice: input normalization &
 // sequencing, and full-snapshot application semantics. No window, no sockets.
 #include "input/InputSample.h"
+#include "sync/CombatView.h"
 #include "sync/GameView.h"
 
 #include <cmath>
@@ -26,9 +27,13 @@ using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
+using odyssey::client::sync::CombatView;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::PlayerView;
+using odyssey::client::sync::ProjectileVisual;
 using odyssey::client::sync::SnapshotView;
+using odyssey::client::sync::StageInfo;
 
 constexpr float kEps = 1e-5f;
 
@@ -154,6 +159,65 @@ void TestGameViewDefensiveSort() {
     CHECK(view.PlayerCount() == 1);
 }
 
+void TestCombatViewMonstersFullSet() {
+    CombatView view;
+    std::vector<MonsterEntity> first(2);
+    first[0].id = 900;
+    first[0].x = 1.0f;
+    first[0].hp = 50.0f;
+    first[1].id = 901;
+    first[1].x = 2.0f;
+    CHECK(view.ApplyMonsters(first).empty());
+    CHECK(view.MonsterCount() == 2);
+    const MonsterEntity* monster = view.FindMonster(900);
+    CHECK(monster != nullptr);
+    if (monster) {
+        CHECK(monster->x == 1.0f);
+        CHECK(monster->hp == 50.0f);
+    }
+
+    // Newest snapshot is a FULL set: 900 disappears, 902 appears.
+    std::vector<MonsterEntity> second(2);
+    second[0].id = 901;
+    second[1].id = 902;
+    const auto removed = view.ApplyMonsters(second);
+    CHECK(removed.size() == 1);
+    CHECK(removed[0] == 900);
+    CHECK(view.MonsterCount() == 2);
+    CHECK(view.FindMonster(900) == nullptr);
+    CHECK(view.FindMonster(902) != nullptr);
+
+    view.Clear();
+    CHECK(view.MonsterCount() == 0);
+}
+
+void TestCombatViewProjectilesAndStage() {
+    CombatView view;
+    ProjectileVisual projectile;
+    projectile.id = 42;
+    projectile.owner_id = 10;
+    projectile.x = 3.0f;
+    projectile.z = 4.0f;
+    projectile.expires_at_tick = 500;
+    view.SpawnProjectile(projectile);
+    CHECK(view.ProjectileCount() == 1);
+    CHECK(view.Projectiles().at(42).x == 3.0f);
+
+    // Duplicate spawn (should not happen with one dispatcher) overwrites, and
+    // destroy of an unknown id is a no-op.
+    CHECK(!view.DestroyProjectile(99));
+    CHECK(view.DestroyProjectile(42));
+    CHECK(view.ProjectileCount() == 0);
+
+    StageInfo stage;
+    stage.index = 2;
+    stage.state = 1;
+    stage.monsters_remaining = 3;
+    view.SetStage(stage);
+    CHECK(view.Stage().index == 2);
+    CHECK(view.Stage().monsters_remaining == 3);
+}
+
 }  // namespace
 
 int main() {
@@ -164,6 +228,8 @@ int main() {
     TestGameViewApplyAndRemoveMissing();
     TestGameViewClosedEmpties();
     TestGameViewDefensiveSort();
+    TestCombatViewMonstersFullSet();
+    TestCombatViewProjectilesAndStage();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
