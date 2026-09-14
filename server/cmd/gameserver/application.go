@@ -14,6 +14,7 @@ import (
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/convert"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/lobby"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
@@ -34,6 +35,9 @@ type activeRoom struct {
 	snapshots *router.SnapshotDispatcher
 	events    *router.EventDispatcher
 	close     *router.CloseWatcher
+
+	monsters    int
+	projectiles map[entity.ID]struct{}
 }
 
 // gameApplication assembles A's transport/session boundary, B's Room, and
@@ -204,10 +208,11 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		return
 	}
 	active := &activeRoom{
-		room:      rm,
-		snapshots: router.NewSnapshotDispatcher(),
-		events:    router.NewEventDispatcher(),
-		close:     router.NewCloseWatcher(),
+		room:        rm,
+		snapshots:   router.NewSnapshotDispatcher(),
+		events:      router.NewEventDispatcher(),
+		close:       router.NewCloseWatcher(),
+		projectiles: make(map[entity.ID]struct{}),
 	}
 	active.close.OnClose(func(id room.ID, reason string) {
 		a.mu.Lock()
@@ -220,8 +225,8 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	a.rooms[roomID] = active
 	a.publishMetricsLocked()
 	a.mu.Unlock()
-	go active.snapshots.Run(rm)
-	go active.events.Run(rm)
+	go a.observeSnapshots(roomID, rm, active.snapshots)
+	go a.observeEvents(roomID, rm, active.events)
 	go active.close.Run(rm)
 	go a.observeTicks(rm)
 
@@ -337,12 +342,92 @@ func (a *gameApplication) observeTicks(rm *room.Room) {
 	}
 }
 
+// observeSnapshots remains the room's single snapshot consumer. It records
+// authoritative entity counts before delegating network fan-out to A's router.
+func (a *gameApplication) observeSnapshots(roomID room.ID, rm *room.Room, dispatcher *router.SnapshotDispatcher) {
+	for snapshot := range rm.Snapshots() {
+		a.recordSnapshotMetrics(roomID, snapshot)
+		dispatcher.Dispatch(snapshot)
+	}
+}
+
+func (a *gameApplication) recordSnapshotMetrics(roomID room.ID, snapshot room.Snapshot) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	active := a.rooms[roomID]
+	if active == nil {
+		return
+	}
+	active.monsters = len(snapshot.Monsters)
+	a.publishCombatMetricsLocked()
+}
+
+// observeEvents remains the room's single reliable-event consumer. Metrics
+// observation is non-blocking with respect to Room Tick and preserves the
+// original event batch for A's dispatcher.
+func (a *gameApplication) observeEvents(roomID room.ID, rm *room.Room, dispatcher *router.EventDispatcher) {
+	for batch := range rm.Events() {
+		a.recordEventMetrics(roomID, batch)
+		dispatcher.Dispatch(batch)
+	}
+}
+
+func (a *gameApplication) recordEventMetrics(roomID room.ID, batch game.EventBatch) {
+	var damage float64
+	var cleared, defeated int
+
+	a.mu.Lock()
+	active := a.rooms[roomID]
+	if active == nil {
+		a.mu.Unlock()
+		return
+	}
+	for _, event := range batch.Events {
+		switch event.Kind {
+		case game.ProjectileSpawned:
+			active.projectiles[event.EntityID] = struct{}{}
+		case game.ProjectileDestroyed:
+			delete(active.projectiles, event.EntityID)
+		case game.DamageDealt:
+			damage += event.Amount
+		case game.StageCleared:
+			cleared++
+		case game.TeamDefeated:
+			defeated++
+		}
+	}
+	a.publishCombatMetricsLocked()
+	a.mu.Unlock()
+
+	if damage > 0 {
+		if err := a.metrics.ObserveDamage(damage); err != nil {
+			a.logger.Warn("invalid authoritative damage metric", "room_id", roomID, "err", err)
+		}
+	}
+	for range cleared {
+		_ = a.metrics.ObserveStageResult(metrics.StageResultCleared)
+	}
+	for range defeated {
+		_ = a.metrics.ObserveStageResult(metrics.StageResultDefeated)
+	}
+}
+
+func (a *gameApplication) publishCombatMetricsLocked() {
+	var snapshot metrics.CombatSnapshot
+	for _, active := range a.rooms {
+		snapshot.ActiveMonsters += active.monsters
+		snapshot.ActiveProjectiles += len(active.projectiles)
+	}
+	_ = a.metrics.SetCombatSnapshot(snapshot)
+}
+
 func (a *gameApplication) publishMetricsLocked() {
 	_ = a.metrics.SetSnapshot(metrics.Snapshot{
 		OnlinePlayers:     len(a.connections),
 		ActiveRooms:       len(a.rooms),
 		MatchQueuePlayers: a.matcher.Waiting(),
 	})
+	a.publishCombatMetricsLocked()
 }
 
 // closingSink enforces the reliable-queue contract: saturation closes only

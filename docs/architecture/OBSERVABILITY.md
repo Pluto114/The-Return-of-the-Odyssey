@@ -2,7 +2,9 @@
 
 `server/internal/metrics` 使用独立 Prometheus Registry，统一拥有指标名、帮助文本、Bucket 和标签集合。业务模块只提交领域结果，不直接创建 Prometheus Collector。
 
-D4 预留的战斗指标为 `odyssey_active_monsters`、`odyssey_active_projectiles`、`odyssey_damage_dealt_total` 和 `odyssey_stage_results_total{result}`。Gauge 必须来自 Room 的权威实体计数，伤害和关卡结果只能在 World 已应用的事件上累加；`result` 仅允许 `cleared` 与 `defeated`。D5 完成 Room 适配前不得用固定假数据填充这些指标。
+D4 预留的战斗指标为 `odyssey_active_monsters`、`odyssey_active_projectiles`、`odyssey_damage_dealt_total` 和 `odyssey_stage_results_total{result}`。D5 的 gameserver 适配器从 Room 权威快照聚合怪物 Gauge，从可靠 Spawn/Destroy 事件集合聚合子弹 Gauge，并只在 World 已应用的伤害和终局事件上累加 Counter；`result` 仅允许 `cleared` 与 `defeated`。房间删除会立即重新聚合 Gauge，Dashboard 不填充固定假数据。
+
+Grafana 的 `Combat Entities`、`Damage Throughput` 和 `Stage Results` 面板直接查询上述指标。AI 与碰撞耗时需要 B 在 Room TickSample 中提供权威采样后再接入。
 
 ## 当前指标
 
