@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
@@ -15,7 +16,10 @@ import (
 const FirstWorldEntityID entity.ID = 1 << 63
 const maxPendingEvents = 4096
 
-var ErrStageState = errors.New("stage can only start in Waiting with living players")
+var (
+	ErrStageState = errors.New("stage cannot start in the current state")
+	ErrStageIndex = errors.New("next stage index must increase by one")
+)
 
 type CombatConfig struct {
 	PlayerStats                       entity.CombatStats
@@ -95,9 +99,40 @@ func (w *World) StartStage(plan stage.Plan) error {
 	if err := ValidateStage(plan, w.config); err != nil {
 		return err
 	}
-	if w.stage.State != stage.Waiting || w.livingPlayers() == 0 {
+	initial := w.stage.State == stage.Waiting
+	next := w.stage.State == stage.PreparingNextStage && w.rewardRound != nil && w.rewardRound.Complete()
+	if (!initial && !next) || w.PlayerCount() == 0 || (initial && w.livingPlayers() == 0) {
 		return ErrStageState
 	}
+	if next && plan.Index != w.stage.Index+1 {
+		return ErrStageIndex
+	}
+	if next {
+		for _, player := range w.players {
+			player.player.Position = w.config.Spawn
+			player.player.Velocity = entity.Vec2{}
+			player.input.Direction = entity.Vec2{}
+			player.input.Aim = entity.Vec2{}
+			player.input.Shoot = false
+			player.input.UsePotion = false
+			player.receivedAt = time.Time{}
+			player.pending = false
+			player.firing = false
+			if !player.player.Alive {
+				player.player.Alive = true
+				player.player.Health = player.player.CurrentStats.MaxHealth * 0.5
+			}
+		}
+		w.rewardRound = nil
+	}
+	if initial {
+		w.runStarted = true
+		w.runStartedAtTick = w.tick
+		w.runEndedAtTick = 0
+		w.completedStages = nil
+	}
+	w.performance = stagePerformance{startedAtTick: w.tick, equipmentPower: w.equipmentPower()}
+	w.currentPlan = plan.Clone()
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
 	for _, spawn := range plan.Monsters {
 		id := w.allocateID()
@@ -161,7 +196,7 @@ func (w *World) stepCombat() {
 	for _, id := range monsterIDs {
 		m := w.monsters[id]
 		m.previous = m.monster.Position
-		if (w.tick-1)%SnapshotEvery == 0 {
+		if (w.tick-1)%AIDecisionEvery == 0 {
 			m.target = 0
 			nearest := math.Inf(1)
 			for _, pid := range playerIDs {
@@ -253,9 +288,11 @@ func (w *World) stepCombat() {
 	w.stage.MonstersRemaining = len(w.monsters)
 	// A simultaneous final kill and team wipe is defeat; no rewards are granted.
 	if w.livingPlayers() == 0 {
+		w.runEndedAtTick = w.tick
 		w.stage.State = stage.Failed
 		w.emit(Event{Kind: TeamDefeated, StageIndex: w.stage.Index})
 	} else if len(w.monsters) == 0 {
+		w.freezePerformance()
 		w.stage.State = stage.StageClear
 		w.emit(Event{Kind: StageCleared, StageIndex: w.stage.Index})
 	}
@@ -300,13 +337,18 @@ func (w *World) applyDamage(request systems.DamageRequest) {
 		p := w.players[request.TargetID]
 		p.player.Health = resolved.RemainingHealth
 		p.player.Alive = !resolved.Killed
+		w.performance.damageTaken += resolved.Amount
 		if resolved.Killed {
+			w.performance.deathCount++
 			p.player.Velocity = entity.Vec2{}
 			p.firing = false
 		}
 	} else {
 		m := w.monsters[request.TargetID]
 		m.monster.Health = resolved.RemainingHealth
+		if _, playerSource := w.players[request.SourceID]; playerSource {
+			w.performance.damageDealt += resolved.Amount
+		}
 		if resolved.Killed {
 			m.monster.State = entity.MonsterDead
 		}

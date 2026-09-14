@@ -13,8 +13,8 @@
 go run ./server/cmd/core-demo
 ```
 
-演示使用一个玩家和两只怪物、固定关卡计划、自动产生瞄准/射击输入；通过同一个 World.Step 执行真实战斗逻辑。
-当前固定场景在第 25 Tick 清场：玩家 HP=100，击杀 2，命中 4，开火 5。
+演示使用一个玩家和 `NewFirstStagePlan(DefaultConfig(), 42)` 生成的三只怪物，自动产生瞄准/射击输入；通过同一个 World.Step 执行真实战斗逻辑。
+当前固定场景在第 49 Tick 清场：玩家 HP=100，击杀 3，命中 6，开火 9。
 这是离线固定步模拟，没有网络连接，不是 Go Bot、真实客户端联调或性能测试。
 
 ## 2. 已实现行为
@@ -34,23 +34,26 @@ go run ./server/cmd/core-demo
 属性和几何输入会校验：不允许 NaN/Inf、负生命/防御/攻击、零冷却。坐标范围限制在 ±1e6 内，避免碰撞运算溢出。
 默认最多 64 怪物、256 子弹；配置硬上限分别为 128、1024，防止单房无界生成实体。
 出生配置、实体遍历和最近目标平局规则固定后，相同计划和输入产生相同事件与快照。
-当前 Seed 只记录在关卡计划/视图中；怪物出生位置由 Plan 显式给定，尚未实现按 Seed 随机生成布局。
+首关生成器使用进程内私有的 SplitMix64 序列，从地图边缘的八个相对锚点中按 Seed 选择并排序三处出生点；不使用全局随机源。相同配置和 Seed 会得到逐字段一致的 Plan，不同房间可用 room_id 等服务器可信值派生 Seed。
 
 ## 3. A / C / D 需要接入的地方
 
 | 接口 | 接入方式 |
 | --- | --- |
 | `room.Config` / `game.Config` | 从 DefaultConfig 获取配置，再覆盖必要字段；新增 Combat / EventCapacity 有校验，不能用旧的零值字面量漏填 |
+| `game.NewFirstStagePlan(config, seed)` | B 提供的首关计划入口；传入 `room.Config.World` 和服务端 Seed，返回经过 `ValidateStage` 的三怪 Plan；怪物容量小于 3 时明确报错 |
 | `r.StartStage(stage.Plan)` | 服务端可信关卡编排入口；先入房，再提交计划并等成功回执；计划含 Index / Seed / DifficultyScore / Monsters，提交时复制 |
 | `game.Input.Aim / Shoot` | A 从协议 DTO 转换，C 提供瞄准向量和按键状态；释放发送 Shoot=false，输入超时同样停止射击 |
 | `r.Events()` | A 用单个 dispatcher 消费，再封装 Room ID、映射消息 ID/DTO，并投递 Session 可靠队列 |
+| `r.RewardUpdates()` | B 的定向可靠奖励出口；A 必须按 PlayerID 单播 RewardOptions/RewardApplied，不可使用战斗广播器 |
 | `r.Snapshots()` | 仍为 10Hz 完整快照；新增 MonsterView 和 Stage，玩家新增生命/属性/瞄准；C 按 ID 对齐并移除缺失怪物 |
 | `Stats.CloseReason` | D 可观察 requested / idle / event_backpressure；触发关闭后注销房间、通知对应 Session |
-| `director.Planner` | 仅声明 Generate(previous Plan, PerformanceMetrics) → (Plan, error)；具体规则算法尚未实现 |
+| `director.RuleBasedPlanner` | 使用 `Room.CompletedStage()` 的冻结 Plan/PerformanceMetrics 生成下一关；规则、上下限与 Decision 见 [Director 接口](DIRECTOR.md) |
+| `r.ResumeState(sessionID)` / `r.GameResult(outcome)` | D8 的完整权威恢复查询与异步持久化值；Token、连接重绑和数据库仍在 Room 外，见 [恢复与结果接口](RESUME-GAME-RESULT.md) |
 
 StartStage 只能在 Waiting 且至少有一名存活玩家时成功；进入战斗后不允许新增玩家，重复绑定现有玩家仍幂等。
-奖励处理和进入下一关尚未实现；StageClear / Failed 不能再次 StartStage，调用会返回 ErrStageState。
-Reward / PreparingNextStage 枚举仅保留给后续状态转换，没有虚构成功路径。完整战斗关卡编排仍属 B 后续工作。
+正式入口应先完成两名玩家的 Join 和事件订阅，再生成首关 Plan、提交 StartStage 并等待 receipt；任何一步失败都按房间创建失败清理，不能向客户端宣称关卡已开始。
+StageClear 经 StartReward 进入 Reward；所有选择或超时默认完成后进入 PreparingNextStage。此时 StartStage 只接受 `Index=上一关+1` 的合法计划；Failed 仍是终局。
 
 实体 ID 使用 uint64：玩家 ID 范围为 1 到 2^63−1，怪物/子弹使用高半区并在同一 World 内单调分配。A/C 需要保留 64 位，不可缩窄到 uint32。
 这里的 State / EventKind 都是领域枚举，A 应显式映射到自己维护的协议枚举和消息 ID，不直接当成 wire 编号。
@@ -73,6 +76,6 @@ Room 的事件队列默认容纳 64 个 Tick 批次，只有一个消费者，�
 - A：将已完成的射击/战斗事件映射接入正式入口，补 Session 可靠发送失败与断线通知。
 - C：怪物/HP 展示、视觉子弹、事件效果、预测与插值。
 - D：匹配调用、监控映射、真实 Bot / 联调 / 性能验证。
-- B：装备修改器、药水、奖励选择、下一关转换、Director 规则、逐阶段性能采样和优化。
+- B：装备/奖励、World/Room 接线、下一关转换、Director 规则和逐阶段性能采样已完成，分别见 [装备与奖励领域接口](EQUIPMENT-REWARD.md) 与 [Director 接口](DIRECTOR.md)；D9 多房隔离、300Hz 输入和核心性能基线见 [实测记录](../benchmark/WEEK2-B-D9.md)。
 
-本轮只实现 B 的首关原型，尚未完成架构中的完整 Roguelike 循环。验证结果见 [本轮记录](../verification/combat-core/README.md)。
+首关原型验证见 [战斗核心记录](../verification/combat-core/README.md)，连续三关服务端核心验证见 [D7 记录](../verification/week2-b-d7/README.md)。正式网络入口的奖励、Ready 和下一关编排仍需 A/D 接线。
