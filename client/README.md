@@ -99,14 +99,17 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 - **C-a Ready 门控**：只认权威 `PreparingNextStage`（服务器在奖励轮次 `Complete()` 后自行进入该状态）+ 自身奖励已结清，并按关卡一次性 latch；权威状态已结束而本地面板仍挂着（漏收 `RewardApplied`）时会自动收口，避免永久阻塞
 - **C-e 恢复期会话/续号**：Resume 成功后**不再发送 MatchRequest**；每个连接在收到首帧权威快照前**不发输入、不喂预测**；恢复会话的首帧快照会把 InputSeq 抬到 `max(断线前最高已发, LastProcessedInputSeq)` 之上，绝不重放旧区间
 - **C-d 预测口径**：改为 tick 驱动——每 30Hz 边界恰好一步（发包 30Hz 还是 300Hz 都不改变预测速度）、移速取快照 `self.move_speed`（装备加成即时生效、非法值拒绝并保留上次有效值）、死亡时不推进、校正只补"本地已模拟过快照 tick"的那几 tick 且限幅 10，杜绝按包加步
-- 待办：C-b 阶段/存活输入门控、C-c 药水、C-f 有界等待与令牌轮换
+- **C-b 输入门控**：意图只在「已入房 + 本会话已收到权威快照 + 无恢复进行中 + 自己存活 + 关卡正在 `playing`」时发送；任一条件不满足即静默（不消耗 InputSeq、不发包），并在门控翻转时丢弃已记住的方向，避免阶段切换/死亡/恢复后残留旧意图再走一步。HUD 与日志直接给出被拦截原因
+- 待办：C-c 药水、C-f 有界等待与令牌轮换
 
 ## 已知限制 / 依赖
 
 - 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：当前 ID 1–6 与 B 的版本化目录不一致，D 需从 `data/equipment/catalog.json` 生成同源显示数据；
   客户端不从此表推导任何战斗效果。
 - **`NextStageRequest` 服务器侧尚无处理逻辑**：全仓只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**。
-- 药水（C-c）与阶段/存活输入门控（C-b）尚未收口；恢复后 Token 轮换需协议先给新 token 字段（`ResumeResponse` 目前没有，待 A4）。真实三关/恢复的端到端验收仍依赖服务器侧接线。
+- 药水（C-c）尚未收口；恢复后 Token 轮换需协议先给新 token 字段（`ResumeResponse` 目前没有，待 A4）。真实三关/恢复的端到端验收仍依赖服务器侧接线。
+- **输入只在权威 `stage.state == playing` 时发送**（C-b）：如果服务器尚未启动首关（状态停在 `waiting`），客户端会如实保持静默并在 HUD 显示 `input=muted:stage is not being played` —— 这是 A1（Match 后提交 `StartStage`）未接线的可见表现，而不是客户端卡死。
+- 在途旧输入的**丢弃策略仍需 A 确认**：客户端当前采取保守做法（门控翻转即丢弃意图、不重放、序号继续单调），若服务器在切关时对在途输入另有处理（丢弃窗口/复位期望序号），请同步给 C。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：
   `EndDrawing()` 只提交绘制，需要显式 `SwapScreenBuffer()`（已在 main/probe 中调用）。

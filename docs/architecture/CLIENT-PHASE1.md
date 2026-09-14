@@ -3,7 +3,7 @@
 状态（第二周 D4–D9 客户端侧已完成，A5 缺口硬化进行中）：开发分支 `feature/week2-client-hardening`（基于集成后的 main）。
 战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
 （`ctest` 五套件；`odyssey_logic_tests` 233 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
-A5 硬化进度：C-a（Ready 门控）、C-d（tick 驱动预测 + 服务器移速）、C-e（恢复期匹配/续号/输入静默）、C-g（端点配置化）已完成；
+A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控）、C-d（tick 驱动预测 + 服务器移速）、C-e（恢复期匹配/续号/输入静默）、C-g（端点配置化）已完成；
 其余见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
 仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
 端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
@@ -95,7 +95,8 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 - **只发意图，不发坐标/速度/最终结果**。释放按键产生零向量（服务器停止）。
 - 键盘映射：A/D → 服务器平面 x ∓、W/S → y（客户端 x/z 语义）；对角输入归一化到单位圆。
 - 已按 A 的 `PlayerInput{input_seq, client_tick_ms, move(Vec2), aim, shoot}` 编码（`PayloadCodec::EncodePlayerInput`）。
-- 真发门控（A5 C-a/C-b/C-e）：需「已登录 + 已入房」且**本会话已收到首帧权威快照**；恢复会话在首帧快照到达前完全静默（不采样、不发包、不喂预测）。
+- 真发门控（A5 C-a/C-b/C-e）：需「已登录 + 已入房 + 本会话已收到首帧权威快照 + 无恢复进行中 + 自己存活 + 权威 `stage.state == playing`」；不满足即静默（不消耗 InputSeq、不发包），恢复会话在首帧快照到达前完全静默。
+- 门控翻转（进入静默）时丢弃已记住的方向意图，避免阶段切换/死亡/恢复后带着旧意图多走一步；`kStageStartedEvent` 同样清空意图。切关时对在途旧输入的服务器侧处理策略仍待 A 确认（客户端当前不重放、序号保持单调）。
 - Ready 门控（A5 C-a）：只在权威 `stage.state == PreparingNextStage` 且自身奖励已结清（无待选项、无待确认选择）时报一次，按关卡 latch；提前按只产生可见的拦截原因，不发包。
 - 恢复续号（A5 C-e）：Resume 成功后不重发 MatchRequest；恢复会话首帧快照把 InputSeq 抬到 `max(断线前最高已发, last_processed_input)` 之上，绝不重放旧区间。
 

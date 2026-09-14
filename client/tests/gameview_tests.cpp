@@ -40,7 +40,9 @@ using odyssey::client::sync::EquipmentDisplay;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
 using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::InputGate;
 using odyssey::client::sync::InputSeqFloor;
+using odyssey::client::sync::InputBlockReason;
 using odyssey::client::sync::IsPreparingNextStage;
 using odyssey::client::sync::kArenaMax;
 using odyssey::client::sync::kMoveSpeedUnitsPerSecond;
@@ -702,11 +704,88 @@ void TestRewardSettledStates() {
 }
 
 void TestCanSendInputGating() {
-    CHECK(!CanSendInput(false, false));
-    CHECK(!CanSendInput(false, true));
-    // In a room but before the first snapshot of this session: still muted.
-    CHECK(!CanSendInput(true, false));
-    CHECK(CanSendInput(true, true));
+    // Everything satisfied: in a room, with a snapshot, alive, stage playing.
+    InputGate gate;
+    gate.in_room = true;
+    gate.session_has_snapshot = true;
+    gate.self_known = true;
+    gate.self_alive = true;
+    gate.stage_state = static_cast<std::uint32_t>(StageState::kPlaying);
+    CHECK(CanSendInput(gate));
+    CHECK(std::string(InputBlockReason(gate)) == "(input enabled)");
+
+    // Each blocking condition on its own (A5 item C-b).
+    InputGate not_in_room = gate;
+    not_in_room.in_room = false;
+    CHECK(!CanSendInput(not_in_room));
+    CHECK(std::string(InputBlockReason(not_in_room)) == "not in room");
+
+    InputGate recovering = gate;
+    recovering.recovery_active = true;
+    CHECK(!CanSendInput(recovering));
+    CHECK(std::string(InputBlockReason(recovering)) == "session recovery in progress");
+
+    InputGate no_snapshot = gate;
+    no_snapshot.session_has_snapshot = false;
+    CHECK(!CanSendInput(no_snapshot));
+    CHECK(std::string(InputBlockReason(no_snapshot)) ==
+          "waiting for the first authoritative snapshot");
+
+    InputGate dead = gate;
+    dead.self_alive = false;
+    CHECK(!CanSendInput(dead));
+    CHECK(std::string(InputBlockReason(dead)) == "player is dead");
+
+    // Aliveness is only gated on once the server has actually said something
+    // about this player, so a snapshot without a self entry cannot mute input.
+    InputGate unknown_self = gate;
+    unknown_self.self_known = false;
+    unknown_self.self_alive = false;
+    CHECK(CanSendInput(unknown_self));
+
+    // Every non-playing stage state mutes intent; playing is the only allowed one.
+    for (std::uint32_t state = 0; state <= 6; ++state) {
+        InputGate staged = gate;
+        staged.stage_state = state;
+        if (state == static_cast<std::uint32_t>(StageState::kPlaying)) {
+            CHECK(CanSendInput(staged));
+        } else {
+            CHECK(!CanSendInput(staged));
+            CHECK(std::string(InputBlockReason(staged)) == "stage is not being played");
+        }
+    }
+
+    // Reason precedence follows the gate order, so the reported cause is the
+    // first thing that has to be fixed.
+    InputGate everything_wrong = gate;
+    everything_wrong.in_room = false;
+    everything_wrong.recovery_active = true;
+    everything_wrong.session_has_snapshot = false;
+    everything_wrong.self_alive = false;
+    everything_wrong.stage_state = static_cast<std::uint32_t>(StageState::kReward);
+    CHECK(std::string(InputBlockReason(everything_wrong)) == "not in room");
+}
+
+void TestClearIntentStopsStaleMovement() {
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 10, 5.0f, true);
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    const float moved = predictor.X();
+    CHECK(moved > 0.0f);
+
+    // Input muted (stage ended / death / recovery): the remembered direction is
+    // dropped, so the next ticks keep the pose instead of drifting on stale input.
+    predictor.ClearIntent();
+    predictor.AdvanceTick();
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - moved) < kEps);
+    CHECK(predictor.PredictedTick() == 13);
+
+    // A fresh intent moves again from the frozen pose.
+    predictor.RecordInput(InputCommand{2, 0.0f, 1.0f});
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.Z() - (5.0f / 30.0f)) < kEps);
 }
 
 void TestCanReportReadyGating() {
@@ -849,6 +928,7 @@ int main() {
     TestAuthoritativeRewardPhaseEnded();
     TestRewardSettledStates();
     TestCanSendInputGating();
+    TestClearIntentStopsStaleMovement();
     TestCanReportReadyGating();
     TestReadyBlockReasons();
     TestInputSeqFloor();

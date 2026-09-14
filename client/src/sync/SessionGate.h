@@ -53,6 +53,13 @@ inline bool IsPreparingNextStage(std::uint32_t wire_state) {
     return wire_state == static_cast<std::uint32_t>(StageState::kPreparingNextStage);
 }
 
+// Movement intent is only meaningful while the stage is actually being played.
+// Clear/reward/preparing/failed/closed all freeze the world, and the intents sent
+// during them would be silently dropped server-side.
+inline bool IsPlaying(std::uint32_t wire_state) {
+    return wire_state == static_cast<std::uint32_t>(StageState::kPlaying);
+}
+
 // The reward phase is over for this client: nothing is being offered and no
 // choice is awaiting its RewardApplied acknowledgement.
 inline bool RewardSettled(RewardState state) {
@@ -87,10 +94,46 @@ inline bool AuthoritativeRewardPhaseEnded(std::uint32_t wire_state) {
     return false;
 }
 
-// Input may only be transmitted with a live room session and after the first
-// authoritative snapshot of that session has been applied.
-inline bool CanSendInput(bool in_room, bool session_has_snapshot) {
-    return in_room && session_has_snapshot;
+// Input may only be transmitted with a live room session, once this session has
+// an authoritative snapshot, outside recovery, while the player is alive and the
+// stage is actually playing (A5 items C-b and C-e).
+//
+// `self_known` separates "the server says this player is dead" from "no self
+// entity has been observed yet": aliveness is only gated on when it is actually
+// known, so a snapshot without a self entry cannot silently freeze the client.
+struct InputGate {
+    bool in_room = false;
+    bool session_has_snapshot = false;
+    bool recovery_active = false;
+    bool self_known = false;
+    bool self_alive = false;
+    std::uint32_t stage_state = 0;
+};
+
+// Why input is currently muted, for the HUD and the pairing logs. Only meaningful
+// while CanSendInput() is false.
+inline const char* InputBlockReason(const InputGate& gate) {
+    if (!gate.in_room) {
+        return "not in room";
+    }
+    if (gate.recovery_active) {
+        return "session recovery in progress";
+    }
+    if (!gate.session_has_snapshot) {
+        return "waiting for the first authoritative snapshot";
+    }
+    if (gate.self_known && !gate.self_alive) {
+        return "player is dead";
+    }
+    if (!IsPlaying(gate.stage_state)) {
+        return "stage is not being played";
+    }
+    return "(input enabled)";
+}
+
+inline bool CanSendInput(const InputGate& gate) {
+    return gate.in_room && !gate.recovery_active && gate.session_has_snapshot &&
+           !(gate.self_known && !gate.self_alive) && IsPlaying(gate.stage_state);
 }
 
 // The ready barrier: the server has moved to PreparingNextStage, this client has

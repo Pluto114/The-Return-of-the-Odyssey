@@ -109,6 +109,14 @@ public:
         }
     }
 
+    // Forget the newest intent without touching the timeline or position. Used
+    // when input becomes muted (death, stage end, recovery): a stale intent must
+    // not be applied for one more tick once play resumes.
+    void ClearIntent() {
+        newest_intent_ = InputCommand{};
+        has_intent_ = false;
+    }
+
     // Exactly one simulation step, once per 30Hz boundary. Called independently of
     // how many inputs were transmitted, which is what keeps a 300Hz send rate from
     // moving the client ten times per server tick. The tick timeline advances even

@@ -96,7 +96,9 @@ using odyssey::client::sync::CanReportReady;
 using odyssey::client::sync::CanSendInput;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::InputBlockReason;
 using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::InputGate;
 using odyssey::client::sync::InputSeqFloor;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::MovementPredictor;
@@ -159,6 +161,10 @@ struct DemoState {
     // Combat (D4) state.
     float self_hp = 0.0f;
     float self_max_hp = 0.0f;
+    // Authoritative aliveness. Gated on only once a self entity has been seen
+    // (input will not be muted for a field the server has not sent yet).
+    bool self_known = false;
+    bool self_alive = false;
     std::uint32_t stage_index = 0;
     std::uint32_t stage_state = 0;
     std::uint32_t monsters_remaining = 0;
@@ -182,6 +188,19 @@ struct DemoState {
     bool ready_sent = false;
     std::uint32_t ready_stage = 0;  // stage index ready_sent applies to
 };
+
+// A5 item C-b: everything the input gate depends on, gathered in one place so the
+// send path and the HUD always agree on why input is muted.
+InputGate MakeInputGate(const DemoState& demo, bool recovery_active) {
+    InputGate gate;
+    gate.in_room = demo.in_room;
+    gate.session_has_snapshot = demo.session_snapshots > 0;
+    gate.recovery_active = recovery_active;
+    gate.self_known = demo.self_known;
+    gate.self_alive = demo.self_alive;
+    gate.stage_state = demo.stage_state;
+    return gate;
+}
 
 }  // namespace
 
@@ -253,6 +272,11 @@ int main(int argc, char** argv) {
     double last_ping_sent = 0.0;
     int frame_counter = 0;
     const double t_start = GetTime();
+    // Input gate state, recomputed every frame and shared with the HUD. The
+    // previous value drives the mute/unmute transitions below.
+    InputGate input_gate;
+    bool input_enabled = false;
+    bool input_enabled_prev = false;
 
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
@@ -313,6 +337,8 @@ int main(int argc, char** argv) {
             demo.banner_ttl = 0.0f;
             demo.ready_sent = false;
             demo.session_snapshots = 0;
+            demo.self_known = false;
+            demo.self_alive = false;
             client.Connect(endpoint.host, endpoint.port);
         }
 
@@ -347,16 +373,25 @@ int main(int argc, char** argv) {
 
         // Sample and transmit intent at a fixed 30Hz after MatchFound. The
         // client sends direction only; position always comes from snapshots.
-        // A5 item C-e: input stays muted until the first authoritative snapshot
-        // of this session has been applied - after a resume the client holds no
-        // world state at all until then, so aiming or predicting from it would be
-        // meaningless (and the sequence range must not be replayed).
+        // A5 items C-b/C-e: intent is transmitted only while the room session is
+        // live, this session has an authoritative snapshot, no recovery is in
+        // progress, the player is alive and the stage is actually being played.
+        // Recomputed every frame (before the connection check) so the send path
+        // and the HUD can never disagree, and a dropped link reports muted at once.
+        input_gate = MakeInputGate(demo, recovery.Active());
+        input_enabled = CanSendInput(input_gate);
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
             if (now - last_input_time >= 1.0 / 30.0) {
                 last_input_time = now;
                 last_sample = input_sampler.SampleNow();
-                if (CanSendInput(demo.in_room, demo.session_snapshots > 0)) {
+                if (input_enabled) {
+                    if (!input_enabled_prev) {
+                        std::printf("main: input enabled stage=%s alive=%s\n",
+                                    StageStateName(demo.stage_state),
+                                    demo.self_alive ? "yes" : "no");
+                        std::fflush(stdout);
+                    }
                     last_report = input_sequencer.Tick(last_sample);
                     // Aim heading: mouse position mapped back to world space,
                     // relative to our own authoritative position. The client
@@ -400,9 +435,22 @@ int main(int argc, char** argv) {
                     predictor.AdvanceTick();
                     SendPayload(kPlayerInput, payload::EncodePlayerInput(input));
                 } else {
+                    // Muted: no InputSeq is consumed and no input is transmitted.
+                    // Drop the remembered intent on the transition so a stale
+                    // direction is not applied for one extra tick when play
+                    // resumes (A5 item C-b).
+                    if (input_enabled_prev) {
+                        predictor.ClearIntent();
+                        std::printf("main: input muted (%s) stage=%s alive=%s\n",
+                                    InputBlockReason(input_gate),
+                                    StageStateName(demo.stage_state),
+                                    demo.self_alive ? "yes" : "no");
+                        std::fflush(stdout);
+                    }
                     last_report.sequence = 0;
                     last_report.vector = NormalizeInput(last_sample);
                 }
+                input_enabled_prev = input_enabled;
             }
         }
 
@@ -443,6 +491,8 @@ int main(int argc, char** argv) {
                         // No authoritative state belongs to the next connection:
                         // input stays muted until its first snapshot arrives.
                         demo.session_snapshots = 0;
+                        demo.self_known = false;
+                        demo.self_alive = false;
                         if (had_session) {
                             recovery.OnDisconnect(GetTime());
                             std::printf("main: connection lost -> recovery (%s)\n",
@@ -660,6 +710,8 @@ int main(int argc, char** argv) {
                                 demo.self_attack = snap.self.attack;
                                 demo.self_defense = snap.self.defense;
                                 demo.self_move_speed = snap.self.move_speed;
+                                demo.self_known = true;
+                                demo.self_alive = snap.self.alive;
                                 // D9/A5 C-d: snap to the authoritative pose, adopt
                                 // the server's move speed and alive flag, then
                                 // re-advance only the ticks already simulated past
@@ -757,9 +809,12 @@ int main(int argc, char** argv) {
                             demo.banner_ttl = 2.5f;
                             if (event->message.message_type == kStageStartedEvent) {
                                 // A new stage begins: drop event-driven bullets
-                                // from the previous wave and any reward panel.
+                                // from the previous wave, any reward panel and the
+                                // remembered movement intent (a direction held
+                                // during the transition must not carry over).
                                 combat_view.ClearProjectiles();
                                 reward_view.Clear();
+                                predictor.ClearIntent();
                                 demo.ready_sent = false;
                             }
                             std::printf("main: %s stage=%u tick=%llu\n", kind,
@@ -954,6 +1009,9 @@ int main(int argc, char** argv) {
             "HP self=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
             std::to_string(static_cast<int>(demo.self_max_hp)) +
             "  shoot=" + std::string(last_shoot ? "yes" : "no") +
+            "  input=" + (input_enabled
+                              ? std::string("on")
+                              : std::string("muted:") + InputBlockReason(input_gate)) +
             "  events sp/dst/dmg/dth=" + std::to_string(demo.spawns) + "/" +
             std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
             std::to_string(demo.deaths);
