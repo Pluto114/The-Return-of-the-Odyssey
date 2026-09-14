@@ -1050,13 +1050,15 @@ int main(int argc, char** argv) {
         char ascii_c[160] = {0};
         char suffix[80] = {0};
 
-        DrawHudText("The Return of the Odyssey", 24, 24, 32, DARKGRAY);
-        DrawHudText("Phase 1 - authoritative two-player movement", 24, 64, 20, GRAY);
+        DrawHudText("The Return of the Odyssey", 24, 24, 32, ToRayColor(theme.text));
+        DrawHudText("Phase 1 - authoritative two-player movement", 24, 64, 20,
+                    ToRayColor(theme.text_dim));
 
         std::snprintf(line, sizeof(line), "Connection: %s  (%s)", ToString(demo.state),
                       SanitizeAscii(demo.state_detail.c_str(), ascii_a, sizeof(ascii_a)));
         DrawHudText(line, 24, 100, 20,
-                    demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
+                    demo.state == ConnectionState::kConnected ? ToRayColor(theme.neon_cyan)
+                                                              : ToRayColor(theme.text_dim));
 
         const char* recovery_phase = "idle";
         switch (recovery.Phase()) {
@@ -1079,7 +1081,7 @@ int main(int argc, char** argv) {
         std::snprintf(line, sizeof(line), "Recovery: %s attempts=%d token_bytes=%zu%s%s  %s",
                       recovery_phase, recovery.Attempts(), demo.resume_token.size(), suffix,
                       demo.resumed ? " (resumed session)" : "", recovery.Note().c_str());
-        DrawHudText(line, 24, 115, 18, GRAY);
+        DrawHudText(line, 24, 115, 18, ToRayColor(theme.text_dim));
 
         if (demo.login_ok) {
             std::snprintf(suffix, sizeof(suffix), "  session=%llu player=%llu",
@@ -1090,50 +1092,52 @@ int main(int argc, char** argv) {
         }
         std::snprintf(line, sizeof(line), "Login: %s%s",
                       SanitizeAscii(demo.login_note.c_str(), ascii_a, sizeof(ascii_a)), suffix);
-        DrawHudText(line, 24, 130, 20, demo.login_ok ? DARKGREEN : GRAY);
+        DrawHudText(line, 24, 130, 20,
+                    demo.login_ok ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_dim));
 
         std::snprintf(line, sizeof(line), "Match: %s",
                       SanitizeAscii(demo.match_note.c_str(), ascii_b, sizeof(ascii_b)));
-        DrawHudText(line, 520, 130, 20, demo.in_room ? DARKGREEN : GRAY);
+        DrawHudText(line, 520, 130, 20,
+                    demo.in_room ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_dim));
 
         if (demo.received_any) {
             std::snprintf(line, sizeof(line), "Inbound: type=%u seq=%u bytes=%zu", demo.last_type,
                           demo.last_sequence, demo.last_payload_bytes);
-            DrawHudText(line, 24, 160, 20, GRAY);
+            DrawHudText(line, 24, 160, 20, ToRayColor(theme.text_dim));
         } else {
-            DrawHudText("Inbound: (none yet)", 24, 160, 20, GRAY);
+            DrawHudText("Inbound: (none yet)", 24, 160, 20, ToRayColor(theme.text_dim));
         }
 
         std::snprintf(line, sizeof(line),
                       "Ping sent: %u   Pong: nonce=%llu server_time_ms=%llu", demo.pings_sent,
                       static_cast<unsigned long long>(demo.pong_nonce),
                       static_cast<unsigned long long>(demo.pong_server_time_ms));
-        DrawHudText(line, 24, 190, 20, GRAY);
+        DrawHudText(line, 24, 190, 20, ToRayColor(theme.text_dim));
         std::snprintf(line, sizeof(line), "Outbound drops: %d", demo.outbound_drops);
-        DrawHudText(line, 24, 220, 20, GRAY);
+        DrawHudText(line, 24, 220, 20, ToRayColor(theme.text_dim));
         if (!demo.server_note.empty()) {
             DrawHudText(SanitizeAscii(demo.server_note.c_str(), ascii_c, sizeof(ascii_c)), 24, 250,
-                        20, MAROON);
+                        20, ToRayColor(theme.text_danger));
         }
 
         std::snprintf(line, sizeof(line),
                       "Input intent: keys(dx=%d, dz=%d) vec(%.2f, %.2f) seq=%u @30Hz",
                       last_sample.dx, last_sample.dz, last_report.vector.x, last_report.vector.z,
                       last_report.sequence);
-        DrawHudText(line, 24, 280, 20, GRAY);
+        DrawHudText(line, 24, 280, 20, ToRayColor(theme.text_dim));
 
         std::snprintf(line, sizeof(line), "View: players=%zu room=%llu tick=%llu snaps=%llu",
                       game_view.PlayerCount(),
                       static_cast<unsigned long long>(game_view.RoomId()),
                       static_cast<unsigned long long>(game_view.ServerTick()),
                       static_cast<unsigned long long>(demo.snapshots_received));
-        DrawHudText(line, 24, 310, 20, GRAY);
+        DrawHudText(line, 24, 310, 20, ToRayColor(theme.text_dim));
 
         std::snprintf(line, sizeof(line),
                       "Stage: idx=%u state=%s remain=%u | monsters=%zu bullets=%zu",
                       demo.stage_index, StageStateName(demo.stage_state), demo.monsters_remaining,
                       combat_view.MonsterCount(), combat_view.ProjectileCount());
-        DrawHudText(line, 24, 340, 20, GRAY);
+        DrawHudText(line, 24, 340, 20, ToRayColor(theme.text_dim));
 
         std::snprintf(line, sizeof(line),
                       "HP self=%d/%d  shoot=%s  input=%s  events sp/dst/dmg/dth=%u/%u/%u/%u",
@@ -1141,7 +1145,7 @@ int main(int argc, char** argv) {
                       last_shoot ? "yes" : "no",
                       input_enabled ? "on" : InputBlockReason(input_gate), demo.spawns,
                       demo.destroys, demo.damages, demo.deaths);
-        DrawHudText(line, 24, 370, 20, GRAY);
+        DrawHudText(line, 24, 370, 20, ToRayColor(theme.text_dim));
 
         // Ready is gated on the authoritative preparing state (A5 C-a): show why
         // ENTER is unavailable instead of leaving the operator guessing.
@@ -1161,10 +1165,10 @@ int main(int argc, char** argv) {
                       static_cast<int>(demo.self_attack), static_cast<int>(demo.self_defense),
                       static_cast<int>(demo.self_move_speed), ready_text,
                       static_cast<long long>(combat_view.Stage().seed));
-        DrawHudText(line, 24, 400, 20, GRAY);
+        DrawHudText(line, 24, 400, 20, ToRayColor(theme.text_dim));
         std::snprintf(line, sizeof(line), "Last event: %s",
                       SanitizeAscii(demo.last_event_note.c_str(), ascii_b, sizeof(ascii_b)));
-        DrawHudText(line, 470, 400, 18, MAROON);
+        DrawHudText(line, 470, 400, 18, ToRayColor(theme.text_warn));
 
         std::snprintf(line, sizeof(line),
                       "Netcode: pending=%zu corr=%.3f predTick=%llu ack=%u spd=%d alive=%s "
@@ -1175,13 +1179,13 @@ int main(int argc, char** argv) {
                       predictor.Alive() ? "y" : "n",
                       static_cast<int>(remote_interp.DelayTicks()), remote_interp.Count(),
                       monster_interp.Count());
-        DrawHudText(line, 24, 430, 20, GRAY);
+        DrawHudText(line, 24, 430, 20, ToRayColor(theme.text_dim));
 
 
-        // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
-        // projectiles gold. Projectiles exist only via spawn/destroy events.
-        DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
-                           static_cast<int>(kArenaW), static_cast<int>(kArenaH), LIGHTGRAY);
+        // Arena: world [0,20]^2. Self neon blue, peers red, monsters orange,
+        // projectiles amber; all colours come from the Katana Zero theme so the
+        // near-black ground stays readable. Projectiles exist only via
+        // spawn/destroy events.
         // World -> RT through the shared transform (the same mapping the crosshair
         // and the damage floaters use), instead of a second local copy of the math.
         const auto to_screen = [](float wx, float wz) {
@@ -1189,9 +1193,26 @@ int main(int argc, char** argv) {
             return Vector2{rt.x, rt.y};
         };
 
+        // Floor: a unit grid so the near-black ground still reads as an arena and
+        // movement is legible. The centre lines are slightly brighter.
+        for (int i = 0; i <= 20; ++i) {
+            const Color grid_colour =
+                (i == 10) ? ToRayColor(theme.panel_edge) : ToRayColor(theme.grid);
+            const Vector2 top = to_screen(static_cast<float>(i), 0.0f);
+            const Vector2 bottom = to_screen(static_cast<float>(i), kWorldSize);
+            const Vector2 left = to_screen(0.0f, static_cast<float>(i));
+            const Vector2 right = to_screen(kWorldSize, static_cast<float>(i));
+            DrawLineV(top, bottom, grid_colour);
+            DrawLineV(left, right, grid_colour);
+        }
+        DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
+                           static_cast<int>(kArenaW), static_cast<int>(kArenaH),
+                           ToRayColor(theme.panel_edge));
+
         for (const auto& [id, projectile] : combat_view.Projectiles()) {
             (void)id;
-            DrawCircleV(to_screen(projectile.x, projectile.z), 3.0f, GOLD);
+            DrawCircleV(to_screen(projectile.x, projectile.z), 3.0f,
+                        ToRayColor(theme.projectile));
         }
 
         char label[32] = {0};
@@ -1205,22 +1226,28 @@ int main(int argc, char** argv) {
             const float sy = screen.y;
             const bool dead = combat_view.IsDead(id);
             DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
-                          dead ? DARKGRAY : ORANGE);
+                          dead ? ToRayColor(theme.dead) : ToRayColor(theme.monster));
             if (dead) {
+                // Crossed out corpse: the mark uses the ground colour so it stays
+                // visible on the dark motif instead of blending into it.
                 DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7,
-                         static_cast<int>(sx) + 7, static_cast<int>(sy) + 7, BLACK);
+                         static_cast<int>(sx) + 7, static_cast<int>(sy) + 7,
+                         ToRayColor(theme.background));
                 DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) + 7,
-                         static_cast<int>(sx) + 7, static_cast<int>(sy) - 7, BLACK);
+                         static_cast<int>(sx) + 7, static_cast<int>(sy) - 7,
+                         ToRayColor(theme.background));
             }
             const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4,
+                          Fade(ToRayColor(theme.bar_empty), 0.65f));
             DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
-                          static_cast<int>(20.0f * ratio), 4, LIME);
+                          static_cast<int>(20.0f * ratio), 4, ToRayColor(theme.neon_red));
             if (combat_view.IsHitFlashing(id)) {
-                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f, GOLD);
+                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f,
+                                ToRayColor(theme.neon_yellow));
             }
             std::snprintf(label, sizeof(label), "%llu", static_cast<unsigned long long>(id));
-            DrawHudText(label, sx + 9, sy - 8, 12, DARKGRAY);
+            DrawHudText(label, sx + 9, sy - 8, 12, ToRayColor(theme.text_dim));
         }
 
         for (const auto& player : game_view.Players()) {
@@ -1241,37 +1268,45 @@ int main(int argc, char** argv) {
             const float px = screen.x;
             const float pz = screen.y;
             DrawCircleV(Vector2{px, pz}, 9.0f,
-                        !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
+                        !player.alive ? ToRayColor(theme.dead)
+                                      : (is_self ? ToRayColor(theme.player)
+                                                 : ToRayColor(theme.peer)));
             if (combat_view.IsHitFlashing(player.id)) {
-                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f, GOLD);
+                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f,
+                                ToRayColor(theme.neon_yellow));
             }
             // HP bar above every player (authoritative hp/max_hp from snapshot).
             const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4,
+                          Fade(ToRayColor(theme.bar_empty), 0.65f));
             DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20,
-                          static_cast<int>(24.0f * hp_ratio), 4, player.alive ? GREEN : GRAY);
+                          static_cast<int>(24.0f * hp_ratio), 4,
+                          player.alive ? ToRayColor(theme.bar_fill)
+                                       : ToRayColor(theme.dead));
             if (is_self) {
                 // Aim heading we are sending to the server.
                 DrawLineV(Vector2{px, pz},
-                          Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f}, DARKBLUE);
+                          Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f},
+                          ToRayColor(theme.neon_cyan));
             }
             std::snprintf(label, sizeof(label), "%llu",
                           static_cast<unsigned long long>(player.id));
-            DrawHudText(label, px + 12, pz - 8, 16, DARKGRAY);
+            DrawHudText(label, px + 12, pz - 8, 16, ToRayColor(theme.text_dim));
         }
 
         if (!demo.banner.empty()) {
             DrawHudText(SanitizeAscii(demo.banner.c_str(), ascii_c, sizeof(ascii_c)), 300, 20, 32,
-                        MAROON);
+                        ToRayColor(theme.neon_magenta));
         }
 
         if (reward_view.State() != RewardState::kNone) {
             // Treasure chest panel: options come from the server; display text
             // comes from the local static table (ids travel on the wire).
-            DrawRectangle(20, 452, 920, 72, Fade(LIGHTGRAY, 0.45f));
+            DrawRectangle(20, 452, 920, 72, Fade(ToRayColor(theme.panel), 0.92f));
+            DrawRectangleLines(20, 452, 920, 72, ToRayColor(theme.panel_edge));
             std::snprintf(line, sizeof(line), "REWARD - %s   (keys 1-3 choose)",
                           SanitizeAscii(reward_view.Note().c_str(), ascii_a, sizeof(ascii_a)));
-            DrawHudText(line, 30, 456, 20, MAROON);
+            DrawHudText(line, 30, 456, 20, ToRayColor(theme.neon_yellow));
             // The option row is appended in place: up to three entries with names,
             // slots and stats must not build a std::string per frame.
             char row[512] = {0};
@@ -1288,16 +1323,16 @@ int main(int argc, char** argv) {
                 }
                 used += static_cast<std::size_t>(written);
             }
-            DrawHudText(row, 30, 486, 18, DARKGRAY);
+            DrawHudText(row, 30, 486, 18, ToRayColor(theme.text));
         } else {
             DrawHudText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
-                        24, kScreenHeight - 60, 20, LIGHTGRAY);
+                        24, kScreenHeight - 60, 20, ToRayColor(theme.text_dim));
         }
         DrawFPS(kScreenWidth - 90, 12);
 
         if (target_ready) {
             EndTextureMode();
-            ClearBackground(BLACK);
+            ClearBackground(ToRayColor(theme.letterbox));
             // Raylib render textures are stored bottom-up, hence the negative
             // source height; the destination rectangle carries the integer scale
             // and the letterbox offset computed on resize.

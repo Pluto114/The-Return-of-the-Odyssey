@@ -38,6 +38,12 @@ pwsh -File scripts/generate-equipment/generate.ps1 -Check   # 判表是否过期
 - 启动时用 `LoadFontEx` 加载一次（基础字号 32，只取可打印 ASCII 32–126 的字符集）并做 `TEXTURE_FILTER_POINT`；文件缺失/无效 → 自动回退 `GetFontDefault()` 并打印 `main: WARN HUD font ...`，**不会崩溃**
 - 界面统一英文 + 数字 + 十六进制；任何可能来自服务器/操作系统的字符串（如本地化的连接错误）都会经 `SanitizeAscii` 把非 ASCII 字节降级为 `?`，避免采样图集里不存在的字形；只有 ID 可信时使用 `[RAW_ID_<id>]` 占位
 - 渲染循环内的自研代码**不构造 `std::string`/`std::vector`**：所有 HUD 行都用定长 `char buf[]` + `snprintf` 拼装（已核对渲染块内相关构造为 0）
+
+## 画面配色（Katana Zero 暗底）
+
+- 场景底色是主题的**深紫黑 `#0A0A10`**（提示词 §一.4 要求：RT 内清主题底色防拖影；Letterbox 黑边用 `theme.letterbox`，默认帧缓冲再清一次）
+- 竞技场画**单位网格地板**（`theme.grid`，中线略亮）以便在暗底上看清移动与距离；世界本体、玩家/怪物/弹丸/血条/文字全部取自 `ui/Theme.h` 的调色板（`text`、`text_dim`、`neon_*`、`player`/`peer`/`monster`/`projectile`、`bar_fill`/`bar_empty`），不再使用 raylib 的默认亮底常量
+- 想换风格只改 `ui/Theme.h` 一处（P3 的无障碍/主题开关也会复用同一份 token）
 - `settings.ini` 写入系统配置目录（Windows `%APPDATA%\Odyssey\`，POSIX `$XDG_CONFIG_HOME/odyssey/` 或 `~/.config/odyssey/`，都不行才落到 exe 目录），**绝不写入源码树**；读取失败或目录不可写只告警并保留内存默认值
 - 窗口：可缩放（最小 960×540），画面按**整数倍**缩放并加黑边（`scale = max(1, floor(min(w/960, h/540)))`）；`ESC` 由客户端接管（raylib 默认关窗已被禁用），当前无 ImGui 面板时按 ESC 直接退出
 
