@@ -24,6 +24,18 @@
     "damage_dealt_total": 600,
     "stage_cleared_total": 5
   },
+  "admin_playing_sample": {
+    "environment": "development",
+    "online_players": 10,
+    "active_rooms": 5,
+    "active_monsters": 15,
+    "active_projectiles": 20,
+    "room_count": 5,
+    "phases": ["playing"],
+    "max_room_tick": 12,
+    "network_connections": 10,
+    "token_password_nickname_fields_absent": true
+  },
   "environment": {
     "os": "windows",
     "arch": "amd64",
