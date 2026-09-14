@@ -17,6 +17,7 @@ A5 硬化在 `feature/week2-client-hardening`（基于集成后的 `main`）上�
 | 端点配置解析（C-g） | `client/tests/config_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**129 checks / 0 failures**；`main()` 序言代理程序实测 default/cli/env 三种来源、非法端口 exit 2、`--help` exit 0 |
 | 逻辑套件（独立编译复现） | `client/tests/gameview_tests.cpp` 用 MSVC 14.44 `/std:c++20 /W4` 单独编译运行，无警告；各提交时点：158（D4–D9）→ 233（C-a/C-e）→ 272（C-d）→ 297（C-b，与 `ctest` 实测一致）→ 338（C-f）→ **352（装备表）** |
 | UI 基础设施 P0a（Katana Zero 重构） | `client/src/ui/{UiGeometry,HealthBar,FloaterPool,AssetPath,Theme}.h` 全部 raylib-free，测试在 `odyssey_logic_tests` 内新增 192 项断言：`scale=1`（960×540、1280×720 带黑边）与 `scale≥2`（1920×1080、2560×1440、3840×2160、限高轴）布局、退化窗口（0/负尺寸不产生 NaN 偏移、小于目标时对称裁切）、`WindowToRT` 黑边钳制与 `IsInsideTarget`、`World↔RT` 往返与角点映射、`WorldToWindow` 与 `WindowToRT` 复合一致、分段血条（满/零/负/半/边界/过量治疗/NaN/单段）、`SegmentWidth` 退化、飘字池生命周期与 FIFO 覆盖（128 槽）、去重表（命中/不同键/过期/容量 256 淘汰/清空）、资源根候选优先级与去重、settings 路径（`%APPDATA%` > `XDG_CONFIG_HOME` > `~/.config` > exe 目录）、主题色与无障碍开关默认值 |
+| 渲染管线 P0b（Katana Zero 重构） | ⏳ **待本地构建确认**：`main.cpp` 已改为「可缩放窗口 + `SetExitKey(KEY_NULL)` + RT(960×540) + 双层清屏 + `-540` 翻转 blit + `rlDrawRenderBatchActive()` + 重算 layout」，`client/CMakeLists.txt` 增加 `src/ui/AssetPath.cpp` 与 assets post-build 拷贝。会话内已单独编译 `ui/AssetPath.cpp`（MSVC 14.44 `/W4` 无警告）；`main.cpp` 含 raylib/asio/protobuf 依赖，需完整构建。待你复核：窗口缩放是否为整数倍 + 黑边、ESC 是否仍可退出、拉伸时有无拖影/花屏，以及启动日志中的 `viewport`、`asset root`、`accessibility` 三行 |
 | 单帧窗口探针 | `odyssey_window_probe.exe`（红块/蓝圆/文字）用于渲染与事件泵诊断 |
 
 ## 覆盖范围（对照 WEEK2 计划）

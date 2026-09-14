@@ -94,11 +94,24 @@ endif()
 
 # The game client executable. Ping/Login now use A's generated protocol;
 # PlayerInput transmission and WorldSnapshot decoding land in the next slices.
-add_executable(odyssey_client src/main.cpp src/input/InputSampler.cpp)
+# ui/*.cpp (theme-adjacent platform code, HUD renderers) is compiled here only -
+# never into the test targets, which must stay window-free.
+add_executable(odyssey_client
+    src/main.cpp
+    src/input/InputSampler.cpp
+    src/ui/AssetPath.cpp)
 target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+
+# Ship the assets beside the executable: the client resolves its asset root as
+# <exe>/assets first, so it never depends on the working directory.
+add_custom_command(TARGET odyssey_client POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:odyssey_client>/assets"
+    COMMENT "Copying client assets next to odyssey_client")
 
 # Diagnostic: raylib window with no network/protocol (isolates environment
 # issues from client-logic hangs). Prints markers to stdout.

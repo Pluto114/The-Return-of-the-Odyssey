@@ -13,6 +13,7 @@
 #include "network/PayloadCodec.h"
 #include "network/ProtocolIds.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
 #include "sync/Interpolation.h"
@@ -20,6 +21,9 @@
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
+#include "ui/AssetPath.h"
+#include "ui/Theme.h"
+#include "ui/UiGeometry.h"
 
 #include <cmath>
 #include <cstdint>
@@ -44,6 +48,12 @@ constexpr float kArenaX = 560.0f;
 constexpr float kArenaY = 190.0f;
 constexpr float kArenaW = 340.0f;
 constexpr float kArenaH = 280.0f;
+constexpr odyssey::client::ui::Rectf kArenaView{kArenaX, kArenaY, kArenaW, kArenaH};
+
+// Raylib-dependent adapter for the raylib-free theme palette.
+Color ToRayColor(const odyssey::client::ui::Rgba& colour) {
+    return Color{colour.r, colour.g, colour.b, colour.a};
+}
 
 // Gameserver endpoint: resolved from the command line or the environment, with
 // a loopback default (see core/ClientConfig.h). Never hardcode an address here.
@@ -111,6 +121,19 @@ using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StageStateName;
+using odyssey::client::ui::AccessibilityConfig;
+using odyssey::client::ui::AssetRoot;
+using odyssey::client::ui::ComputeViewportLayout;
+using odyssey::client::ui::GetAssetPath;
+using odyssey::client::ui::kDefaultTheme;
+using odyssey::client::ui::LoadAccessibility;
+using odyssey::client::ui::RTToWorld;
+using odyssey::client::ui::SettingsFileExists;
+using odyssey::client::ui::SettingsFilePath;
+using odyssey::client::ui::Theme;
+using odyssey::client::ui::Vec2f;
+using odyssey::client::ui::ViewportLayout;
+using odyssey::client::ui::WindowToRT;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -219,10 +242,46 @@ int main(int argc, char** argv) {
     }
     const ClientEndpoint endpoint = config.options.endpoint;
 
+    // Window contract (UI refactor P0b): resizable before InitWindow, a 960x540
+    // minimum so the integer letterbox never has to shrink, ESC taken over by the
+    // game loop (raylib's default close-on-ESC is disabled), and no HIGHDPI flag -
+    // the render target already provides the fixed pixel grid.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     std::printf("main: before InitWindow\n"); fflush(stdout);
     InitWindow(kScreenWidth, kScreenHeight, "The Return of the Odyssey - Client");
     std::printf("main: after InitWindow\n"); fflush(stdout);
+    SetWindowMinSize(kScreenWidth, kScreenHeight);
+    SetExitKey(KEY_NULL);
     SetTargetFPS(kFps);
+
+    // Everything - world and HUD alike - is drawn into this fixed 960x540 target
+    // and blitted with an integer scale plus letterbox bars.
+    RenderTexture2D target = LoadRenderTexture(kScreenWidth, kScreenHeight);
+    // raylib 6.0 renamed this check: it is IsRenderTextureValid(), not the 5.x
+    // IsRenderTextureReady() the UI plan mentioned.
+    const bool target_ready = IsRenderTextureValid(target);
+    if (target_ready) {
+        // Nearest-neighbour: integer upscaling must not blur the pixel art.
+        SetTextureFilter(target.texture, TEXTURE_FILTER_POINT);
+    } else {
+        std::printf("main: WARN render texture unavailable; drawing straight to the window\n");
+        std::fflush(stdout);
+    }
+    ViewportLayout layout = ComputeViewportLayout(GetScreenWidth(), GetScreenHeight());
+    std::printf("main: viewport scale=%.0f offset=(%.0f,%.0f)\n", layout.scale, layout.offset_x,
+                layout.offset_y);
+    std::fflush(stdout);
+    const Theme theme = kDefaultTheme;
+    const AccessibilityConfig accessibility = LoadAccessibility();
+    std::printf("main: asset root '%s' (settings '%s'%s)\n", AssetRoot().c_str(),
+                SettingsFilePath().c_str(), SettingsFileExists() ? "" : ", not created yet");
+    // The accessibility switches are consumed by the HUD/effects in P1-P3; logging
+    // them here keeps the loaded state visible in playtest evidence.
+    std::printf("main: accessibility glitch_fx=%d screen_shake=%d damage_floaters=%d\n",
+                accessibility.disable_glitch_fx ? 0 : 1,
+                accessibility.disable_screen_shake ? 0 : 1,
+                accessibility.disable_damage_floaters ? 0 : 1);
+    std::fflush(stdout);
 
     BoundedQueue<NetEvent> inbox(256);
     NetClient client;
@@ -246,18 +305,24 @@ int main(int argc, char** argv) {
     EquipmentTable equipment_table;
 
     // Optional local display table (static equipment data is never sent on the
-    // wire). Missing file simply means "equipment#<id>" placeholders.
-    for (const char* candidate : {"equipment.csv", "assets/data/equipment.csv",
-                                  "client/assets/data/equipment.csv"}) {
-        std::ifstream file(candidate);
+    // wire). Missing file simply means "equipment#<id>" placeholders. The path is
+    // resolved through the asset root, so the client no longer depends on the
+    // working directory.
+    {
+        const std::string equipment_path = GetAssetPath("data/equipment.csv");
+        std::ifstream file(equipment_path);
         if (file) {
             std::stringstream buffer;
             buffer << file.rdbuf();
             const std::size_t loaded = odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
-            std::printf("main: loaded %zu equipment entries from %s\n", loaded, candidate);
-            std::fflush(stdout);
-            break;
+            std::printf("main: loaded %zu equipment entries from %s\n", loaded,
+                        equipment_path.c_str());
+        } else {
+            std::printf("main: WARN equipment display table missing at %s "
+                        "(rewards will show raw ids)\n",
+                        equipment_path.c_str());
         }
+        std::fflush(stdout);
     }
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
@@ -294,6 +359,15 @@ int main(int argc, char** argv) {
             break;
         }
         const double frame_start = GetTime();
+        // Resize: recompute the integer scale and letterbox offsets. Cheap and
+        // only on the frames where the platform reports a size change.
+        if (IsWindowResized()) {
+            layout = ComputeViewportLayout(GetScreenWidth(), GetScreenHeight());
+            std::printf("main: window resized %dx%d -> scale=%.0f offset=(%.0f,%.0f)\n",
+                        GetScreenWidth(), GetScreenHeight(), layout.scale, layout.offset_x,
+                        layout.offset_y);
+            std::fflush(stdout);
+        }
         // Decay transient combat feedback (hit flashes, banner).
         const float frame_dt = GetFrameTime();
         combat_view.Tick(frame_dt);
@@ -393,12 +467,16 @@ int main(int argc, char** argv) {
                         std::fflush(stdout);
                     }
                     last_report = input_sequencer.Tick(last_sample);
-                    // Aim heading: mouse position mapped back to world space,
-                    // relative to our own authoritative position. The client
-                    // never sends positions or hit results.
+                    // Aim heading: mouse position mapped back to world space. The
+                    // window pointer goes through the letterbox transform first,
+                    // so aim stays correct at any window size, then through the
+                    // shared RT->world mapping (same one the crosshair and the
+                    // damage floaters will use).
                     const Vector2 mouse = GetMousePosition();
-                    const float mx = (mouse.x - kArenaX) / kArenaW * kWorldSize;
-                    const float mz = (mouse.y - kArenaY) / kArenaH * kWorldSize;
+                    const Vec2f rt_mouse = WindowToRT(Vec2f{mouse.x, mouse.y}, layout);
+                    const Vec2f world_mouse = RTToWorld(rt_mouse, kArenaView);
+                    const float mx = world_mouse.x;
+                    const float mz = world_mouse.y;
                     float aim_x = 1.0f;
                     float aim_z = 0.0f;
                     if (const auto* self = game_view.Find(demo.player_id)) {
@@ -946,7 +1024,15 @@ int main(int argc, char** argv) {
         }
 
         BeginDrawing();
-        ClearBackground(RAYWHITE);
+        // UI refactor P0b: the world and the HUD are drawn into the fixed 960x540
+        // render target, which is then blitted to the window with an integer scale
+        // and letterbox bars. Only the target's own clear is themed; the default
+        // framebuffer gets an explicit black clear so a resized window can never
+        // show stale pixels in the bars or ghost the previous frame.
+        if (target_ready) {
+            BeginTextureMode(target);
+        }
+        ClearBackground(ToRayColor(theme.background));
 
         DrawText("The Return of the Odyssey", 24, 24, 32, DARKGRAY);
         DrawText("Phase 1 - authoritative two-player movement", 24, 64, 20, GRAY);
@@ -1174,6 +1260,22 @@ int main(int argc, char** argv) {
         }
         DrawFPS(kScreenWidth - 90, 12);
 
+        if (target_ready) {
+            EndTextureMode();
+            ClearBackground(BLACK);
+            // Raylib render textures are stored bottom-up, hence the negative
+            // source height; the destination rectangle carries the integer scale
+            // and the letterbox offset computed on resize.
+            const Rectangle source{0.0f, 0.0f, static_cast<float>(kScreenWidth),
+                                   -static_cast<float>(kScreenHeight)};
+            const Rectangle destination{layout.offset_x, layout.offset_y,
+                                        static_cast<float>(kScreenWidth) * layout.scale,
+                                        static_cast<float>(kScreenHeight) * layout.scale};
+            DrawTexturePro(target.texture, source, destination, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            // Submit the pending batch before other render paths (ImGui in P2) touch
+            // the GL state.
+            rlDrawRenderBatchActive();
+        }
         EndDrawing();
         // This raylib build enables SUPPORT_CUSTOM_FRAME_CONTROL: EndDrawing
         // flushes drawing commands, but presenting the frame is our job.
@@ -1191,6 +1293,9 @@ int main(int argc, char** argv) {
     std::printf("main: loop exited, stopping net thread\n"); fflush(stdout);
     client.Stop();
     std::printf("main: net stopped, closing window\n"); fflush(stdout);
+    if (target_ready) {
+        UnloadRenderTexture(target);
+    }
     CloseWindow();
     std::printf("main: exit\n"); fflush(stdout);
     return 0;

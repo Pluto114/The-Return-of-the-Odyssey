@@ -24,8 +24,15 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 ```powershell
 pwsh -File scripts/generate-equipment/generate.ps1          # 目录变更后重新生成
-pwsh -File scripts/generate-equipment/generate.ps1 -Check   # CI 门禁：表是否已过期（不一致退出码 1）
+pwsh -File scripts/generate-equipment/generate.ps1 -Check   # 判表是否过期（不一致退出码 1）；当前未挂进共享 check 脚本，由调用方执行
 ```
+
+## 资源与设置（UI 重构 P0b）
+
+- 构建后 `client/assets/` 会被复制到 `<exe 目录>/assets`；客户端启动时按 `<exe>/assets` → `<CWD>/assets` → `<CWD>/client/assets` 的顺序解析**并缓存**一次资源根（渲染循环内不做路径解析），因此可以从任意工作目录启动
+- 资源缺失只告警并回退（字体缺 → raylib 默认字体；装备表缺 → 奖励面板显示原始 ID），不会崩溃
+- `settings.ini` 写入系统配置目录（Windows `%APPDATA%\Odyssey\`，POSIX `$XDG_CONFIG_HOME/odyssey/` 或 `~/.config/odyssey/`，都不行才落到 exe 目录），**绝不写入源码树**；读取失败或目录不可写只告警并保留内存默认值
+- 窗口：可缩放（最小 960×540），画面按**整数倍**缩放并加黑边（`scale = max(1, floor(min(w/960, h/540)))`）；`ESC` 由客户端接管（raylib 默认关窗已被禁用），当前无 ImGui 面板时按 ESC 直接退出
 
 ## 测试
 

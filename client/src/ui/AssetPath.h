@@ -21,6 +21,8 @@
 // Raylib-free on purpose.
 #pragma once
 
+#include "ui/Theme.h"
+
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -99,5 +101,29 @@ inline std::string ChooseSettingsDirectory(const char* appdata,
 inline std::string SettingsFilePathIn(const std::string& directory) {
     return JoinPath(directory, "settings.ini");
 }
+
+// ---------------------------------------------------------------------------
+// Platform half, implemented in ui/AssetPath.cpp (compiled into the client only,
+// never linked into the test targets because it touches the filesystem).
+// ---------------------------------------------------------------------------
+
+// Resolved once at startup and cached; empty when no candidate exists, in which
+// case GetAssetPath() returns the relative path unchanged.
+const std::string& AssetRoot();
+
+// Absolute path for an asset, e.g. GetAssetPath("data/equipment.csv"). Call it at
+// startup only: the render loop must not resolve paths per frame.
+std::string GetAssetPath(const std::string& relative_path);
+
+// settings.ini location outside the source tree (%APPDATA% / XDG / ~/.config,
+// executable directory as the last resort). Cached after the first call.
+const std::string& SettingsFilePath();
+
+bool SettingsFileExists();
+
+// Reads the accessibility switches. A missing or unreadable file - and any write
+// failure reported by the writer added in P3 - yields the defaults plus a stdout
+// warning; it must never block or crash the client.
+AccessibilityConfig LoadAccessibility();
 
 }  // namespace odyssey::client::ui
