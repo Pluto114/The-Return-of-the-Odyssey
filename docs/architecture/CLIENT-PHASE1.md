@@ -30,6 +30,7 @@ A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控
 | 恢复状态机 | `client/src/sync/RecoveryState.h` | 有界退避重连、Resume 与全新登录决策、令牌失效处理 |
 | 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | tick 驱动的本地预测 + 服务器校正（每 30Hz 边界一步、按 tick 而非按包重放，采用快照移速与存活）；远端/怪物 10Hz 插值 |
 | 会话/关卡门控 | `client/src/sync/SessionGate.h` | 纯谓词：StageState 与服务器 iota 对齐、可否发输入（需本会话首帧快照）、可否报 Ready（权威 `PreparingNextStage` + 自身奖励结清 + 每关一次）、InputSeq 下界 |
+| UI 基础设施（P0a） | `client/src/ui/UiGeometry.h`、`HealthBar.h`、`FloaterPool.h`、`AssetPath.h`、`Theme.h` | 960×540 整数缩放 + Letterbox 布局与三支坐标变换（Window→RT、RT↔World、World→Window）、分段血条数学、128 槽飘字池与 `(server_tick, source, target)` 去重表、资源根/设置路径解析（纯决策部分）、Katana Zero 主题与 `AccessibilityConfig`；**全部 raylib-free**，测试并入 `odyssey_logic_tests` |
 | 窗口/HUD | `client/src/main.cpp` | 连接/登录/匹配/战斗/奖励/恢复/网络统计 HUD；R 重试；ESC/关窗干净退出 |
 
 构建与自检：
@@ -131,3 +132,15 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 - 预测/校正（A5 C-d）：tick 驱动。每 30Hz 边界恰好一步，步数按服务器 tick 时间线计算，**不按收发包数**；移速取自快照 `self.move_speed`（装备/属性加成即时生效），死亡时不推进。因此收包频率（30Hz/300Hz）不改变预测速度。
 - 恢复等待（A5 C-f）全部有界：重连最多 5 次（退避 2s→10s），用尽后进入终止态 `kExhausted`（需按 R，不再无声重试）；`ResumeRequest`/`LoginRequest` 5s 无响应即超时 → 丢弃令牌回落全新登录，超时与连接失败共用同一预算；恢复成功后再次闪断会重置预算（可反复恢复）。Token 轮换需协议先给新 token 字段（A4）。
 - 本机 raylib 动态库呈现问题（纯色图元不上屏）记录在验证文档，属环境待办，不影响逻辑/网络联调。
+
+## 10. UI 重构（Katana Zero 风格）分期状态
+
+按定稿提示词分四期推进；`ui/*.cpp` **不链接进任何测试目标**，可测部分一律放在 raylib-free 的 `ui/*.h`。
+
+| 期 | 范围 | 状态 |
+| --- | --- | --- |
+| **P0a** | `ui/Theme.h`、`ui/UiGeometry.h`（布局 + 三支坐标变换，含 `scale=1` 与 `scale≥2` 用例）、`ui/HealthBar.h`、`ui/FloaterPool.h`（128 槽 FIFO + 去重键 + 过期）、`ui/AssetPath.h`（资源根与 settings 路径的纯决策） | ✅ 已完成（`odyssey_logic_tests` 内 192 项新断言） |
+| **P0b** | `main.cpp` 渲染闭环接线：可缩放窗口 + `SetWindowMinSize(960,540)`、`SetExitKey(KEY_NULL)`、RenderTexture(960×540) 生命周期与 `TEXTURE_FILTER_POINT`、双层清屏、`-540` 翻转 blit、`IsWindowResized` 重算 layout、assets post-build 拷贝、`ui/AssetPath.cpp` 平台实现（exe 目录 / `%APPDATA%` / XDG） | ⏳ 待做 |
+| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | ⏳ 待做（字体来源与 LICENSE 待确认） |
+| **P2** | ImGui 顶层：奖励面板与 Raylib 旧面板互斥、单次提交锁定、键鼠门控、ESC 优先级 | ⏸ 门禁：rlImGui 依赖审批 |
+| **P3** | F1/F2/F3 调试与无障碍面板、双向队列深度 EMA 折线、`--no-ui`/`ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收 | ⏸ 门禁：D 的 Release 预设 |

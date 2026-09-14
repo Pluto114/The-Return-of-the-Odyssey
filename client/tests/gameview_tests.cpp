@@ -8,6 +8,11 @@
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
+#include "ui/AssetPath.h"
+#include "ui/FloaterPool.h"
+#include "ui/HealthBar.h"
+#include "ui/Theme.h"
+#include "ui/UiGeometry.h"
 
 #include <cmath>
 #include <cstdint>
@@ -65,6 +70,34 @@ using odyssey::client::sync::StageState;
 using odyssey::client::sync::StageStateName;
 using odyssey::client::sync::StepMovement;
 using odyssey::client::sync::UnquoteField;
+using odyssey::client::ui::AccessibilityConfig;
+using odyssey::client::ui::AssetRootCandidates;
+using odyssey::client::ui::ChooseAssetRoot;
+using odyssey::client::ui::ChooseSettingsDirectory;
+using odyssey::client::ui::ComputeHealthSegments;
+using odyssey::client::ui::ComputeViewportLayout;
+using odyssey::client::ui::DamageDedupeTable;
+using odyssey::client::ui::Floater;
+using odyssey::client::ui::FloaterKey;
+using odyssey::client::ui::FloaterPool;
+using odyssey::client::ui::IsInsideTarget;
+using odyssey::client::ui::JoinPath;
+using odyssey::client::ui::kDefaultAccessibility;
+using odyssey::client::ui::kDefaultTheme;
+using odyssey::client::ui::kTargetHeight;
+using odyssey::client::ui::kTargetWidth;
+using odyssey::client::ui::kWorldSize;
+using odyssey::client::ui::Rectf;
+using odyssey::client::ui::Rgba;
+using odyssey::client::ui::RgbaFromHex;
+using odyssey::client::ui::RTToWorld;
+using odyssey::client::ui::SegmentWidth;
+using odyssey::client::ui::SettingsFilePathIn;
+using odyssey::client::ui::Theme;
+using odyssey::client::ui::Vec2f;
+using odyssey::client::ui::WindowToRT;
+using odyssey::client::ui::WorldToRT;
+using odyssey::client::ui::WorldToWindow;
 
 constexpr float kEps = 1e-5f;
 
@@ -1030,6 +1063,409 @@ void TestSettleAfterAuthoritativeEnd() {
     CHECK(idle.State() == RewardState::kNone);
 }
 
+// ---------------------------------------------------------------------------
+// UI infrastructure (Katana Zero refactor, phase P0). All of it is raylib-free.
+// ---------------------------------------------------------------------------
+
+void TestViewportLayoutScaleOne() {
+    auto native = ComputeViewportLayout(960, 540);
+    CHECK(std::fabs(native.scale - 1.0f) < kEps);
+    CHECK(native.offset_x == 0.0f);
+    CHECK(native.offset_y == 0.0f);
+
+    // Not an integer multiple of the target: scale stays 1 and letterbox bars are
+    // centred instead of scaling by a fraction (which would blur the pixel art).
+    auto odd = ComputeViewportLayout(1280, 720);
+    CHECK(std::fabs(odd.scale - 1.0f) < kEps);
+    CHECK(std::fabs(odd.offset_x - 160.0f) < kEps);
+    CHECK(std::fabs(odd.offset_y - 90.0f) < kEps);
+}
+
+void TestViewportLayoutScaleTwoAndAbove() {
+    auto exact = ComputeViewportLayout(1920, 1080);
+    CHECK(std::fabs(exact.scale - 2.0f) < kEps);
+    CHECK(exact.offset_x == 0.0f);
+    CHECK(exact.offset_y == 0.0f);
+
+    // The development monitor: 2.67 fit floors to 2 with balanced bars.
+    auto monitor = ComputeViewportLayout(2560, 1440);
+    CHECK(std::fabs(monitor.scale - 2.0f) < kEps);
+    CHECK(std::fabs(monitor.offset_x - 320.0f) < kEps);
+    CHECK(std::fabs(monitor.offset_y - 180.0f) < kEps);
+
+    auto four_x = ComputeViewportLayout(3840, 2160);
+    CHECK(std::fabs(four_x.scale - 4.0f) < kEps);
+    CHECK(four_x.offset_x == 0.0f);
+
+    // Height is the limiting axis; bars appear only left/right of centre.
+    auto wide = ComputeViewportLayout(2560, 1080);
+    CHECK(std::fabs(wide.scale - 2.0f) < kEps);
+    CHECK(std::fabs(wide.offset_x - 320.0f) < kEps);
+    CHECK(wide.offset_y == 0.0f);
+}
+
+void TestViewportLayoutDegenerate() {
+    // A minimised or not-yet-sized window reports a 1:1 layout, not NaN offsets.
+    const int degenerate[][2] = {{0, 0}, {0, 540}, {960, 0}, {-100, -100}};
+    for (const auto& size : degenerate) {
+        auto layout = ComputeViewportLayout(size[0], size[1]);
+        CHECK(std::fabs(layout.scale - 1.0f) < kEps);
+        CHECK(layout.offset_x == 0.0f);
+        CHECK(layout.offset_y == 0.0f);
+    }
+
+    // A 1x1 window is not "unknown", it is simply far smaller than the target, so
+    // it is cropped like any other sub-target size.
+    auto tiny = ComputeViewportLayout(1, 1);
+    CHECK(std::fabs(tiny.scale - 1.0f) < kEps);
+    CHECK(tiny.offset_x < 0.0f);
+    CHECK(tiny.offset_y < 0.0f);
+
+    // Smaller than the target: clamped to scale 1 and cropped symmetrically, so
+    // the offsets go negative rather than shrinking the image.
+    auto small = ComputeViewportLayout(800, 600);
+    CHECK(std::fabs(small.scale - 1.0f) < kEps);
+    CHECK(std::fabs(small.offset_x + 80.0f) < kEps);
+    CHECK(std::fabs(small.offset_y - 30.0f) < kEps);
+}
+
+void TestWindowToRTAndClamping() {
+    // Exactly 2x: window (960,540) is the centre of the RT.
+    auto doubled = ComputeViewportLayout(1920, 1080);
+    auto centre = WindowToRT(Vec2f{960.0f, 540.0f}, doubled);
+    CHECK(std::fabs(centre.x - 480.0f) < kEps);
+    CHECK(std::fabs(centre.y - 270.0f) < kEps);
+    auto corner = WindowToRT(Vec2f{0.0f, 0.0f}, doubled);
+    CHECK(corner.x == 0.0f);
+    CHECK(corner.y == 0.0f);
+    auto far_corner = WindowToRT(Vec2f{1920.0f, 1080.0f}, doubled);
+    CHECK(std::fabs(far_corner.x - kTargetWidth) < kEps);
+    CHECK(std::fabs(far_corner.y - kTargetHeight) < kEps);
+
+    // With bars (1280x720 => scale 1, offsets 160/90): the bar area would map to
+    // negative RT coordinates, so it is clamped onto the RT edge instead.
+    auto barred = ComputeViewportLayout(1280, 720);
+    auto left_bar = WindowToRT(Vec2f{10.0f, 450.0f}, barred);
+    CHECK(left_bar.x == 0.0f);
+    CHECK(std::fabs(left_bar.y - 360.0f) < kEps);
+    auto top_bar = WindowToRT(Vec2f{640.0f, 5.0f}, barred);
+    CHECK(std::fabs(top_bar.x - 480.0f) < kEps);
+    CHECK(top_bar.y == 0.0f);
+    auto beyond = WindowToRT(Vec2f{5000.0f, 5000.0f}, barred);
+    CHECK(std::fabs(beyond.x - kTargetWidth) < kEps);
+    CHECK(std::fabs(beyond.y - kTargetHeight) < kEps);
+
+    // The image area is distinguishable from the bars (used to hold the last aim
+    // direction while the pointer is outside).
+    CHECK(IsInsideTarget(Vec2f{160.0f, 90.0f}, barred));
+    CHECK(IsInsideTarget(Vec2f{1120.0f, 630.0f}, barred));
+    CHECK(!IsInsideTarget(Vec2f{159.0f, 300.0f}, barred));
+    CHECK(!IsInsideTarget(Vec2f{640.0f, 89.0f}, barred));
+}
+
+void TestWorldRTTransforms() {
+    const Rectf view{560.0f, 190.0f, 340.0f, 280.0f};
+
+    // The arena centre lands in the middle of the view rectangle.
+    auto centre = WorldToRT(Vec2f{10.0f, 10.0f}, view);
+    CHECK(std::fabs(centre.x - 730.0f) < kEps);
+    CHECK(std::fabs(centre.y - 330.0f) < kEps);
+
+    // Corners map onto the view rectangle's corners.
+    auto origin = WorldToRT(Vec2f{0.0f, 0.0f}, view);
+    CHECK(std::fabs(origin.x - view.x) < kEps);
+    CHECK(std::fabs(origin.y - view.y) < kEps);
+    auto max = WorldToRT(Vec2f{kWorldSize, kWorldSize}, view);
+    CHECK(std::fabs(max.x - (view.x + view.w)) < kEps);
+    CHECK(std::fabs(max.y - (view.y + view.h)) < kEps);
+
+    // Round trips: RT -> world -> RT and world -> RT -> world.
+    for (const Vec2f world : {Vec2f{0.0f, 0.0f}, Vec2f{3.5f, 17.25f}, Vec2f{10.0f, 10.0f},
+                              Vec2f{kWorldSize, kWorldSize}}) {
+        const Vec2f rt = WorldToRT(world, view);
+        const Vec2f back = RTToWorld(rt, view);
+        CHECK(std::fabs(back.x - world.x) < 1e-3f);
+        CHECK(std::fabs(back.y - world.y) < 1e-3f);
+    }
+    const Vec2f rt_point{700.0f, 300.0f};
+    const Vec2f round_trip = WorldToRT(RTToWorld(rt_point, view), view);
+    CHECK(std::fabs(round_trip.x - rt_point.x) < 1e-3f);
+    CHECK(std::fabs(round_trip.y - rt_point.y) < 1e-3f);
+
+    // Degenerate view rectangles must not divide by zero.
+    auto degenerate_world = RTToWorld(Vec2f{10.0f, 10.0f}, Rectf{});
+    CHECK(degenerate_world.x == 0.0f);
+    CHECK(degenerate_world.y == 0.0f);
+    auto degenerate_rt = WorldToRT(Vec2f{5.0f, 5.0f}, Rectf{7.0f, 9.0f, 0.0f, 0.0f});
+    CHECK(degenerate_rt.x == 7.0f);
+    CHECK(degenerate_rt.y == 9.0f);
+}
+
+void TestWorldToWindowUsesLayout() {
+    const Rectf view{560.0f, 190.0f, 340.0f, 280.0f};
+
+    // 2x with no bars.
+    auto doubled = ComputeViewportLayout(1920, 1080);
+    auto window = WorldToWindow(Vec2f{10.0f, 10.0f}, view, doubled);
+    CHECK(std::fabs(window.x - 1460.0f) < kEps);
+    CHECK(std::fabs(window.y - 660.0f) < kEps);
+
+    // Bars are added on top of the scaled RT position.
+    auto barred = ComputeViewportLayout(1280, 720);
+    auto in_bars = WorldToWindow(Vec2f{10.0f, 10.0f}, view, barred);
+    CHECK(std::fabs(in_bars.x - 890.0f) < kEps);
+    CHECK(std::fabs(in_bars.y - 420.0f) < kEps);
+
+    // Composing WorldToWindow == WindowToRT inverse: feeding the window point back
+    // through the mouse transform recovers the RT point (the ImGui anchoring case).
+    auto back = WindowToRT(in_bars, barred);
+    auto rt = WorldToRT(Vec2f{10.0f, 10.0f}, view);
+    CHECK(std::fabs(back.x - rt.x) < 1e-3f);
+    CHECK(std::fabs(back.y - rt.y) < 1e-3f);
+}
+
+void TestHealthSegments() {
+    // Full health fills every block with no partial block.
+    auto full = ComputeHealthSegments(100.0f, 100.0f, 8);
+    CHECK(full.segments == 8);
+    CHECK(full.filled == 8);
+    CHECK(full.partial == 0.0f);
+    CHECK(full.alive);
+    CHECK(std::fabs(full.fraction - 1.0f) < kEps);
+
+    // Zero and negative health: nothing filled, not alive.
+    for (const float hp : {0.0f, -5.0f}) {
+        auto empty = ComputeHealthSegments(hp, 100.0f, 8);
+        CHECK(empty.filled == 0);
+        CHECK(empty.partial == 0.0f);
+        CHECK(!empty.alive);
+    }
+
+    // Half health: exactly four blocks, no partial.
+    auto half = ComputeHealthSegments(50.0f, 100.0f, 8);
+    CHECK(half.filled == 4);
+    CHECK(half.partial == 0.0f);
+    CHECK(half.alive);
+
+    // 25/100 over 8 blocks = 2 blocks exactly; 30/100 = 2 blocks + 0.4 partial.
+    auto quarter = ComputeHealthSegments(25.0f, 100.0f, 8);
+    CHECK(quarter.filled == 2);
+    CHECK(quarter.partial == 0.0f);
+    auto partial = ComputeHealthSegments(30.0f, 100.0f, 8);
+    CHECK(partial.filled == 2);
+    CHECK(std::fabs(partial.partial - 0.4f) < 1e-4f);
+
+    // Overheal clamps; a single block keeps the whole bar in the partial slot.
+    auto overheal = ComputeHealthSegments(180.0f, 100.0f, 8);
+    CHECK(overheal.filled == 8);
+    CHECK(overheal.partial == 0.0f);
+    auto one_block = ComputeHealthSegments(1.0f, 100.0f, 1);
+    CHECK(one_block.filled == 0);
+    CHECK(std::fabs(one_block.partial - 0.01f) < 1e-4f);
+    CHECK(one_block.alive);
+
+    // Non-finite input and a non-positive max are treated as no data.
+    auto nan_hp = ComputeHealthSegments(std::nanf(""), 100.0f, 8);
+    CHECK(nan_hp.filled == 0);
+    CHECK(nan_hp.fraction == 0.0f);
+    auto zero_max = ComputeHealthSegments(50.0f, 0.0f, 8);
+    CHECK(zero_max.filled == 0);
+    auto no_segments = ComputeHealthSegments(50.0f, 100.0f, 0);
+    CHECK(no_segments.segments == 0);
+    CHECK(no_segments.filled == 0);
+}
+
+void TestSegmentWidth() {
+    // 8 blocks with 4px gaps inside 340px: (340 - 28) / 8 = 39.
+    CHECK(std::fabs(SegmentWidth(340.0f, 8, 4.0f) - 39.0f) < 1e-3f);
+    CHECK(std::fabs(SegmentWidth(100.0f, 1, 0.0f) - 100.0f) < 1e-3f);
+    // Degenerate inputs report 0 so the renderer can skip drawing.
+    CHECK(SegmentWidth(340.0f, 0, 4.0f) == 0.0f);
+    CHECK(SegmentWidth(0.0f, 8, 4.0f) == 0.0f);
+    CHECK(SegmentWidth(340.0f, 8, -1.0f) == 0.0f);
+    CHECK(SegmentWidth(10.0f, 8, 4.0f) == 0.0f);  // gaps alone exceed the width
+}
+
+void TestFloaterPoolLifetimeAndOverflow() {
+    FloaterPool pool;
+    CHECK(pool.ActiveCount() == 0);
+
+    CHECK(pool.Spawn(FloaterKey{100, 1, 2}, 3.0f, 4.0f, 17.0f, 0.0f));
+    CHECK(pool.ActiveCount() == 1);
+    Floater out;
+    CHECK(pool.At(0, out));
+    CHECK(out.value == 17.0f);
+    CHECK(out.world_x == 3.0f);
+    CHECK(out.key.target_id == 2);
+
+    // Lifetime expiry is driven by the injected clock.
+    pool.Tick(FloaterPool::kDefaultLifetimeSeconds * 0.5f);
+    CHECK(pool.ActiveCount() == 1);
+    pool.Tick(FloaterPool::kDefaultLifetimeSeconds);
+    CHECK(pool.ActiveCount() == 0);
+
+    // Accessibility switch: the event is consumed but no slot is taken.
+    CHECK(!pool.Spawn(FloaterKey{1, 1, 1}, 0.0f, 0.0f, 5.0f, 0.0f, /*enabled=*/false));
+    CHECK(pool.ActiveCount() == 0);
+
+    // Filling the whole pool, then overflowing: the ring replaces the oldest slot
+    // (FIFO) instead of allocating or growing without bound. Start from empty so
+    // the FIFO cursor is back at slot 0.
+    pool.Clear();
+    std::size_t spawned = 0;
+    for (std::size_t i = 0; i < FloaterPool::kCapacity; ++i) {
+        if (pool.Spawn(FloaterKey{1000 + i, 1, 1}, 1.0f, 1.0f, 1.0f, 0.0f)) {
+            ++spawned;
+        }
+    }
+    CHECK(spawned == FloaterPool::kCapacity);
+    CHECK(pool.ActiveCount() == FloaterPool::kCapacity);
+    CHECK(pool.ReplacedCount() == 0);
+    CHECK(pool.Spawn(FloaterKey{9999, 1, 1}, 2.0f, 2.0f, 3.0f, 0.0f));
+    CHECK(pool.ActiveCount() == FloaterPool::kCapacity);
+    CHECK(pool.ReplacedCount() == 1);
+    CHECK(pool.At(0, out));
+    CHECK(out.key.server_tick == 9999);  // slot 0 was the oldest
+
+    // Cross-session clearing empties the ring and resets its diagnostics.
+    pool.Clear();
+    CHECK(pool.ActiveCount() == 0);
+    CHECK(pool.ReplacedCount() == 0);
+    CHECK(!pool.At(0, out));
+}
+
+void TestDamageDedupeTable() {
+    DamageDedupeTable dedupe;
+    const FloaterKey hit{500, 7, 9};
+    CHECK(dedupe.Accept(hit));   // first time: render it
+    CHECK(!dedupe.Accept(hit));  // same tick, same source, same target: redundant
+    CHECK(dedupe.Size() == 1);
+    CHECK(dedupe.LatestTick() == 500);
+
+    // Any component of the key changing makes it a different hit.
+    CHECK(dedupe.Accept(FloaterKey{501, 7, 9}));
+    CHECK(dedupe.Accept(FloaterKey{501, 8, 9}));
+    CHECK(dedupe.Accept(FloaterKey{501, 8, 10}));
+    CHECK(dedupe.Size() == 4);
+
+    // Ageing: a key older than kMaxAgeTicks relative to the newest tick seen is
+    // forgotten, so a stale duplicate cannot suppress a new hit forever.
+    const std::uint64_t fresh_tick = 501 + DamageDedupeTable::kMaxAgeTicks + 1;
+    CHECK(dedupe.Accept(FloaterKey{fresh_tick, 1, 1}));
+    CHECK(dedupe.Size() < 5);
+    CHECK(dedupe.Accept(hit));
+
+    // Capacity is bounded: the 257th distinct key evicts the oldest entry at the
+    // same tick, so the table never grows past kCapacity.
+    DamageDedupeTable bounded;
+    std::size_t accepted = 0;
+    for (std::size_t i = 0; i < DamageDedupeTable::kCapacity; ++i) {
+        if (bounded.Accept(FloaterKey{1000, static_cast<std::uint32_t>(i + 1), 1})) {
+            ++accepted;
+        }
+    }
+    CHECK(accepted == DamageDedupeTable::kCapacity);
+    CHECK(bounded.Size() == DamageDedupeTable::kCapacity);
+    CHECK(!bounded.Accept(FloaterKey{1000, 1, 1}));
+    CHECK(bounded.Accept(FloaterKey{1000, 9999, 1}));
+    CHECK(bounded.Size() == DamageDedupeTable::kCapacity);
+    CHECK(bounded.Accept(FloaterKey{1000, 1, 1}));  // evicted, so it is news again
+
+    // Cross-session clearing resets the table and its tick watermark.
+    bounded.Clear();
+    CHECK(bounded.Size() == 0);
+    CHECK(bounded.LatestTick() == 0);
+}
+
+void TestAssetRootResolution() {
+    // Priority: beside the executable first, then CWD candidates.
+    auto candidates = AssetRootCandidates("C:/game/bin", "C:/repo");
+    CHECK(candidates.size() == 3);
+    CHECK(candidates[0] == "C:/game/bin/assets");
+    CHECK(candidates[1] == "C:/repo/assets");
+    CHECK(candidates[2] == "C:/repo/client/assets");
+
+    // Duplicates collapse, and an unknown executable directory is skipped.
+    auto same_dir = AssetRootCandidates("C:/game", "C:/game");
+    CHECK(same_dir.size() == 2);
+    CHECK(same_dir[0] == "C:/game/assets");
+    CHECK(same_dir[1] == "C:/game/client/assets");
+    auto no_exe = AssetRootCandidates("", "C:/repo");
+    CHECK(no_exe.size() == 2);
+    CHECK(no_exe[0] == "C:/repo/assets");
+
+    // The first existing candidate wins...
+    auto picked = ChooseAssetRoot(candidates, [](const std::string& path) {
+        return path == "C:/repo/assets";
+    });
+    CHECK(picked == "C:/repo/assets");
+    // ...and nothing existing yields an empty root (caller falls back + warns).
+    auto none = ChooseAssetRoot(candidates, [](const std::string&) { return false; });
+    CHECK(none.empty());
+    CHECK(ChooseAssetRoot({}, [](const std::string&) { return true; }).empty());
+
+    // JoinPath handles the separator cases the candidates rely on.
+    CHECK(JoinPath("base", "leaf") == "base/leaf");
+    CHECK(JoinPath("base/", "leaf") == "base/leaf");
+    CHECK(JoinPath("base\\", "leaf") == "base\\leaf");
+    CHECK(JoinPath("", "leaf") == "leaf");
+}
+
+void TestSettingsPathSelection() {
+    // Windows: %APPDATA% wins, never the source tree.
+    auto appdata = ChooseSettingsDirectory("C:/Users/x/AppData/Roaming", nullptr, nullptr, "C:/exe");
+    CHECK(appdata == "C:/Users/x/AppData/Roaming/Odyssey");
+
+    // POSIX with XDG_CONFIG_HOME set.
+    auto xdg = ChooseSettingsDirectory(nullptr, "/home/x/.config", "/home/x", "C:/exe");
+    CHECK(xdg == "/home/x/.config/odyssey");
+
+    // POSIX without it falls back to ~/.config.
+    auto home = ChooseSettingsDirectory(nullptr, nullptr, "/home/x", "C:/exe");
+    CHECK(home == "/home/x/.config/odyssey");
+
+    // Empty environment values count as unset; the executable directory is last.
+    auto exe = ChooseSettingsDirectory("", "", "", "C:/exe");
+    CHECK(exe == "C:/exe");
+
+    CHECK(SettingsFilePathIn("C:/Users/x/AppData/Roaming/Odyssey") ==
+          "C:/Users/x/AppData/Roaming/Odyssey/settings.ini");
+}
+
+void TestThemePaletteAndAccessibility() {
+    Theme theme = kDefaultTheme;
+    // The spec pins the deep purple-black background and a black letterbox.
+    CHECK(theme.background == RgbaFromHex(0x0A0A10));
+    CHECK(theme.background.r == 0x0Au);
+    CHECK(theme.background.g == 0x0Au);
+    CHECK(theme.background.b == 0x10u);
+    CHECK(theme.background.a == 255u);
+    CHECK(theme.letterbox == RgbaFromHex(0x000000));
+    // Panels are translucent so the world shows through.
+    CHECK(theme.panel.a == 235u);
+    // Accents stay distinct (a copy/paste slip would collapse two neon colours).
+    CHECK(theme.neon_cyan != theme.neon_magenta);
+    CHECK(theme.neon_cyan != theme.neon_yellow);
+    CHECK(theme.bar_fill != theme.bar_empty);
+
+    // Hex packing: checked field by field because a braced initializer inside the
+    // CHECK macro would be split on its commas.
+    Rgba packed = RgbaFromHex(0x123456);
+    CHECK(packed.r == 0x12u);
+    CHECK(packed.g == 0x34u);
+    CHECK(packed.b == 0x56u);
+    CHECK(packed.a == 255u);
+    Rgba transparent = RgbaFromHex(0xFFFFFF, 0);
+    CHECK(transparent.r == 0xFFu);
+    CHECK(transparent.a == 0u);
+
+    // Accessibility defaults: every reduction is off until the user asks for it.
+    AccessibilityConfig access = kDefaultAccessibility;
+    CHECK(!access.disable_glitch_fx);
+    CHECK(!access.disable_screen_shake);
+    CHECK(!access.disable_damage_floaters);
+}
+
 }  // namespace
 
 int main() {
@@ -1069,6 +1505,19 @@ int main() {
     TestInputSeqFloor();
     TestEnsureGreaterThan();
     TestSettleAfterAuthoritativeEnd();
+    TestViewportLayoutScaleOne();
+    TestViewportLayoutScaleTwoAndAbove();
+    TestViewportLayoutDegenerate();
+    TestWindowToRTAndClamping();
+    TestWorldRTTransforms();
+    TestWorldToWindowUsesLayout();
+    TestHealthSegments();
+    TestSegmentWidth();
+    TestFloaterPoolLifetimeAndOverflow();
+    TestDamageDedupeTable();
+    TestAssetRootResolution();
+    TestSettingsPathSelection();
+    TestThemePaletteAndAccessibility();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
