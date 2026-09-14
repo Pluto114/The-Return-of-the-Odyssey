@@ -2,9 +2,9 @@
 
 `server/internal/metrics` 使用独立 Prometheus Registry，统一拥有指标名、帮助文本、Bucket 和标签集合。业务模块只提交领域结果，不直接创建 Prometheus Collector。
 
-D4 预留的战斗指标为 `odyssey_active_monsters`、`odyssey_active_projectiles`、`odyssey_damage_dealt_total` 和 `odyssey_stage_results_total{result}`。D5 的 gameserver 适配器从 Room 权威快照聚合怪物 Gauge，从可靠 Spawn/Destroy 事件集合聚合子弹 Gauge，并只在 World 已应用的伤害和终局事件上累加 Counter；`result` 仅允许 `cleared` 与 `defeated`。房间删除会立即重新聚合 Gauge，Dashboard 不填充固定假数据。
+D4 预留的战斗指标为 `odyssey_active_monsters`、`odyssey_active_projectiles`、`odyssey_damage_dealt_total` 和 `odyssey_stage_results_total{result}`。D5 的 gameserver 适配器已从 Room 权威快照聚合怪物 Gauge，从可靠 Spawn/Destroy 事件集合聚合子弹 Gauge，并只在 World 已应用的伤害和终局事件上累加 Counter；`result` 仅允许 `cleared` 与 `defeated`。房间删除会立即重新聚合 Gauge，Dashboard 不填充固定假数据。
 
-Grafana 的 `Combat Entities`、`Damage Throughput` 和 `Stage Results` 面板直接查询上述指标。AI 与碰撞耗时需要 B 在 Room TickSample 中提供权威采样后再接入。
+Grafana 的战斗、奖励、队列/背压与 Director 面板直接查询真实指标。Admin HTTP/WS、数据来源和新增指标详见 [管理入口与实时可观测性](ADMIN-OBSERVABILITY.md)。AI 与碰撞耗时需要 B 在 Room TickSample 中提供权威采样后再接入。
 
 ## 当前指标
 
@@ -21,6 +21,6 @@ Grafana 的 `Combat Entities`、`Damage Throughput` 和 `Stage Results` 面板�
 
 成员 A/B 的集成层负责把 Session、Room 和 Matchmaker 状态汇总为 `Snapshot`，并在匹配、重连完成后调用对应观察操作。指标记录错误不能回滚或改变游戏结果。
 
-gameserver 已在 `ODYSSEY_METRICS_ADDR` 暴露 `Metrics.Handler()`，默认监听 `0.0.0.0:19091`，Prometheus 可抓取 `/metrics`。生产已接在线、房间、匹配与 Tick work；新增战斗收集器仍待权威数据适配，不能将这些空值解释为已完成玩法观测。
+gameserver 已在 `ODYSSEY_METRICS_ADDR` 暴露 `Metrics.Handler()`，默认监听 `0.0.0.0:19091`，Prometheus 可抓取 `/metrics`。生产已接在线、房间、匹配、Tick work、战斗实体、伤害、关卡、Room/网络队列与背压。奖励、Director 和恢复的观察契约已经就绪，仍等待 A2/A3/A4 的唯一正式路由调用，不能将当前 0 值解释为已完成玩法观测。
 
-Grafana 的 `Odyssey Overview` 面板已有基础指标配置。启动后 target 应为 UP；若 DOWN，检查服务进程、监听端口和 Prometheus target。战斗/奖励/Director 面板及真实数据接入要求见 [A / D 收尾清单](../plans/WEEK2-AD-FINALIZATION.md)。
+Grafana 的 `Odyssey Overview` 已包含基础、战斗、奖励、队列/背压和 Director 面板。启动后 target 应为 UP；若 DOWN，检查服务进程、监听端口和 Prometheus target。完整真实数据接入要求见 [A / D 收尾清单](../plans/WEEK2-AD-FINALIZATION.md)。

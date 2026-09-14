@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -13,10 +15,13 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/admin"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/bootstrap"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/convert"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/director"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/lobby"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
@@ -39,25 +44,29 @@ type activeRoom struct {
 
 	monsters    int
 	projectiles map[entity.ID]struct{}
+	stats       room.Stats
 }
 
 // gameApplication assembles A's transport/session boundary, B's Room, and
 // D's matchmaking and metrics modules. It is intentionally small: the first
 // milestone needs one in-process FIFO queue and two-player rooms.
 type gameApplication struct {
-	ctx        context.Context
-	ids        *idAllocator
-	logger     *slog.Logger
-	matcher    *lobby.Matchmaker
-	metrics    *metrics.Metrics
-	roomConfig room.Config
-	gameplay   bootstrap.Gameplay
+	ctx         context.Context
+	ids         *idAllocator
+	logger      *slog.Logger
+	matcher     *lobby.Matchmaker
+	metrics     *metrics.Metrics
+	roomConfig  room.Config
+	gameplay    bootstrap.Gameplay
+	startedAt   time.Time
+	environment string
 
-	mu          sync.Mutex
-	connections map[*network.Connection]*session.Session
-	waiting     map[lobby.PlayerID]*participant
-	rooms       map[room.ID]*activeRoom
-	nextRoomID  atomic.Uint64
+	mu             sync.Mutex
+	connections    map[*network.Connection]*session.Session
+	waiting        map[lobby.PlayerID]*participant
+	rooms          map[room.ID]*activeRoom
+	nextRoomID     atomic.Uint64
+	recentDirector []admin.DirectorDecision
 }
 
 func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics) (*gameApplication, error) {
@@ -87,6 +96,8 @@ func buildGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.M
 		metrics:     m,
 		roomConfig:  room.DefaultConfig(),
 		gameplay:    gameplay,
+		startedAt:   time.Now(),
+		environment: "development",
 		connections: make(map[*network.Connection]*session.Session),
 		waiting:     make(map[lobby.PlayerID]*participant),
 		rooms:       make(map[room.ID]*activeRoom),
@@ -236,6 +247,7 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	active.events.SetLogger(a.logger)
 	active.close.SetLogger(a.logger)
 	active.close.OnClose(func(id room.ID, reason string) {
+		a.recordRoomStats(id, rm.Stats())
 		a.mu.Lock()
 		delete(a.rooms, id)
 		a.publishMetricsLocked()
@@ -249,7 +261,7 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	go a.observeSnapshots(roomID, rm, active.snapshots)
 	go a.observeEvents(roomID, rm, active.events)
 	go active.close.Run(rm)
-	go a.observeTicks(rm)
+	go a.observeTicks(roomID, rm)
 
 	for _, p := range players {
 		if p.session.State() != session.StateMatching {
@@ -357,10 +369,36 @@ func (a *gameApplication) leaveRoom(sess *session.Session, rm *room.Room) {
 	}
 }
 
-func (a *gameApplication) observeTicks(rm *room.Room) {
+func (a *gameApplication) observeTicks(roomID room.ID, rm *room.Room) {
 	for sample := range rm.TickSamples() {
 		a.metrics.ObserveTickWork(sample.WorkDuration)
+		a.recordRoomStats(roomID, rm.Stats())
 	}
+}
+
+func (a *gameApplication) recordRoomStats(roomID room.ID, current room.Stats) {
+	var delta metrics.QueueDelta
+	a.mu.Lock()
+	active := a.rooms[roomID]
+	if active == nil {
+		a.mu.Unlock()
+		return
+	}
+	delta.RoomRejections = counterDelta(current.QueueRejections, active.stats.QueueRejections)
+	delta.RejectedInputs = counterDelta(current.RejectedInputs, active.stats.RejectedInputs)
+	delta.DroppedSnapshots = counterDelta(current.DroppedSnapshots, active.stats.DroppedSnapshots)
+	delta.DroppedTickSamples = counterDelta(current.DroppedTickSamples, active.stats.DroppedTickSamples)
+	active.stats = current
+	a.publishQueueMetricsLocked()
+	a.mu.Unlock()
+	a.metrics.ObserveQueueDelta(delta)
+}
+
+func counterDelta(current, previous uint64) uint64 {
+	if current >= previous {
+		return current - previous
+	}
+	return current
 }
 
 // observeSnapshots remains the room's single snapshot consumer. It records
@@ -449,6 +487,143 @@ func (a *gameApplication) publishMetricsLocked() {
 		MatchQueuePlayers: a.matcher.Waiting(),
 	})
 	a.publishCombatMetricsLocked()
+	a.publishQueueMetricsLocked()
+}
+
+func (a *gameApplication) publishQueueMetricsLocked() {
+	var snapshot metrics.QueueSnapshot
+	for _, active := range a.rooms {
+		snapshot.RoomControlDepth += active.stats.ControlQueueDepth
+		snapshot.RoomInputDepth += active.stats.InputQueueDepth
+	}
+	_ = a.metrics.SetRoomQueueSnapshot(snapshot.RoomControlDepth, snapshot.RoomInputDepth)
+}
+
+// recordRewardMetrics is called by A's single RewardUpdates dispatcher after
+// it accepts a batch for delivery. It never consumes the Room channel itself.
+func (a *gameApplication) recordRewardMetrics(roomID room.ID, batch game.RewardUpdateBatch) {
+	for _, update := range batch.Updates {
+		var result metrics.RewardResult
+		switch update.Kind {
+		case game.RewardOptionsAvailable:
+			result = metrics.RewardOffered
+		case game.RewardSelectionApplied:
+			if update.Defaulted {
+				result = metrics.RewardDefaulted
+			} else {
+				result = metrics.RewardChosen
+			}
+		default:
+			a.logger.Warn("unknown authoritative reward update", "room_id", roomID, "kind", update.Kind)
+			continue
+		}
+		_ = a.metrics.ObserveReward(result)
+	}
+}
+
+// recordInvalidRewardChoice records a rejection only after Room validation;
+// raw client values and error strings are kept out of metric labels.
+func (a *gameApplication) recordInvalidRewardChoice(roomID room.ID, cause error) {
+	_ = a.metrics.ObserveReward(metrics.RewardInvalid)
+	a.logger.Info("reward choice rejected", "room_id", roomID, "err", cause)
+}
+
+// recordDirectorDecision must be called only after the generated Plan has
+// been accepted by Room. That prevents retries or failed plans from appearing
+// as applied decisions.
+func (a *gameApplication) recordDirectorDecision(roomID room.ID, stageIndex uint32, input director.PerformanceMetrics, output director.Decision, duration time.Duration) error {
+	sample := metrics.DirectorSample{
+		Duration: duration, ClearTimeSeconds: input.ClearTimeSeconds, TeamHPPercent: input.TeamHPPercent,
+		AverageDPS: input.AverageDPS, DeathCount: input.DeathCount, DamageTaken: input.DamageTaken,
+		EquipmentPower: input.EquipmentPower, PreviousDifficulty: output.PreviousDifficulty,
+		NewDifficulty: output.NewDifficulty, Adjustment: output.Adjustment, MonsterCount: output.MonsterCount,
+	}
+	if err := a.metrics.ObserveDirector(sample); err != nil {
+		return err
+	}
+	record := admin.DirectorDecision{
+		ObservedAt: time.Now().UTC(), RoomID: uint64(roomID), StageIndex: stageIndex, Seed: output.Seed,
+		ClearTimeSeconds: input.ClearTimeSeconds, TeamHPPercent: input.TeamHPPercent, AverageDPS: input.AverageDPS,
+		DeathCount: input.DeathCount, DamageTaken: input.DamageTaken, EquipmentPower: input.EquipmentPower,
+		PreviousDifficulty: output.PreviousDifficulty, NewDifficulty: output.NewDifficulty, Adjustment: output.Adjustment,
+		MonsterCount: output.MonsterCount, DurationMicros: duration.Microseconds(), Reasons: slices.Clone(output.Reasons),
+	}
+	a.mu.Lock()
+	a.recentDirector = append(a.recentDirector, record)
+	if len(a.recentDirector) > 32 {
+		a.recentDirector = slices.Clone(a.recentDirector[len(a.recentDirector)-32:])
+	}
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *gameApplication) setEnvironment(environment string) {
+	a.mu.Lock()
+	a.environment = environment
+	a.mu.Unlock()
+}
+
+func (a *gameApplication) adminSnapshot() admin.Snapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now().UTC()
+	result := admin.Snapshot{
+		GeneratedAt: now, Environment: a.environment, UptimeSeconds: time.Since(a.startedAt).Seconds(),
+		OnlinePlayers: len(a.connections), ActiveRooms: len(a.rooms), MatchQueuePlayers: a.matcher.Waiting(),
+		Rooms:                   make([]admin.RoomStatus, 0, len(a.rooms)),
+		RecentDirectorDecisions: make([]admin.DirectorDecision, len(a.recentDirector)),
+	}
+	for index, decision := range a.recentDirector {
+		decision.Reasons = slices.Clone(decision.Reasons)
+		result.RecentDirectorDecisions[index] = decision
+	}
+	for roomID, active := range a.rooms {
+		snapshot := active.room.LatestSnapshot()
+		stats := active.room.Stats()
+		status := admin.RoomStatus{
+			RoomID: uint64(roomID), StageIndex: snapshot.Stage.Index, StageSeed: snapshot.Stage.Seed,
+			Phase: stagePhase(snapshot.Stage.State), ServerTick: snapshot.ServerTick, Players: len(snapshot.Players),
+			Monsters: len(snapshot.Monsters), Projectiles: len(active.projectiles),
+			ControlQueueDepth: stats.ControlQueueDepth, InputQueueDepth: stats.InputQueueDepth,
+			QueueRejections: stats.QueueRejections, RejectedInputs: stats.RejectedInputs,
+			DroppedSnapshots: stats.DroppedSnapshots, DroppedTickSamples: stats.DroppedTickSamples,
+			TickWorkMillis: float64(stats.LastTick.WorkDuration) / float64(time.Millisecond),
+		}
+		result.ActiveMonsters += status.Monsters
+		result.ActiveProjectiles += status.Projectiles
+		result.RoomQueues.ControlDepth += status.ControlQueueDepth
+		result.RoomQueues.InputDepth += status.InputQueueDepth
+		result.RoomQueues.Rejections += status.QueueRejections
+		result.RoomQueues.RejectedInputs += status.RejectedInputs
+		result.RoomQueues.DroppedSnapshots += status.DroppedSnapshots
+		result.RoomQueues.DroppedTickSamples += status.DroppedTickSamples
+		result.Rooms = append(result.Rooms, status)
+	}
+	slices.SortFunc(result.Rooms, func(left, right admin.RoomStatus) int {
+		return cmp.Compare(left.RoomID, right.RoomID)
+	})
+	return result
+}
+
+func stagePhase(state stage.State) string {
+	switch state {
+	case stage.Waiting:
+		return "waiting"
+	case stage.Playing:
+		return "playing"
+	case stage.StageClear:
+		return "stage_clear"
+	case stage.Reward:
+		return "reward"
+	case stage.PreparingNextStage:
+		return "preparing_next_stage"
+	case stage.Failed:
+		return "failed"
+	case stage.Closed:
+		return "closed"
+	default:
+		return "unknown"
+	}
 }
 
 // closingSink enforces the reliable-queue contract: saturation closes only

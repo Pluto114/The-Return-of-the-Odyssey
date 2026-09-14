@@ -126,9 +126,9 @@ npm --prefix dashboard run dev
 pwsh -File scripts/build/build.ps1 -Target dashboard
 ```
 
-打开 http://127.0.0.1:5173，当前显示静态环境占位页。src/ 预留 Vue 页面。
-Vite 已预留 /api 与 /ws 到 http://127.0.0.1:8080 的代理，服务端接口尚未实现。
-可在 dashboard/.env 设置 ODYSSEY_ADMIN_PROXY_TARGET。页面打包不代表 Vue/ECharts 业务已经完成。
+先启动 gameserver，再打开 http://127.0.0.1:5173。页面通过 `/api/status` 取得首份真实状态，并通过 `/ws` 每秒更新；WebSocket 断开时自动退回 HTTP 轮询。可查看在线/房间、实体、Tick 预算、Room/网络队列、背压计数与最近 Director 决策。
+
+Vite 将 `/api` 与 `/ws` 代理到 http://127.0.0.1:8080，可在 `dashboard/.env` 设置 `ODYSSEY_ADMIN_PROXY_TARGET`。Admin 当前没有认证，配置只允许回环监听，不要暴露到局域网或公网。接口明细和数据边界见 [ADMIN-OBSERVABILITY.md](architecture/ADMIN-OBSERVABILITY.md)。奖励、Director 与恢复面板要等 A2/A3/A4 正式路由接入后才会出现非零真实数据。
 
 ## 6. Docker 基础设施
 

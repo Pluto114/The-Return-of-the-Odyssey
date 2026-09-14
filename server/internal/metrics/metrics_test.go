@@ -39,6 +39,24 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 	if err := metrics.ObserveStageResult(StageResultCleared); err != nil {
 		t.Fatal(err)
 	}
+	if err := metrics.ObserveReward(RewardOffered); err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.ObserveReward(RewardDefaulted); err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.ObserveDirector(DirectorSample{
+		Duration: 50 * time.Microsecond, ClearTimeSeconds: 12, TeamHPPercent: 0.75,
+		AverageDPS: 42, DeathCount: 1, DamageTaken: 25, EquipmentPower: 1.2,
+		PreviousDifficulty: 1, NewDifficulty: 1.1, Adjustment: 0.1, MonsterCount: 4,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.SetQueueSnapshot(QueueSnapshot{RoomControlDepth: 2, RoomInputDepth: 5, NetworkReliableDepth: 3}); err != nil {
+		t.Fatal(err)
+	}
+	metrics.ObserveQueueDelta(QueueDelta{RoomRejections: 1, RejectedInputs: 2, DroppedSnapshots: 3,
+		DroppedTickSamples: 4, NetworkReliableRejected: 5, NetworkSnapshotReplaced: 6})
 
 	body := scrape(t, metrics)
 	for _, sample := range []string{
@@ -54,6 +72,23 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 		"odyssey_damage_dealt_total 12.5",
 		`odyssey_stage_results_total{result="cleared"} 1`,
 		`odyssey_stage_results_total{result="defeated"} 0`,
+		`odyssey_rewards_total{result="offered"} 1`,
+		`odyssey_rewards_total{result="defaulted"} 1`,
+		"odyssey_director_decisions_total 1",
+		"odyssey_director_decision_duration_seconds_count 1",
+		"odyssey_director_input_clear_time_seconds 12",
+		"odyssey_director_input_team_hp_ratio 0.75",
+		"odyssey_director_output_difficulty 1.1",
+		"odyssey_director_output_monster_count 4",
+		"odyssey_room_control_queue_depth 2",
+		"odyssey_room_input_queue_depth 5",
+		"odyssey_network_reliable_queue_depth 3",
+		"odyssey_room_queue_rejections_total 1",
+		"odyssey_room_rejected_inputs_total 2",
+		"odyssey_room_dropped_snapshots_total 3",
+		"odyssey_room_dropped_tick_samples_total 4",
+		"odyssey_network_reliable_queue_rejections_total 5",
+		"odyssey_network_snapshot_replacements_total 6",
 	} {
 		if !strings.Contains(body, sample) {
 			t.Errorf("scrape does not contain %q", sample)
@@ -99,6 +134,18 @@ func TestMetricsRejectInvalidObservations(t *testing.T) {
 	if err := metrics.ObserveStageResult("room-id-from-client"); !errors.Is(err, ErrInvalidStageResult) {
 		t.Errorf("unbounded stage result error = %v, want %v", err, ErrInvalidStageResult)
 	}
+	if err := metrics.ObserveReward("equipment-id-from-client"); !errors.Is(err, ErrInvalidRewardResult) {
+		t.Errorf("unbounded reward result error = %v, want %v", err, ErrInvalidRewardResult)
+	}
+	invalidDirector := DirectorSample{Duration: time.Microsecond, ClearTimeSeconds: 1, TeamHPPercent: 0.5,
+		EquipmentPower: 1, PreviousDifficulty: 1, NewDifficulty: 1, MonsterCount: 1}
+	invalidDirector.TeamHPPercent = math.NaN()
+	if err := metrics.ObserveDirector(invalidDirector); !errors.Is(err, ErrInvalidDirectorSample) {
+		t.Errorf("invalid director sample error = %v, want %v", err, ErrInvalidDirectorSample)
+	}
+	if err := metrics.SetQueueSnapshot(QueueSnapshot{RoomInputDepth: -1}); !errors.Is(err, ErrInvalidQueueSnapshot) {
+		t.Errorf("invalid queue snapshot error = %v, want %v", err, ErrInvalidQueueSnapshot)
+	}
 
 	body := scrape(t, metrics)
 	for _, sample := range []string{
@@ -109,6 +156,9 @@ func TestMetricsRejectInvalidObservations(t *testing.T) {
 		"odyssey_active_monsters 0",
 		"odyssey_active_projectiles 0",
 		"odyssey_damage_dealt_total 0",
+		`odyssey_rewards_total{result="invalid"} 0`,
+		"odyssey_director_decisions_total 0",
+		"odyssey_room_control_queue_depth 0",
 	} {
 		if !strings.Contains(body, sample) {
 			t.Errorf("scrape after rejected observation does not contain %q", sample)

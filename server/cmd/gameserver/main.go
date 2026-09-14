@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/admin"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/bootstrap"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/config"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
@@ -77,6 +78,7 @@ func main() {
 		logger.Error("failed to initialize application", "err", err)
 		os.Exit(1)
 	}
+	app.setEnvironment(cfg.Env)
 	srv := network.NewServer(app.handle, logger)
 	srv.OnDisconnect(app.disconnected)
 	ln, err := net.Listen("tcp", cfg.TCPAddr)
@@ -87,9 +89,26 @@ func main() {
 	logger.Info("listening", "addr", cfg.TCPAddr)
 
 	metricsServer := &http.Server{Addr: cfg.MetricsAddr, Handler: metricSet.Handler(), ReadHeaderTimeout: 2 * time.Second}
+	adminAPI, err := admin.New(admin.ProviderFunc(func() admin.Snapshot {
+		snapshot := app.adminSnapshot()
+		networkStats := srv.Stats()
+		snapshot.Network = admin.NetworkStatus{
+			ActiveConnections: networkStats.ActiveConnections, ReliableQueueDepth: networkStats.ReliableQueueDepth,
+			ReliableQueueCapacity: networkStats.ReliableQueueCapacity, SnapshotsPending: networkStats.SnapshotsPending,
+			ReliableSendRejections: networkStats.ReliableSendRejections, SnapshotReplacements: networkStats.SnapshotReplacements,
+		}
+		return snapshot
+	}), time.Second)
+	if err != nil {
+		logger.Error("failed to initialize Admin API", "err", err)
+		os.Exit(1)
+	}
+	adminHTTPServer := &http.Server{Addr: cfg.AdminAddr, Handler: adminAPI.Handler(), ReadHeaderTimeout: 2 * time.Second}
 	pprofServer := &http.Server{Addr: cfg.PprofAddr, Handler: http.DefaultServeMux, ReadHeaderTimeout: 2 * time.Second}
 	go serveHTTP(metricsServer, "metrics", logger, stop)
+	go serveHTTP(adminHTTPServer, "admin", logger, stop)
 	go serveHTTP(pprofServer, "pprof", logger, stop)
+	go observeNetworkMetrics(ctx, srv, metricSet)
 
 	go func() {
 		if err := srv.Serve(ctx, ln); err != nil {
@@ -101,10 +120,37 @@ func main() {
 	<-ctx.Done()
 	logger.Info("shutting down", "active_conns", srv.ActiveConns())
 	srv.CloseConnections()
+	_ = adminAPI.Close()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = metricsServer.Shutdown(shutdownCtx)
+	_ = adminHTTPServer.Shutdown(shutdownCtx)
 	_ = pprofServer.Shutdown(shutdownCtx)
+}
+
+func observeNetworkMetrics(ctx context.Context, server *network.Server, metricSet *metrics.Metrics) {
+	var previous network.Stats
+	publish := func() {
+		current := server.Stats()
+		_ = metricSet.SetNetworkQueueDepth(current.ReliableQueueDepth)
+		metricSet.ObserveQueueDelta(metrics.QueueDelta{
+			NetworkReliableRejected: counterDelta(current.ReliableSendRejections, previous.ReliableSendRejections),
+			NetworkSnapshotReplaced: counterDelta(current.SnapshotReplacements, previous.SnapshotReplacements),
+		})
+		previous = current
+	}
+	publish()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			publish()
+			return
+		case <-ticker.C:
+			publish()
+		}
+	}
 }
 
 func serveHTTP(server *http.Server, name string, logger *slog.Logger, stop context.CancelFunc) {

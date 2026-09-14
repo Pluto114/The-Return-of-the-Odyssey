@@ -92,3 +92,37 @@ func TestConnectionCloseOnClientDisconnect(t *testing.T) {
 	}
 	t.Fatalf("ActiveConns = %d after client close, want 0", srv.ActiveConns())
 }
+
+func TestServerStatsAggregateLiveQueuesAndKeepCounters(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	srv := NewServer(func(*Connection, Header, []byte) error { return nil }, logger)
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	connection := srv.newConnection(serverConn)
+	srv.track(connection)
+
+	for index := 0; index < cap(connection.out); index++ {
+		if !connection.Send([]byte{byte(index)}) {
+			t.Fatalf("reliable send %d rejected before capacity", index)
+		}
+	}
+	if connection.Send([]byte("overflow")) {
+		t.Fatal("reliable send succeeded after capacity")
+	}
+	if !connection.SendSnapshot([]byte("old")) || !connection.SendSnapshot([]byte("new")) {
+		t.Fatal("latest-wins snapshot send failed")
+	}
+
+	stats := srv.Stats()
+	if stats.ActiveConnections != 1 || stats.ReliableQueueDepth != 256 || stats.ReliableQueueCapacity != 256 ||
+		stats.SnapshotsPending != 1 || stats.ReliableSendRejections != 1 || stats.SnapshotReplacements != 1 {
+		t.Fatalf("unexpected network stats: %+v", stats)
+	}
+
+	connection.Close()
+	stats = srv.Stats()
+	if stats.ActiveConnections != 0 || stats.ReliableQueueDepth != 0 ||
+		stats.ReliableSendRejections != 1 || stats.SnapshotReplacements != 1 {
+		t.Fatalf("closed connection stats lost counters: %+v", stats)
+	}
+}

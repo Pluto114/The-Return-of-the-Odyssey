@@ -18,6 +18,9 @@ var (
 	ErrInvalidMatchDuration   = errors.New("match duration must not be negative")
 	ErrInvalidReconnectResult = errors.New("invalid reconnect result")
 	ErrInvalidStageResult     = errors.New("invalid stage result")
+	ErrInvalidRewardResult    = errors.New("invalid reward result")
+	ErrInvalidDirectorSample  = errors.New("invalid director sample")
+	ErrInvalidQueueSnapshot   = errors.New("queue metric snapshot values must not be negative")
 )
 
 // ReconnectResult is a bounded label value. Keeping this set closed prevents
@@ -53,22 +56,90 @@ const (
 	StageResultDefeated StageResult = "defeated"
 )
 
+// RewardResult is deliberately closed: equipment IDs, player IDs and error
+// text belong in logs/Admin queries, never in Prometheus labels.
+type RewardResult string
+
+const (
+	RewardOffered   RewardResult = "offered"
+	RewardChosen    RewardResult = "chosen"
+	RewardDefaulted RewardResult = "defaulted"
+	RewardInvalid   RewardResult = "invalid"
+)
+
+// DirectorSample contains the inputs and output of one successfully applied
+// authoritative Director decision. Room/stage/seed correlation is retained by
+// the Admin event log instead of becoming a high-cardinality metric label.
+type DirectorSample struct {
+	Duration           time.Duration
+	ClearTimeSeconds   float64
+	TeamHPPercent      float64
+	AverageDPS         float64
+	DeathCount         int
+	DamageTaken        float64
+	EquipmentPower     float64
+	PreviousDifficulty float64
+	NewDifficulty      float64
+	Adjustment         float64
+	MonsterCount       int
+}
+
+// QueueSnapshot is the current aggregate queue depth across live rooms and
+// connections. Cumulative rejection/drop totals are observed separately.
+type QueueSnapshot struct {
+	RoomControlDepth     int
+	RoomInputDepth       int
+	NetworkReliableDepth int
+}
+
+// QueueDelta contains monotonic deltas derived by the integration layer from
+// authoritative Room and network counters.
+type QueueDelta struct {
+	RoomRejections          uint64
+	RejectedInputs          uint64
+	DroppedSnapshots        uint64
+	DroppedTickSamples      uint64
+	NetworkReliableRejected uint64
+	NetworkSnapshotReplaced uint64
+}
+
 // Metrics centralizes the project's collector definitions and registry. Its
 // methods are safe for concurrent use through the Prometheus collectors.
 type Metrics struct {
 	registry *prometheus.Registry
 
-	onlinePlayers     prometheus.Gauge
-	activeRooms       prometheus.Gauge
-	matchQueuePlayers prometheus.Gauge
-	matches           prometheus.Counter
-	matchDuration     prometheus.Histogram
-	tickWorkDuration  prometheus.Histogram
-	reconnectAttempts *prometheus.CounterVec
-	activeMonsters    prometheus.Gauge
-	activeProjectiles prometheus.Gauge
-	damageDealt       prometheus.Counter
-	stageResults      *prometheus.CounterVec
+	onlinePlayers               prometheus.Gauge
+	activeRooms                 prometheus.Gauge
+	matchQueuePlayers           prometheus.Gauge
+	matches                     prometheus.Counter
+	matchDuration               prometheus.Histogram
+	tickWorkDuration            prometheus.Histogram
+	reconnectAttempts           *prometheus.CounterVec
+	activeMonsters              prometheus.Gauge
+	activeProjectiles           prometheus.Gauge
+	damageDealt                 prometheus.Counter
+	stageResults                *prometheus.CounterVec
+	rewards                     *prometheus.CounterVec
+	directorDecisions           prometheus.Counter
+	directorDuration            prometheus.Histogram
+	directorInputClearTime      prometheus.Gauge
+	directorInputTeamHP         prometheus.Gauge
+	directorInputDPS            prometheus.Gauge
+	directorInputDeaths         prometheus.Gauge
+	directorInputDamageTaken    prometheus.Gauge
+	directorInputEquipmentPower prometheus.Gauge
+	directorOutputDifficulty    prometheus.Gauge
+	directorOutputAdjustment    prometheus.Gauge
+	directorOutputMonsters      prometheus.Gauge
+	roomControlQueueDepth       prometheus.Gauge
+	roomInputQueueDepth         prometheus.Gauge
+	networkReliableQueueDepth   prometheus.Gauge
+	roomQueueRejections         prometheus.Counter
+	rejectedInputs              prometheus.Counter
+	droppedSnapshots            prometheus.Counter
+	droppedTickSamples          prometheus.Counter
+	networkReliableRejected     prometheus.Counter
+	networkSnapshotReplaced     prometheus.Counter
 }
 
 // New creates an isolated registry containing Go/process collectors and the
@@ -135,6 +206,37 @@ func New() *Metrics {
 			Name:      "stage_results_total",
 			Help:      "Total authoritative terminal stage outcomes by bounded result.",
 		}, []string{"result"}),
+		rewards: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "odyssey", Name: "rewards_total",
+			Help: "Total authoritative reward outcomes by bounded result.",
+		}, []string{"result"}),
+		directorDecisions: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey", Name: "director_decisions_total",
+			Help: "Total successfully applied authoritative Director decisions.",
+		}),
+		directorDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "odyssey", Name: "director_decision_duration_seconds",
+			Help:    "Duration of successfully applied Director decisions.",
+			Buckets: []float64{0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01},
+		}),
+		directorInputClearTime:      newGauge("director_input_clear_time_seconds", "Clear time input of the latest applied Director decision."),
+		directorInputTeamHP:         newGauge("director_input_team_hp_ratio", "Team health ratio input of the latest applied Director decision."),
+		directorInputDPS:            newGauge("director_input_average_dps", "Average DPS input of the latest applied Director decision."),
+		directorInputDeaths:         newGauge("director_input_death_count", "Death count input of the latest applied Director decision."),
+		directorInputDamageTaken:    newGauge("director_input_damage_taken", "Damage-taken input of the latest applied Director decision."),
+		directorInputEquipmentPower: newGauge("director_input_equipment_power", "Equipment-power input of the latest applied Director decision."),
+		directorOutputDifficulty:    newGauge("director_output_difficulty", "Difficulty output of the latest applied Director decision."),
+		directorOutputAdjustment:    newGauge("director_output_adjustment_ratio", "Difficulty adjustment output of the latest applied Director decision."),
+		directorOutputMonsters:      newGauge("director_output_monster_count", "Monster-count output of the latest applied Director decision."),
+		roomControlQueueDepth:       newGauge("room_control_queue_depth", "Current aggregate Room control-queue depth."),
+		roomInputQueueDepth:         newGauge("room_input_queue_depth", "Current aggregate Room input-queue depth."),
+		networkReliableQueueDepth:   newGauge("network_reliable_queue_depth", "Current aggregate reliable network-queue depth."),
+		roomQueueRejections:         newCounter("room_queue_rejections_total", "Total Room command admissions rejected because a queue was full."),
+		rejectedInputs:              newCounter("room_rejected_inputs_total", "Total queued player inputs rejected by authoritative Room validation."),
+		droppedSnapshots:            newCounter("room_dropped_snapshots_total", "Total stale Room snapshots replaced before integration consumption."),
+		droppedTickSamples:          newCounter("room_dropped_tick_samples_total", "Total lossy Room tick samples dropped before metrics consumption."),
+		networkReliableRejected:     newCounter("network_reliable_queue_rejections_total", "Total reliable network sends rejected by a full or closed queue."),
+		networkSnapshotReplaced:     newCounter("network_snapshot_replacements_total", "Total stale network snapshots replaced by a newer snapshot."),
 	}
 
 	registry.MustRegister(
@@ -151,10 +253,42 @@ func New() *Metrics {
 		result.activeProjectiles,
 		result.damageDealt,
 		result.stageResults,
+		result.rewards,
+		result.directorDecisions,
+		result.directorDuration,
+		result.directorInputClearTime,
+		result.directorInputTeamHP,
+		result.directorInputDPS,
+		result.directorInputDeaths,
+		result.directorInputDamageTaken,
+		result.directorInputEquipmentPower,
+		result.directorOutputDifficulty,
+		result.directorOutputAdjustment,
+		result.directorOutputMonsters,
+		result.roomControlQueueDepth,
+		result.roomInputQueueDepth,
+		result.networkReliableQueueDepth,
+		result.roomQueueRejections,
+		result.rejectedInputs,
+		result.droppedSnapshots,
+		result.droppedTickSamples,
+		result.networkReliableRejected,
+		result.networkSnapshotReplaced,
 	)
 	result.stageResults.WithLabelValues(string(StageResultCleared))
 	result.stageResults.WithLabelValues(string(StageResultDefeated))
+	for _, reward := range []RewardResult{RewardOffered, RewardChosen, RewardDefaulted, RewardInvalid} {
+		result.rewards.WithLabelValues(string(reward))
+	}
 	return result
+}
+
+func newGauge(name, help string) prometheus.Gauge {
+	return prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "odyssey", Name: name, Help: help})
+}
+
+func newCounter(name, help string) prometheus.Counter {
+	return prometheus.NewCounter(prometheus.CounterOpts{Namespace: "odyssey", Name: name, Help: help})
 }
 
 // ObserveTickWork records one room tick's active work duration.
@@ -211,6 +345,79 @@ func (m *Metrics) ObserveStageResult(result StageResult) error {
 	return nil
 }
 
+// ObserveReward records one authoritative offer, applied choice/default, or
+// rejected choice. Invalid client values never become labels.
+func (m *Metrics) ObserveReward(result RewardResult) error {
+	if !validRewardResult(result) {
+		return ErrInvalidRewardResult
+	}
+	m.rewards.WithLabelValues(string(result)).Inc()
+	return nil
+}
+
+// ObserveDirector records a fully validated, successfully applied decision.
+// All fields are validated before any collector is mutated.
+func (m *Metrics) ObserveDirector(sample DirectorSample) error {
+	if !validDirectorSample(sample) {
+		return ErrInvalidDirectorSample
+	}
+	m.directorDecisions.Inc()
+	m.directorDuration.Observe(sample.Duration.Seconds())
+	m.directorInputClearTime.Set(sample.ClearTimeSeconds)
+	m.directorInputTeamHP.Set(sample.TeamHPPercent)
+	m.directorInputDPS.Set(sample.AverageDPS)
+	m.directorInputDeaths.Set(float64(sample.DeathCount))
+	m.directorInputDamageTaken.Set(sample.DamageTaken)
+	m.directorInputEquipmentPower.Set(sample.EquipmentPower)
+	m.directorOutputDifficulty.Set(sample.NewDifficulty)
+	m.directorOutputAdjustment.Set(sample.Adjustment)
+	m.directorOutputMonsters.Set(float64(sample.MonsterCount))
+	return nil
+}
+
+// SetQueueSnapshot publishes aggregate live depths. Values are intentionally
+// unlabeled so adding rooms or players cannot create Prometheus series.
+func (m *Metrics) SetQueueSnapshot(snapshot QueueSnapshot) error {
+	if snapshot.RoomControlDepth < 0 || snapshot.RoomInputDepth < 0 || snapshot.NetworkReliableDepth < 0 {
+		return ErrInvalidQueueSnapshot
+	}
+	m.roomControlQueueDepth.Set(float64(snapshot.RoomControlDepth))
+	m.roomInputQueueDepth.Set(float64(snapshot.RoomInputDepth))
+	m.networkReliableQueueDepth.Set(float64(snapshot.NetworkReliableDepth))
+	return nil
+}
+
+// SetRoomQueueSnapshot updates only Room-owned depths, allowing the network
+// sampler to run independently without one sampler resetting the other.
+func (m *Metrics) SetRoomQueueSnapshot(controlDepth, inputDepth int) error {
+	if controlDepth < 0 || inputDepth < 0 {
+		return ErrInvalidQueueSnapshot
+	}
+	m.roomControlQueueDepth.Set(float64(controlDepth))
+	m.roomInputQueueDepth.Set(float64(inputDepth))
+	return nil
+}
+
+// SetNetworkQueueDepth updates only the aggregate reliable network depth.
+func (m *Metrics) SetNetworkQueueDepth(depth int) error {
+	if depth < 0 {
+		return ErrInvalidQueueSnapshot
+	}
+	m.networkReliableQueueDepth.Set(float64(depth))
+	return nil
+}
+
+// ObserveQueueDelta adds monotonic deltas calculated from source-owned
+// counters. Sampling cumulative values directly would double-count them.
+func (m *Metrics) ObserveQueueDelta(delta QueueDelta) {
+	m.roomQueueRejections.Add(float64(delta.RoomRejections))
+	m.rejectedInputs.Add(float64(delta.RejectedInputs))
+	m.droppedSnapshots.Add(float64(delta.DroppedSnapshots))
+	m.droppedTickSamples.Add(float64(delta.DroppedTickSamples))
+	m.networkReliableRejected.Add(float64(delta.NetworkReliableRejected))
+	m.networkSnapshotReplaced.Add(float64(delta.NetworkSnapshotReplaced))
+}
+
 // ObserveMatch records one completed matchmaking wait.
 func (m *Metrics) ObserveMatch(duration time.Duration) error {
 	if duration < 0 {
@@ -246,4 +453,28 @@ func validStageResult(result StageResult) bool {
 	default:
 		return false
 	}
+}
+
+func validRewardResult(result RewardResult) bool {
+	switch result {
+	case RewardOffered, RewardChosen, RewardDefaulted, RewardInvalid:
+		return true
+	default:
+		return false
+	}
+}
+
+func validDirectorSample(sample DirectorSample) bool {
+	if sample.Duration < 0 || sample.DeathCount < 0 || sample.MonsterCount < 1 || sample.TeamHPPercent < 0 || sample.TeamHPPercent > 1 {
+		return false
+	}
+	values := []float64{sample.ClearTimeSeconds, sample.TeamHPPercent, sample.AverageDPS, sample.DamageTaken,
+		sample.EquipmentPower, sample.PreviousDifficulty, sample.NewDifficulty, sample.Adjustment}
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return sample.ClearTimeSeconds > 0 && sample.AverageDPS >= 0 && sample.DamageTaken >= 0 &&
+		sample.EquipmentPower > 0 && sample.PreviousDifficulty > 0 && sample.NewDifficulty > 0
 }

@@ -70,6 +70,23 @@ func TestValidateRejectsBadSnapshotHz(t *testing.T) {
 	}
 }
 
+func TestValidateKeepsUnauthenticatedAdminOnLoopback(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:8080", ":8080", "192.168.1.5:8080", "missing-port"} {
+		cfg := Default()
+		cfg.AdminAddr = address
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("AdminAddr %q unexpectedly accepted", address)
+		}
+	}
+	for _, address := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		cfg := Default()
+		cfg.AdminAddr = address
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("AdminAddr %q rejected: %v", address, err)
+		}
+	}
+}
+
 func TestMissingDotEnvIsFine(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.env"))
 	if err != nil {

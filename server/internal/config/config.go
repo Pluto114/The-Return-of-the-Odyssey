@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -130,6 +131,9 @@ func (c *Config) Validate() error {
 	if c.TCPAddr == "" {
 		return fmt.Errorf("config: ODYSSEY_TCP_ADDR must not be empty")
 	}
+	if err := validateLoopbackListenAddr(c.AdminAddr); err != nil {
+		return fmt.Errorf("config: ODYSSEY_ADMIN_ADDR: %w", err)
+	}
 	if strings.TrimSpace(c.EquipmentCatalogPath) == "" {
 		return fmt.Errorf("config: ODYSSEY_EQUIPMENT_CATALOG must not be empty")
 	}
@@ -152,6 +156,21 @@ func (c *Config) Validate() error {
 	}
 	if c.DirectorMinDifficulty > c.DirectorMaxDifficulty {
 		return fmt.Errorf("config: director minimum difficulty must not exceed maximum difficulty")
+	}
+	return nil
+}
+
+func validateLoopbackListenAddr(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", address, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("must use a loopback host until Admin authentication is implemented")
 	}
 	return nil
 }
