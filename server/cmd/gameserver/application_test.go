@@ -161,7 +161,11 @@ func appRead(t *testing.T, peer appPeer, want pb.MessageType, message proto.Mess
 			t.Fatalf("read %s: %v", want, err)
 		}
 		if pb.MessageType(header.MessageType) != want {
-			if pb.MessageType(header.MessageType) == pb.MessageType_MSG_WORLD_SNAPSHOT {
+			// Skip unrelated authoritative messages that arrive while the test
+			// waits for a specific type: periodic snapshots and B's reliable
+			// combat/stage events (320..327) that fire once the room starts.
+			if pb.MessageType(header.MessageType) == pb.MessageType_MSG_WORLD_SNAPSHOT ||
+				(header.MessageType >= 320 && header.MessageType <= 327) {
 				continue
 			}
 			t.Fatalf("message type = %d, want %s", header.MessageType, want)

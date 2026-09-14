@@ -14,6 +14,7 @@ import (
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/convert"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/lobby"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
@@ -273,6 +274,24 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 			p.conn.Close()
 		}
 	}
+
+	// Start the opening encounter. The room-level seed is derived from the
+	// room ID so every subsequent director stage stays reproducible; the Room
+	// copies and validates the plan before enqueueing the trusted command.
+	firstStage, err := game.NewFirstStagePlan(a.roomConfig.World, int64(roomID))
+	if err != nil {
+		a.logger.Error("first-stage plan failed", "room_id", roomID, "err", err)
+		a.failMatch(players, err)
+		rm.Close()
+		return
+	}
+	if _, err := rm.StartStage(firstStage); err != nil {
+		a.logger.Error("start stage failed", "room_id", roomID, "err", err)
+		a.failMatch(players, err)
+		rm.Close()
+		return
+	}
+
 	oldest := time.Now()
 	for _, p := range players {
 		if p.queuedAt.Before(oldest) {
