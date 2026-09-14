@@ -137,12 +137,12 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 
 ## 10. UI 重构（Katana Zero 风格）分期状态
 
-按定稿提示词分四期推进；`ui/*.cpp` **不链接进任何测试目标**，可测部分一律放在 raylib-free 的 `ui/*.h`。
+界面信息架构与视觉规范见 **[CLIENT-HUD-DESIGN.md](CLIENT-HUD-DESIGN.md)**（布局图、状态矩阵、元素↔数据源映射、诊断迁移到 F1 的清单）。按定稿提示词分四期推进；`ui/*.cpp` **不链接进任何测试目标**，可测部分一律放在 raylib-free 的 `ui/*.h`。
 
 | 期 | 范围 | 状态 |
 | --- | --- | --- |
 | **P0a** | `ui/Theme.h`、`ui/UiGeometry.h`（布局 + 三支坐标变换，含 `scale=1` 与 `scale≥2` 用例）、`ui/HealthBar.h`、`ui/FloaterPool.h`（128 槽 FIFO + 去重键 + 过期）、`ui/AssetPath.h`（资源根与 settings 路径的纯决策） | ✅ 已完成（`odyssey_logic_tests` 内 192 项新断言） |
 | **P0b** | `main.cpp` 渲染闭环接线：可缩放窗口 + `SetWindowMinSize(960,540)`、`SetExitKey(KEY_NULL)`、RenderTexture(960×540) 生命周期与 `TEXTURE_FILTER_POINT`、双层清屏、`-540` 翻转 blit、`IsWindowResized` 重算 layout、assets post-build 拷贝、`ui/AssetPath.cpp` 平台实现（exe 目录 / `%APPDATA%` / XDG） | ✅ 已完成（窗口表现待本地构建目视确认） |
-| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | 🟡 P1a（字体加载 + `DrawTextEx` 重构 + 零分配）✅；P1b（准星/血条/受击指示/飘字上屏）⏳ |
+| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | 🟡 P1a（字体 + `DrawTextEx` + 零分配）✅；P1b-1（F1 整屏诊断视图、世界居中、目标行/过渡卡/大厅卡/断线横幅）✅；P1b-2（准星/分段血条+残影/受击弧/飘字/提示淡出）⏳ |
 | **P2** | ImGui 顶层：奖励面板与 Raylib 旧面板互斥、单次提交锁定、键鼠门控、ESC 优先级 | ⏸ 门禁：rlImGui 依赖审批 |
 | **P3** | F1/F2/F3 调试与无障碍面板、双向队列深度 EMA 折线、`--no-ui`/`ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收 | ⏸ 门禁：D 的 Release 预设 |
