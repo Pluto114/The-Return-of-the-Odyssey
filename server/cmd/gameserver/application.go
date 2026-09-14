@@ -25,6 +25,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/lobby"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/persistence"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/router"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
@@ -47,6 +48,14 @@ type activeRoom struct {
 	stats       room.Stats
 }
 
+// resumeTokenRepository is D's storage boundary for A4. The application owns
+// Session/connection validation; the repository owns atomic token semantics.
+type resumeTokenRepository interface {
+	IssueRoute(context.Context, string, persistence.ResumeRoute) error
+	ConsumeRoute(context.Context, string) (persistence.ResumeRoute, error)
+	Revoke(context.Context, string) error
+}
+
 // gameApplication assembles A's transport/session boundary, B's Room, and
 // D's matchmaking and metrics modules. It is intentionally small: the first
 // milestone needs one in-process FIFO queue and two-player rooms.
@@ -67,6 +76,8 @@ type gameApplication struct {
 	rooms          map[room.ID]*activeRoom
 	nextRoomID     atomic.Uint64
 	recentDirector []admin.DirectorDecision
+	resumeTokens   resumeTokenRepository
+	resumeGrace    time.Duration
 }
 
 func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics) (*gameApplication, error) {
@@ -560,6 +571,13 @@ func (a *gameApplication) recordDirectorDecision(roomID room.ID, stageIndex uint
 func (a *gameApplication) setEnvironment(environment string) {
 	a.mu.Lock()
 	a.environment = environment
+	a.mu.Unlock()
+}
+
+func (a *gameApplication) setResumeTokenStore(store resumeTokenRepository, grace time.Duration) {
+	a.mu.Lock()
+	a.resumeTokens = store
+	a.resumeGrace = grace
 	a.mu.Unlock()
 }
 

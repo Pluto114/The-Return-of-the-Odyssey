@@ -29,6 +29,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/persistence"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
 
@@ -79,10 +80,26 @@ func main() {
 		os.Exit(1)
 	}
 	app.setEnvironment(cfg.Env)
+	var resumeService *persistence.ResumeService
+	if cfg.ResumeEnabled {
+		resumeTTL := time.Duration(cfg.ResumeTTLSeconds) * time.Second
+		resumeService, err = persistence.OpenResumeService(ctx, persistence.ResumeServiceOptions{
+			Addr: cfg.RedisAddr, Password: cfg.RedisPass, DB: cfg.RedisDB,
+			TokenTTL:         resumeTTL,
+			OperationTimeout: time.Duration(cfg.RedisOperationMS) * time.Millisecond,
+		})
+		if err != nil {
+			logger.Error("failed to initialize Resume storage", "err", err)
+			os.Exit(1)
+		}
+		app.setResumeTokenStore(resumeService.Store(), resumeTTL)
+		logger.Info("Resume storage ready", "ttl_seconds", cfg.ResumeTTLSeconds)
+	}
 	srv := network.NewServer(app.handle, logger)
 	srv.OnDisconnect(app.disconnected)
 	ln, err := net.Listen("tcp", cfg.TCPAddr)
 	if err != nil {
+		_ = resumeService.Close()
 		logger.Error("failed to listen", "addr", cfg.TCPAddr, "err", err)
 		os.Exit(1)
 	}
@@ -100,6 +117,8 @@ func main() {
 		return snapshot
 	}), time.Second)
 	if err != nil {
+		_ = ln.Close()
+		_ = resumeService.Close()
 		logger.Error("failed to initialize Admin API", "err", err)
 		os.Exit(1)
 	}
@@ -126,6 +145,7 @@ func main() {
 	_ = metricsServer.Shutdown(shutdownCtx)
 	_ = adminHTTPServer.Shutdown(shutdownCtx)
 	_ = pprofServer.Shutdown(shutdownCtx)
+	_ = resumeService.Close()
 }
 
 func observeNetworkMetrics(ctx context.Context, server *network.Server, metricSet *metrics.Metrics) {

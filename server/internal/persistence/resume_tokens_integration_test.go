@@ -35,17 +35,24 @@ func TestResumeTokenStoreRedisIntegration(t *testing.T) {
 		t.Fatalf("Redis at %s is unavailable: %v", address, err)
 	}
 
-	store, err := NewResumeTokenStore(client, 200*time.Millisecond)
+	service, err := OpenResumeService(ctx, ResumeServiceOptions{
+		Addr: address, Password: os.Getenv("ODYSSEY_REDIS_PASSWORD"), TokenTTL: 200 * time.Millisecond, OperationTimeout: time.Second,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = service.Close() })
+	store := service.Store()
 	unique := fmt.Sprintf("%d", time.Now().UnixNano())
 	token := "integration-token-" + unique
 	expiringToken := "integration-expiring-" + unique
+	routeToken := "integration-route-" + unique
+	revokedToken := "integration-revoked-" + unique
+	corruptToken := "integration-corrupt-" + unique
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
 		defer cleanupCancel()
-		_ = client.Del(cleanupCtx, store.key(token), store.key(expiringToken)).Err()
+		_ = client.Del(cleanupCtx, store.key(token), store.key(expiringToken), store.key(routeToken), store.key(revokedToken), store.key(corruptToken)).Err()
 	})
 
 	if err := store.Issue(ctx, token, "session-1"); err != nil {
@@ -72,5 +79,40 @@ func TestResumeTokenStoreRedisIntegration(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if _, err := store.Consume(ctx, expiringToken); !errors.Is(err, ErrResumeTokenNotFound) {
 		t.Fatalf("expired Consume() error = %v, want %v", err, ErrResumeTokenNotFound)
+	}
+
+	route := ResumeRoute{Version: ResumeRouteVersion, SessionID: 11, PlayerID: 22, RoomID: 33, Generation: 44}
+	if err := store.IssueRoute(ctx, routeToken, route); err != nil {
+		t.Fatalf("IssueRoute() error = %v", err)
+	}
+	consumedRoute, err := store.ConsumeRoute(ctx, routeToken)
+	if err != nil || consumedRoute != route {
+		t.Fatalf("ConsumeRoute() = %+v, %v; want %+v", consumedRoute, err, route)
+	}
+	if _, err := store.ConsumeRoute(ctx, routeToken); !errors.Is(err, ErrResumeTokenNotFound) {
+		t.Fatalf("second ConsumeRoute() error = %v", err)
+	}
+
+	if err := store.IssueRoute(ctx, revokedToken, route); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Revoke(ctx, revokedToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Revoke(ctx, revokedToken); err != nil {
+		t.Fatalf("second Revoke() should be idempotent: %v", err)
+	}
+	if _, err := store.ConsumeRoute(ctx, revokedToken); !errors.Is(err, ErrResumeTokenNotFound) {
+		t.Fatalf("revoked token error = %v", err)
+	}
+
+	if err := client.Set(ctx, store.key(corruptToken), "not-json", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ConsumeRoute(ctx, corruptToken); !errors.Is(err, ErrCorruptResumeRoute) {
+		t.Fatalf("corrupt route error = %v, want %v", err, ErrCorruptResumeRoute)
+	}
+	if exists, err := client.Exists(ctx, store.key(corruptToken)).Result(); err != nil || exists != 0 {
+		t.Fatalf("corrupt consumed route remained replayable: exists=%d err=%v", exists, err)
 	}
 }

@@ -17,6 +17,9 @@ func TestDefaultsMatchExample(t *testing.T) {
 	if c.EquipmentCatalogPath != "data/equipment/catalog.json" || c.RewardDurationSec != 10 || c.StageLimit != 3 {
 		t.Fatalf("default gameplay config = %q/%d/%d", c.EquipmentCatalogPath, c.RewardDurationSec, c.StageLimit)
 	}
+	if c.ResumeEnabled || c.ResumeTTLSeconds != 30 || c.RedisOperationMS != 2000 {
+		t.Fatalf("default Resume config = %v/%d/%d", c.ResumeEnabled, c.ResumeTTLSeconds, c.RedisOperationMS)
+	}
 }
 
 func TestLoadDotEnvFile(t *testing.T) {
@@ -132,6 +135,53 @@ func TestLoadRejectsMalformedGameplayNumbers(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected malformed stage limit to fail")
+	}
+}
+
+func TestLoadResumeConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := "ODYSSEY_RESUME_ENABLED=true\nODYSSEY_RESUME_TTL_SEC=45\nODYSSEY_REDIS_OPERATION_TIMEOUT_MS=750\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ResumeEnabled || cfg.ResumeTTLSeconds != 45 || cfg.RedisOperationMS != 750 {
+		t.Fatalf("loaded Resume config = %+v", cfg)
+	}
+
+	if err := os.WriteFile(path, []byte("ODYSSEY_RESUME_ENABLED=maybe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("malformed Resume boolean unexpectedly accepted")
+	}
+}
+
+func TestValidateResumeProductionPolicy(t *testing.T) {
+	cfg := Default()
+	cfg.Env = "production"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("production accepted disabled Resume store")
+	}
+	cfg.ResumeEnabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid production Resume config rejected: %v", err)
+	}
+	for _, mutate := range []func(*Config){
+		func(config *Config) { config.RedisAddr = "missing-port" },
+		func(config *Config) { config.RedisDB = -1 },
+		func(config *Config) { config.ResumeTTLSeconds = 0 },
+		func(config *Config) { config.RedisOperationMS = 1 },
+	} {
+		candidate := *cfg
+		mutate(&candidate)
+		if err := candidate.Validate(); err == nil {
+			t.Errorf("unsafe Resume config accepted: %+v", candidate)
+		}
 	}
 }
 

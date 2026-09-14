@@ -19,19 +19,22 @@ import (
 // Config holds the runtime configuration for the gameserver. Field names map
 // 1:1 to the ODYSSEY_* environment keys in configs/.env.example.
 type Config struct {
-	Env         string // development | production
-	TCPAddr     string
-	AdminAddr   string
-	MetricsAddr string
-	PprofAddr   string
-	TickHz      int
-	SnapshotHz  int
-	AIHz        int
-	LogLevel    string
-	MySQLDSN    string
-	RedisAddr   string
-	RedisPass   string
-	RedisDB     int
+	Env              string // development | production
+	TCPAddr          string
+	AdminAddr        string
+	MetricsAddr      string
+	PprofAddr        string
+	TickHz           int
+	SnapshotHz       int
+	AIHz             int
+	LogLevel         string
+	MySQLDSN         string
+	RedisAddr        string
+	RedisPass        string
+	RedisDB          int
+	ResumeEnabled    bool
+	ResumeTTLSeconds int
+	RedisOperationMS int
 
 	EquipmentCatalogPath       string
 	RewardDurationSec          int
@@ -67,6 +70,9 @@ func Default() *Config {
 		RedisAddr:                  "127.0.0.1:6379",
 		RedisPass:                  "odyssey_redis_local_only",
 		RedisDB:                    0,
+		ResumeEnabled:              false,
+		ResumeTTLSeconds:           30,
+		RedisOperationMS:           2000,
 		EquipmentCatalogPath:       "data/equipment/catalog.json",
 		RewardDurationSec:          10,
 		StageLimit:                 3,
@@ -133,6 +139,22 @@ func (c *Config) Validate() error {
 	}
 	if err := validateLoopbackListenAddr(c.AdminAddr); err != nil {
 		return fmt.Errorf("config: ODYSSEY_ADMIN_ADDR: %w", err)
+	}
+	if c.Env == "production" && !c.ResumeEnabled {
+		return fmt.Errorf("config: ODYSSEY_RESUME_ENABLED must be true in production")
+	}
+	if c.ResumeEnabled {
+		if strings.TrimSpace(c.RedisAddr) == "" || c.RedisDB < 0 || c.ResumeTTLSeconds < 1 || c.ResumeTTLSeconds > 3600 || c.RedisOperationMS < 10 || c.RedisOperationMS > 30000 {
+			return fmt.Errorf("config: enabled Resume requires Redis address, non-negative DB, TTL in [1, 3600]s and operation timeout in [10, 30000]ms")
+		}
+		host, port, err := net.SplitHostPort(c.RedisAddr)
+		if err != nil {
+			return fmt.Errorf("config: ODYSSEY_REDIS_ADDR: %w", err)
+		}
+		portNumber, err := strconv.Atoi(port)
+		if strings.TrimSpace(host) == "" || err != nil || portNumber < 1 || portNumber > 65535 {
+			return fmt.Errorf("config: ODYSSEY_REDIS_ADDR must contain a host and numeric port")
+		}
 	}
 	if strings.TrimSpace(c.EquipmentCatalogPath) == "" {
 		return fmt.Errorf("config: ODYSSEY_EQUIPMENT_CATALOG must not be empty")
@@ -211,6 +233,12 @@ func applyKey(cfg *Config, key, val string) {
 		cfg.RedisPass = val
 	case "ODYSSEY_REDIS_DB":
 		applyInt(cfg, key, val, &cfg.RedisDB)
+	case "ODYSSEY_RESUME_ENABLED":
+		applyBool(cfg, key, val, &cfg.ResumeEnabled)
+	case "ODYSSEY_RESUME_TTL_SEC":
+		applyInt(cfg, key, val, &cfg.ResumeTTLSeconds)
+	case "ODYSSEY_REDIS_OPERATION_TIMEOUT_MS":
+		applyInt(cfg, key, val, &cfg.RedisOperationMS)
 	case "ODYSSEY_EQUIPMENT_CATALOG":
 		cfg.EquipmentCatalogPath = val
 	case "ODYSSEY_REWARD_DURATION_SEC":
@@ -257,6 +285,15 @@ func applyFloat(cfg *Config, key, val string, target *float64) {
 		return
 	}
 	*target = n
+}
+
+func applyBool(cfg *Config, key, val string, target *bool) {
+	parsed, err := strconv.ParseBool(val)
+	if err != nil {
+		cfg.recordParseError(key, val, err)
+		return
+	}
+	*target = parsed
 }
 
 func (c *Config) recordParseError(key, val string, err error) {

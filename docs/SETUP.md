@@ -86,7 +86,9 @@ pwsh -File scripts/doctor.ps1 -Role server
 go run ./server/cmd/gameserver -env server/configs/.env
 ```
 
-`server/configs/.env.example` 提供版本化装备目录、奖励时长、至少三关的终局上限、首关 Seed 基值和 Director 参数。启动时服务端只读取一次 `data/equipment/catalog.json`，要求版本为 1；路径缺失、JSON 损坏、版本不符或参数非法都会明确报错并在监听端口前退出。C++ 构建从同一 JSON 生成 `equipment.tsv` 并复制到可执行文件旁，不要另建手写装备表。
+`server/configs/.env.example` 提供版本化装备目录、奖励时长、至少三关的终局上限、首关 Seed 基值、Director 参数及 Resume Redis 参数。启动时服务端只读取一次 `data/equipment/catalog.json`，要求版本为 1；路径缺失、JSON 损坏、版本不符或参数非法都会明确报错并在监听端口前退出。C++ 构建从同一 JSON 生成 `equipment.tsv` 并复制到可执行文件旁，不要另建手写装备表。
+
+开发阶段 A4 尚未接线时可保持 `ODYSSEY_RESUME_ENABLED=false`。需要验证 Redis 装配时，先启动 Compose，再设为 `true`；服务端会在监听 TCP 前执行有界 Redis `PING`，失败即停止启动。`production` 环境禁止关闭 Resume 存储。Token TTL 与未来 A4 的断线宽限期共用 `ODYSSEY_RESUME_TTL_SEC`。
 
 Go Modules 会下载并验证依赖。首次初始化后生成的 go.sum、npm 锁文件要提交。
 Go 官方代理连通性不足时，可以在自己的终端配置可信 GOPROXY；不要在项目中关闭 GOSUMDB 或硬编码个人代理。
