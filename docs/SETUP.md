@@ -1,6 +1,6 @@
 # 团队开工环境清单
 
-适用阶段：Repository Scaffolding。统一版本后即可分模块开工；当前尚无可运行的游戏。
+适用阶段：第二周玩法闭环（D4–D9）。服务端已具备完整闭环（登录/匹配/战斗/奖励/多关/恢复），本文件是全组应使用的统一环境配置。
 本机实际完成程度另见 [VERIFICATION.md](VERIFICATION.md)，此处是全组应使用的配置。
 
 本机 2026-09-08 已启动全部四个容器。Windows 保留端口范围覆盖默认的 MySQL 3306 和 Grafana 3000，本机 .env 覆盖为 MYSQL_PORT=33306、GRAFANA_PORT=33000；Prometheus 仍为 9090、Redis 仍为 6379。下文表格保留团队模板默认端口，实际访问以各自 .env 为准。

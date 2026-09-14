@@ -1,9 +1,15 @@
 // Command gameserver is the entry point for the Odyssey game server.
 //
-// Phase 1 scope: accept TCP connections, speak the 16-byte frame protocol,
-// validate each message against the session state machine, answer Ping with
-// Pong, and perform development-mode login (test nickname -> server-issued
-// session/player IDs). Room/combat/matchmaking are not wired yet (Role B/D).
+// It accepts TCP connections, speaks the 16-byte frame protocol, validates
+// each message against the session state machine, and drives the full server
+// lifecycle: development-mode login, two-player FIFO matchmaking, authoritative
+// Room simulation (30Hz) with per-player snapshots (10Hz) and reliable combat
+// events, reward selection, the AI-Director multi-stage loop, and disconnect
+// recovery via single-use resume tokens.
+//
+// Metrics are exposed at cfg.MetricsAddr (Prometheus text format) and pprof at
+// cfg.PprofAddr; both shut down cleanly on SIGINT/SIGTERM, closing every live
+// connection so no goroutine leaks.
 package main
 
 import (

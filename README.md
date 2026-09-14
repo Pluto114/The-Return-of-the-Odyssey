@@ -1,7 +1,7 @@
 # The Return of the Odyssey
 
 基于 Go 服务端权威架构的多人 Roguelike 实训项目。
-当前分支阶段：**A/B 网络与战斗集成验证**。已有权威移动和首关战斗，A 的协议、TCP/Session、DTO 转换及快照/事件分发也已合入集成分支；正式匹配、入口接线和真实客户端仍待对应角色完成。
+当前阶段：**第二周完整玩法闭环（D4–D9）**。服务端已具备权威移动/瞄准/射击、怪物 AI、子弹/伤害/死亡、奖励宝箱与装备药水、AI Director 连续多关、断线恢复（Resume）、完整网络可观测指标与故障注入。真实 C++ 客户端联调与 100 Bot 压测由 C/D 推进。
 
 远程仓库：[Pluto114/The-Return-of-the-Odyssey](https://github.com/Pluto114/The-Return-of-the-Odyssey)。团队日常开发从 develop 创建功能分支。
 
@@ -42,7 +42,7 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 ```
 
 客户端依赖验证与基础设施启动见 [SETUP.md](docs/SETUP.md)。
-当前 gameserver 入口可运行 Ping/Login，但正式 Match/Input/Room 尚未接线；Bot 和游戏客户端尚无可执行入口。不要将环境构建成功视为游戏已可运行。
+gameserver 入口已具备完整服务端闭环：登录、匹配、入房、战斗、奖励、连续关卡与断线恢复（详见 [协议总览](docs/protocol/README.md) 与 [系统设计说明书](docs/architecture/SYSTEM-DESIGN.md)）。
 角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；战斗、装备奖励、连续关卡和恢复结果接口分别见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)、[装备与奖励领域接口](docs/architecture/EQUIPMENT-REWARD.md)、[Director 接口](docs/architecture/DIRECTOR.md) 和 [恢复与结果接口](docs/architecture/RESUME-GAME-RESULT.md)。
 
 ## 固定架构边界
@@ -56,5 +56,5 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 ## 验证与待办
 
 本机验证结果见 [初始化验收记录](docs/VERIFICATION.md)。
-B 的原实现检查见 [角色 B 第一阶段验证记录](docs/verification/phase1-b/README.md)，合入 A 后的 TCP 移动/战斗检查见 [A/B 集成验证](docs/verification/network-core/README.md)，D6–D7 服务端核心进展见 [奖励接线验证](docs/verification/week2-b-d6-world/README.md) 和 [Director/三关验证](docs/verification/week2-b-d7/README.md)，D9 数据见 [游戏核心性能与隔离基线](docs/benchmark/WEEK2-B-D9.md)。A/D 接入正式入口后再与 C 做真实客户端验收。
-三周功能计划、玩法与性能目标以架构文档为参考；尚无性能数据。
+B 的原实现检查见 [角色 B 第一阶段验证记录](docs/verification/phase1-b/README.md)，合入 A 后的 TCP 移动/战斗检查见 [A/B 集成验证](docs/verification/network-core/README.md)，D6–D7 服务端核心进展见 [奖励接线验证](docs/verification/week2-b-d6-world/README.md) 和 [Director/三关验证](docs/verification/week2-b-d7/README.md)，A 的 D8（Resume）与 D9（可观测性/故障注入）见 [week2-a-d8](docs/verification/week2-a-d8/README.md) 和 [week2-a-d9](docs/verification/week2-a-d9/README.md)，D9 数据见 [游戏核心性能与隔离基线](docs/benchmark/WEEK2-B-D9.md)。
+三周功能计划、玩法与性能目标以架构文档为参考。
