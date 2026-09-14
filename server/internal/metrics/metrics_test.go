@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -29,6 +30,15 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 		t.Fatal(err)
 	}
 	metrics.ObserveTickWork(750 * time.Microsecond)
+	if err := metrics.SetCombatSnapshot(CombatSnapshot{ActiveMonsters: 7, ActiveProjectiles: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.ObserveDamage(12.5); err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.ObserveStageResult(StageResultCleared); err != nil {
+		t.Fatal(err)
+	}
 
 	body := scrape(t, metrics)
 	for _, sample := range []string{
@@ -39,6 +49,11 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 		"odyssey_match_duration_seconds_count 1",
 		"odyssey_room_tick_work_duration_seconds_count 1",
 		`odyssey_reconnect_attempts_total{result="success"} 1`,
+		"odyssey_active_monsters 7",
+		"odyssey_active_projectiles 4",
+		"odyssey_damage_dealt_total 12.5",
+		`odyssey_stage_results_total{result="cleared"} 1`,
+		`odyssey_stage_results_total{result="defeated"} 0`,
 	} {
 		if !strings.Contains(body, sample) {
 			t.Errorf("scrape does not contain %q", sample)
@@ -71,6 +86,19 @@ func TestMetricsRejectInvalidObservations(t *testing.T) {
 	if err := metrics.ObserveReconnect("token-from-client"); !errors.Is(err, ErrInvalidReconnectResult) {
 		t.Errorf("unbounded reconnect result error = %v, want %v", err, ErrInvalidReconnectResult)
 	}
+	for _, snapshot := range []CombatSnapshot{{ActiveMonsters: -1}, {ActiveProjectiles: -1}} {
+		if err := metrics.SetCombatSnapshot(snapshot); !errors.Is(err, ErrInvalidCombatSnapshot) {
+			t.Errorf("SetCombatSnapshot(%+v) error = %v, want %v", snapshot, err, ErrInvalidCombatSnapshot)
+		}
+	}
+	for _, amount := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+		if err := metrics.ObserveDamage(amount); !errors.Is(err, ErrInvalidDamageAmount) {
+			t.Errorf("ObserveDamage(%v) error = %v, want %v", amount, err, ErrInvalidDamageAmount)
+		}
+	}
+	if err := metrics.ObserveStageResult("room-id-from-client"); !errors.Is(err, ErrInvalidStageResult) {
+		t.Errorf("unbounded stage result error = %v, want %v", err, ErrInvalidStageResult)
+	}
 
 	body := scrape(t, metrics)
 	for _, sample := range []string{
@@ -78,6 +106,9 @@ func TestMetricsRejectInvalidObservations(t *testing.T) {
 		"odyssey_active_rooms 1",
 		"odyssey_match_queue_players 2",
 		"odyssey_matches_total 0",
+		"odyssey_active_monsters 0",
+		"odyssey_active_projectiles 0",
+		"odyssey_damage_dealt_total 0",
 	} {
 		if !strings.Contains(body, sample) {
 			t.Errorf("scrape after rejected observation does not contain %q", sample)

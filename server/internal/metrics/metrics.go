@@ -3,6 +3,7 @@ package metrics
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"time"
 
@@ -12,8 +13,11 @@ import (
 
 var (
 	ErrInvalidSnapshot        = errors.New("metric snapshot values must not be negative")
+	ErrInvalidCombatSnapshot  = errors.New("combat metric snapshot values must not be negative")
+	ErrInvalidDamageAmount    = errors.New("damage amount must be finite and positive")
 	ErrInvalidMatchDuration   = errors.New("match duration must not be negative")
 	ErrInvalidReconnectResult = errors.New("invalid reconnect result")
+	ErrInvalidStageResult     = errors.New("invalid stage result")
 )
 
 // ReconnectResult is a bounded label value. Keeping this set closed prevents
@@ -34,6 +38,21 @@ type Snapshot struct {
 	MatchQueuePlayers int
 }
 
+// CombatSnapshot contains current combat entity counts supplied by the Room
+// metrics adapter. Values must come from authoritative Room state.
+type CombatSnapshot struct {
+	ActiveMonsters    int
+	ActiveProjectiles int
+}
+
+// StageResult is a bounded label value for terminal stage outcomes.
+type StageResult string
+
+const (
+	StageResultCleared  StageResult = "cleared"
+	StageResultDefeated StageResult = "defeated"
+)
+
 // Metrics centralizes the project's collector definitions and registry. Its
 // methods are safe for concurrent use through the Prometheus collectors.
 type Metrics struct {
@@ -46,6 +65,10 @@ type Metrics struct {
 	matchDuration     prometheus.Histogram
 	tickWorkDuration  prometheus.Histogram
 	reconnectAttempts *prometheus.CounterVec
+	activeMonsters    prometheus.Gauge
+	activeProjectiles prometheus.Gauge
+	damageDealt       prometheus.Counter
+	stageResults      *prometheus.CounterVec
 }
 
 // New creates an isolated registry containing Go/process collectors and the
@@ -92,6 +115,26 @@ func New() *Metrics {
 			Name:      "reconnect_attempts_total",
 			Help:      "Total number of reconnect attempts by bounded result.",
 		}, []string{"result"}),
+		activeMonsters: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "odyssey",
+			Name:      "active_monsters",
+			Help:      "Current number of authoritative monsters across active rooms.",
+		}),
+		activeProjectiles: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "odyssey",
+			Name:      "active_projectiles",
+			Help:      "Current number of authoritative projectiles across active rooms.",
+		}),
+		damageDealt: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "damage_dealt_total",
+			Help:      "Total authoritative hit points of damage applied.",
+		}),
+		stageResults: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "stage_results_total",
+			Help:      "Total authoritative terminal stage outcomes by bounded result.",
+		}, []string{"result"}),
 	}
 
 	registry.MustRegister(
@@ -104,7 +147,13 @@ func New() *Metrics {
 		result.matchDuration,
 		result.tickWorkDuration,
 		result.reconnectAttempts,
+		result.activeMonsters,
+		result.activeProjectiles,
+		result.damageDealt,
+		result.stageResults,
 	)
+	result.stageResults.WithLabelValues(string(StageResultCleared))
+	result.stageResults.WithLabelValues(string(StageResultDefeated))
 	return result
 }
 
@@ -134,6 +183,34 @@ func (m *Metrics) SetSnapshot(snapshot Snapshot) error {
 	return nil
 }
 
+// SetCombatSnapshot publishes current authoritative combat entity counts.
+func (m *Metrics) SetCombatSnapshot(snapshot CombatSnapshot) error {
+	if snapshot.ActiveMonsters < 0 || snapshot.ActiveProjectiles < 0 {
+		return ErrInvalidCombatSnapshot
+	}
+	m.activeMonsters.Set(float64(snapshot.ActiveMonsters))
+	m.activeProjectiles.Set(float64(snapshot.ActiveProjectiles))
+	return nil
+}
+
+// ObserveDamage records damage after the authoritative World applies it.
+func (m *Metrics) ObserveDamage(amount float64) error {
+	if amount <= 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return ErrInvalidDamageAmount
+	}
+	m.damageDealt.Add(amount)
+	return nil
+}
+
+// ObserveStageResult records one authoritative terminal stage outcome.
+func (m *Metrics) ObserveStageResult(result StageResult) error {
+	if !validStageResult(result) {
+		return ErrInvalidStageResult
+	}
+	m.stageResults.WithLabelValues(string(result)).Inc()
+	return nil
+}
+
 // ObserveMatch records one completed matchmaking wait.
 func (m *Metrics) ObserveMatch(duration time.Duration) error {
 	if duration < 0 {
@@ -156,6 +233,15 @@ func (m *Metrics) ObserveReconnect(result ReconnectResult) error {
 func validReconnectResult(result ReconnectResult) bool {
 	switch result {
 	case ReconnectSucceeded, ReconnectInvalidToken, ReconnectExpired, ReconnectBackendError:
+		return true
+	default:
+		return false
+	}
+}
+
+func validStageResult(result StageResult) bool {
+	switch result {
+	case StageResultCleared, StageResultDefeated:
 		return true
 	default:
 		return false
