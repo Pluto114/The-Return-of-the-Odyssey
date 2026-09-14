@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/bootstrap"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/convert"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
@@ -50,6 +51,7 @@ type gameApplication struct {
 	matcher    *lobby.Matchmaker
 	metrics    *metrics.Metrics
 	roomConfig room.Config
+	gameplay   bootstrap.Gameplay
 
 	mu          sync.Mutex
 	connections map[*network.Connection]*session.Session
@@ -59,6 +61,20 @@ type gameApplication struct {
 }
 
 func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics) (*gameApplication, error) {
+	return buildGameApplication(ctx, logger, m, bootstrap.Gameplay{})
+}
+
+// newConfiguredGameApplication is the production constructor. The legacy
+// constructor remains for focused A-side tests that do not enter reward or
+// Director phases; production cannot start with an unvalidated zero value.
+func newConfiguredGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics, gameplay bootstrap.Gameplay) (*gameApplication, error) {
+	if !gameplay.Valid() {
+		return nil, errors.New("gameserver: invalid gameplay configuration")
+	}
+	return buildGameApplication(ctx, logger, m, gameplay)
+}
+
+func buildGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics, gameplay bootstrap.Gameplay) (*gameApplication, error) {
 	matcher, err := lobby.NewMatchmaker(2)
 	if err != nil {
 		return nil, err
@@ -70,6 +86,7 @@ func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Met
 		matcher:     matcher,
 		metrics:     m,
 		roomConfig:  room.DefaultConfig(),
+		gameplay:    gameplay,
 		connections: make(map[*network.Connection]*session.Session),
 		waiting:     make(map[lobby.PlayerID]*participant),
 		rooms:       make(map[room.ID]*activeRoom),

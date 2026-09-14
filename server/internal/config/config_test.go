@@ -14,6 +14,9 @@ func TestDefaultsMatchExample(t *testing.T) {
 	if c.TCPAddr != "127.0.0.1:7777" {
 		t.Fatalf("default TCPAddr = %q", c.TCPAddr)
 	}
+	if c.EquipmentCatalogPath != "data/equipment/catalog.json" || c.RewardDurationSec != 10 || c.StageLimit != 3 {
+		t.Fatalf("default gameplay config = %q/%d/%d", c.EquipmentCatalogPath, c.RewardDurationSec, c.StageLimit)
+	}
 }
 
 func TestLoadDotEnvFile(t *testing.T) {
@@ -74,5 +77,59 @@ func TestMissingDotEnvIsFine(t *testing.T) {
 	}
 	if cfg.TCPAddr != "127.0.0.1:7777" {
 		t.Errorf("TCPAddr = %q, want default", cfg.TCPAddr)
+	}
+}
+
+func TestLoadGameplayConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := "ODYSSEY_EQUIPMENT_CATALOG=config/equipment.json\n" +
+		"ODYSSEY_REWARD_DURATION_SEC=15\n" +
+		"ODYSSEY_STAGE_LIMIT=5\n" +
+		"ODYSSEY_FIRST_STAGE_SEED_BASE=-42\n" +
+		"ODYSSEY_DIRECTOR_MIN_DIFFICULTY=0.75\n" +
+		"ODYSSEY_DIRECTOR_MAX_DIFFICULTY=8.5\n" +
+		"ODYSSEY_DIRECTOR_TARGET_CLEAR_TIME_SEC=40\n" +
+		"ODYSSEY_DIRECTOR_TARGET_DPS=35.5\n" +
+		"ODYSSEY_DIRECTOR_TARGET_DAMAGE_TAKEN=45\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EquipmentCatalogPath != "config/equipment.json" || cfg.RewardDurationSec != 15 || cfg.StageLimit != 5 || cfg.FirstStageSeedBase != -42 {
+		t.Fatalf("loaded gameplay config = %+v", cfg)
+	}
+	if cfg.DirectorMinDifficulty != 0.75 || cfg.DirectorMaxDifficulty != 8.5 || cfg.DirectorTargetDPS != 35.5 {
+		t.Fatalf("loaded director config = %+v", cfg)
+	}
+}
+
+func TestLoadRejectsMalformedGameplayNumbers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("ODYSSEY_STAGE_LIMIT=three\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected malformed stage limit to fail")
+	}
+}
+
+func TestValidateRejectsUnsafeGameplayConfig(t *testing.T) {
+	tests := []func(*Config){
+		func(c *Config) { c.EquipmentCatalogPath = "" },
+		func(c *Config) { c.RewardDurationSec = 0 },
+		func(c *Config) { c.StageLimit = 2 },
+		func(c *Config) { c.DirectorMinDifficulty = c.DirectorMaxDifficulty + 1 },
+	}
+	for index, mutate := range tests {
+		cfg := Default()
+		mutate(cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("case %d: expected validation failure", index)
+		}
 	}
 }

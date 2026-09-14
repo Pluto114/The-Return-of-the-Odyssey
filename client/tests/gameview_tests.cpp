@@ -279,34 +279,33 @@ void TestParseEquipmentTable() {
     EquipmentTable table;
     const std::string text =
         "# client display table\n"
-        "1,Blade of the Odyssey,Weapon,\"+10 Attack\"\n"
+        "1001\tIron Sidearm\tweapon\tAttack +5\n"
         "\n"
-        "2,Glass Cannon,Relic,\"+20 Attack, -10 Defense\"\n"
+        "2001\tVitality Relic\trelic\tMax health +25, no healing\n"
         "bogus line without id,name\n";
     const std::size_t loaded = ParseEquipmentTable(text, table);
     CHECK(loaded == 2);
     CHECK(table.size() == 2);
-    const auto it = table.find(1);
+    const auto it = table.find(1001);
     CHECK(it != table.end());
     if (it != table.end()) {
-        CHECK(it->second.name == "Blade of the Odyssey");
-        CHECK(it->second.slot == "Weapon");
-        CHECK(it->second.stats == "\"+10 Attack\"");
+        CHECK(it->second.name == "Iron Sidearm");
+        CHECK(it->second.slot == "weapon");
+        CHECK(it->second.description == "Attack +5");
     }
-    const auto second = table.find(2);
+    const auto second = table.find(2001);
     CHECK(second != table.end());
     if (second != table.end()) {
-        // The stats column may itself contain commas.
-        CHECK(second->second.stats == "\"+20 Attack, -10 Defense\"");
+        CHECK(second->second.description == "Max health +25, no healing");
     }
 }
 
 void TestRewardViewFlow() {
     EquipmentTable table;
-    ParseEquipmentTable("5,Vitality Relic,Relic,\"+25 Max HP\"\n", table);
+    ParseEquipmentTable("2001\tVitality Relic\trelic\tMax health +25\n", table);
 
     RewardView view;
-    view.SetOptions({5, 99}, 4000, table);
+    view.SetOptions({2001, 99}, 4000, table);
     CHECK(view.State() == RewardState::kOffered);
     CHECK(view.Active());
     CHECK(view.Options().size() == 2);
@@ -320,23 +319,23 @@ void TestRewardViewFlow() {
     CHECK(!view.ChooseByIndex(2, chosen));  // out of range: still offered
     CHECK(view.State() == RewardState::kOffered);
     CHECK(view.ChooseByIndex(0, chosen));
-    CHECK(chosen == 5);
+    CHECK(chosen == 2001);
     CHECK(view.State() == RewardState::kChosen);
     // A second choice is refused locally (single-shot).
     CHECK(!view.ChooseByIndex(1, chosen));
 
     // Refusal is reported honestly.
-    view.ApplyResult(false, 5, 200);
+    view.ApplyResult(false, 2001, 200);
     CHECK(view.State() == RewardState::kRejected);
     CHECK(view.Note().find("refused") != std::string::npos);
 
     // Deadline expiry only affects an unanswered offer.
     RewardView timed;
-    timed.SetOptions({5}, 100, table);
+    timed.SetOptions({2001}, 100, table);
     timed.Timeout();
     CHECK(timed.State() == RewardState::kTimedOut);
     CHECK(!timed.Active());
-    timed.ApplyResult(true, 5, 1);
+    timed.ApplyResult(true, 2001, 1);
     CHECK(timed.State() == RewardState::kApplied);
 
     // Clearing resets everything (stage change / disconnect).

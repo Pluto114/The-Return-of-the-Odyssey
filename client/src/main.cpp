@@ -206,16 +206,17 @@ int main() {
     SnapshotInterpolator monster_interp;  // monsters (10Hz -> smooth)
     EquipmentTable equipment_table;
 
-    // Optional local display table (static equipment data is never sent on the
-    // wire). Missing file simply means "equipment#<id>" placeholders.
-    for (const char* candidate : {"equipment.csv", "assets/data/equipment.csv",
-                                  "client/assets/data/equipment.csv"}) {
+    // This table is generated from data/equipment/catalog.json by CMake and
+    // copied beside the executable. Missing data degrades to placeholders.
+    const std::string executable_equipment = std::string(GetApplicationDirectory()) + "equipment.tsv";
+    for (const std::string& candidate : {executable_equipment, std::string("equipment.tsv"),
+                                         std::string("assets/data/equipment.tsv")}) {
         std::ifstream file(candidate);
         if (file) {
             std::stringstream buffer;
             buffer << file.rdbuf();
             const std::size_t loaded = odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
-            std::printf("main: loaded %zu equipment entries from %s\n", loaded, candidate);
+            std::printf("main: loaded %zu equipment entries from %s\n", loaded, candidate.c_str());
             std::fflush(stdout);
             break;
         }
@@ -961,7 +962,7 @@ int main() {
             const auto& options = reward_view.Options();
             for (std::size_t i = 0; i < options.size(); ++i) {
                 row += "[" + std::to_string(i + 1) + "] " + options[i].display.name + " (" +
-                       options[i].display.slot + ") " + options[i].display.stats + "   ";
+                       options[i].display.slot + ") " + options[i].display.description + "   ";
             }
             DrawText(row.c_str(), 30, 486, 18, DARKGRAY);
         } else {

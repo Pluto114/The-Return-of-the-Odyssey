@@ -23,7 +23,9 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/bootstrap"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/config"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
@@ -59,12 +61,18 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
-	logger.Info("gameserver starting", "env", cfg.Env, "tcp", cfg.TCPAddr, "tick_hz", cfg.TickHz)
+	gameplay, err := bootstrap.LoadGameplay(cfg, game.DefaultConfig())
+	if err != nil {
+		logger.Error("failed to load gameplay configuration", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("gameserver starting", "env", cfg.Env, "tcp", cfg.TCPAddr, "tick_hz", cfg.TickHz,
+		"equipment_version", gameplay.Catalog().Version(), "reward_ticks", gameplay.RewardDurationTicks(), "stage_limit", gameplay.StageLimit())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	metricSet := metrics.New()
-	app, err := newGameApplication(ctx, logger, metricSet)
+	app, err := newConfiguredGameApplication(ctx, logger, metricSet, gameplay)
 	if err != nil {
 		logger.Error("failed to initialize application", "err", err)
 		os.Exit(1)

@@ -72,8 +72,7 @@ build\client-windows\client\odyssey_client.exe
 
 ## 已知限制 / 依赖
 
-- 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：当前 ID 1–6 与 B 的版本化目录不一致，D 需从 `data/equipment/catalog.json` 生成同源显示数据；
-  客户端不从此表推导任何战斗效果。
+- 装备显示以 `data/equipment/catalog.json` 为唯一手写数据源；CMake 配置阶段校验版本 1，并生成、复制 `equipment.tsv` 到客户端可执行文件旁。客户端不从显示表推导战斗效果。
 - Ready 当前只在 Reward=3 发送，与 B 奖励完成后的 PreparingNextStage=4 不匹配；阶段输入门控、恢复后匹配门控/续号、药水与装备移速预测均按收尾清单修正，尚未宣称真实三关/恢复通过。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：

@@ -40,6 +40,27 @@ func TestDefaultCatalogLoadsAsStableStaticData(t *testing.T) {
 	if got := catalog.IDs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ids = %v, want %v", got, want)
 	}
+	wantDisplay := map[equipment.ID]struct {
+		name, slot, description string
+	}{
+		1001: {"Iron Sidearm", "weapon", "Attack +5"},
+		1002: {"Rapid Sidearm", "weapon", "Attack speed x1.2"},
+		2001: {"Vitality Relic", "relic", "Max health +25"},
+		2002: {"Wind Relic", "relic", "Move speed x1.1"},
+		3001: {"Healing Potion", "potion", "Restore 30 health"},
+		3002: {"Greater Healing Potion", "potion", "Restore 60 health"},
+	}
+	for id, want := range wantDisplay {
+		definition, ok := catalog.Lookup(id)
+		if !ok {
+			t.Errorf("display equipment %d missing", id)
+			continue
+		}
+		if definition.Name != want.name || string(definition.Slot) != want.slot || definition.Description != want.description {
+			t.Errorf("display equipment %d = %q/%q/%q, want %q/%q/%q", id,
+				definition.Name, definition.Slot, definition.Description, want.name, want.slot, want.description)
+		}
+	}
 	definition, ok := catalog.Lookup(1001)
 	if !ok {
 		t.Fatal("known equipment missing")
