@@ -2,6 +2,8 @@
 
 `server/internal/metrics` 使用独立 Prometheus Registry，统一拥有指标名、帮助文本、Bucket 和标签集合。业务模块只提交领域结果，不直接创建 Prometheus Collector。
 
+D4 预留的战斗指标为 `odyssey_active_monsters`、`odyssey_active_projectiles`、`odyssey_damage_dealt_total` 和 `odyssey_stage_results_total{result}`。Gauge 必须来自 Room 的权威实体计数，伤害和关卡结果只能在 World 已应用的事件上累加；`result` 仅允许 `cleared` 与 `defeated`。D5 完成 Room 适配前不得用固定假数据填充这些指标。
+
 ## 当前指标
 
 | 指标 | 类型 | 含义 |
