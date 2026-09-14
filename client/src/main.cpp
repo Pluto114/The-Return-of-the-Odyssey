@@ -19,6 +19,7 @@
 #include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
+#include "sync/SessionGate.h"
 
 #include <cmath>
 #include <cstdint>
@@ -55,19 +56,6 @@ constexpr std::uint32_t kClientProtocolVersion = 1;
 constexpr float kPingIntervalSeconds = 1.0f;
 constexpr double kFrameSeconds = 1.0 / 60.0;
 
-const char* StageStateName(std::uint32_t state) {
-    switch (state) {
-        case 0: return "waiting";
-        case 1: return "playing";
-        case 2: return "clear";
-        case 3: return "reward";
-        case 4: return "preparing";
-        case 5: return "failed";
-        case 6: return "closed";
-        default: return "?";
-    }
-}
-
 using namespace odyssey::client::network::ids;
 namespace payload = odyssey::client::network::payload;
 using odyssey::client::core::BoundedQueue;
@@ -103,18 +91,24 @@ using odyssey::client::network::payload::StageEventData;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
 using odyssey::client::sync::CombatView;
+using odyssey::client::sync::AuthoritativeRewardPhaseEnded;
+using odyssey::client::sync::CanReportReady;
+using odyssey::client::sync::CanSendInput;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
 using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::InputSeqFloor;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::MovementPredictor;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::ReadyBlockReason;
 using odyssey::client::sync::RecoveryPhase;
 using odyssey::client::sync::RecoveryState;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
+using odyssey::client::sync::StageStateName;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -156,7 +150,11 @@ struct DemoState {
     std::string server_note;
 
     // WorldSnapshot ingestion stats.
-    std::uint64_t snapshots_received = 0;
+    std::uint64_t snapshots_received = 0;  // lifetime (HUD)
+    // Snapshots of the current session/connection. Reset on every disconnect and
+    // on a fresh login: a resumed session has no authoritative state at all until
+    // its first snapshot arrives (proto/session.proto).
+    std::uint64_t session_snapshots = 0;
 
     // Combat (D4) state.
     float self_hp = 0.0f;
@@ -178,8 +176,11 @@ struct DemoState {
     float self_defense = 0.0f;
     float self_move_speed = 0.0f;
 
-    // D7 readiness (client-side echo; the server owns the ready barrier).
+    // D7 readiness: the server owns the ready barrier. The client only reports
+    // ready once the authoritative state is PreparingNextStage (A5 item C-a) and
+    // latches it per stage so ENTER cannot spam the request.
     bool ready_sent = false;
+    std::uint32_t ready_stage = 0;  // stage index ready_sent applies to
 };
 
 }  // namespace
@@ -311,6 +312,7 @@ int main(int argc, char** argv) {
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
             demo.ready_sent = false;
+            demo.session_snapshots = 0;
             client.Connect(endpoint.host, endpoint.port);
         }
 
@@ -345,12 +347,16 @@ int main(int argc, char** argv) {
 
         // Sample and transmit intent at a fixed 30Hz after MatchFound. The
         // client sends direction only; position always comes from snapshots.
+        // A5 item C-e: input stays muted until the first authoritative snapshot
+        // of this session has been applied - after a resume the client holds no
+        // world state at all until then, so aiming or predicting from it would be
+        // meaningless (and the sequence range must not be replayed).
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
             if (now - last_input_time >= 1.0 / 30.0) {
                 last_input_time = now;
                 last_sample = input_sampler.SampleNow();
-                if (demo.in_room) {
+                if (CanSendInput(demo.in_room, demo.session_snapshots > 0)) {
                     last_report = input_sequencer.Tick(last_sample);
                     // Aim heading: mouse position mapped back to world space,
                     // relative to our own authoritative position. The client
@@ -430,6 +436,9 @@ int main(int argc, char** argv) {
                         demo.banner.clear();
                         demo.banner_ttl = 0.0f;
                         demo.ready_sent = false;
+                        // No authoritative state belongs to the next connection:
+                        // input stays muted until its first snapshot arrives.
+                        demo.session_snapshots = 0;
                         if (had_session) {
                             recovery.OnDisconnect(GetTime());
                             std::printf("main: connection lost -> recovery (%s)\n",
@@ -463,6 +472,7 @@ int main(int argc, char** argv) {
                                 recovery.OnFreshLoginOk();
                                 demo.resumed = false;
                                 input_sequencer.Reset();
+                                demo.session_snapshots = 0;
                             }
                         } else {
                             demo.login_ok = false;
@@ -479,9 +489,20 @@ int main(int argc, char** argv) {
                                 demo.resumed = true;
                                 demo.in_room = true;
                                 demo.login_note = "resumed session";
+                                // The server re-bound us to the existing room:
+                                // matchmaking must NOT run again for this session
+                                // (A5 item C-e), and the resume token stays valid.
+                                demo.match_sent = true;
+                                demo.match_note = "resumed (no new match)";
+                                // The resumed session has no authoritative state
+                                // until its first snapshot: keep input muted and
+                                // do not let the old sequence range be replayed.
+                                demo.session_snapshots = 0;
                                 std::printf("main: session resumed session=%llu player=%llu\n",
                                             static_cast<unsigned long long>(resume.session_id),
                                             static_cast<unsigned long long>(resume.player_id));
+                                std::printf("main: input muted until the first snapshot of the "
+                                            "resumed session\n");
                                 std::fflush(stdout);
                             } else {
                                 // Refused (expired/forged/replayed). Never replay
@@ -530,9 +551,29 @@ int main(int argc, char** argv) {
                         WorldSnapshotView snap;
                         if (payload::DecodeWorldSnapshot(event->message.payload, snap)) {
                             ++demo.snapshots_received;
+                            const bool first_of_session = demo.session_snapshots == 0;
+                            ++demo.session_snapshots;
                             if (demo.snapshots_received == 1) {
                                 std::printf("main: first world snapshot tick=%llu\n",
                                             static_cast<unsigned long long>(snap.server_tick));
+                                std::fflush(stdout);
+                            }
+                            if (first_of_session) {
+                                // A5 item C-e: the first snapshot of a resumed
+                                // session is the authority on where this session's
+                                // input range already stands. Continue strictly
+                                // above both the high-water mark sent before the
+                                // drop and the server's LastProcessedInputSeq,
+                                // never replaying the pre-drop range.
+                                if (demo.resumed) {
+                                    const std::uint32_t floor = InputSeqFloor(
+                                        input_sequencer.LastSequence(), snap.last_processed_input);
+                                    input_sequencer.EnsureGreaterThan(floor);
+                                    std::printf("main: resumed input floor=%u next_seq=%u\n",
+                                                floor, input_sequencer.LastSequence() + 1);
+                                }
+                                std::printf("main: input enabled after first snapshot%s\n",
+                                            demo.resumed ? " (resumed session)" : "");
                                 std::fflush(stdout);
                             }
                             odyssey::client::sync::SnapshotView sv;
@@ -597,6 +638,18 @@ int main(int argc, char** argv) {
                             demo.stage_index = snap.stage.index;
                             demo.stage_state = snap.stage.state;
                             demo.monsters_remaining = snap.stage.monsters_remaining;
+                            // A5 item C-a: the snapshot is the authority on the
+                            // reward phase. If it already ended while this client
+                            // is still holding an open panel, close it so it
+                            // cannot block the ready barrier (the server settled
+                            // the round; no outcome is invented here).
+                            if (AuthoritativeRewardPhaseEnded(snap.stage.state) &&
+                                reward_view.Active()) {
+                                reward_view.SettleAfterAuthoritativeEnd();
+                                std::printf("main: reward panel settled by authoritative state=%s\n",
+                                            StageStateName(snap.stage.state));
+                                std::fflush(stdout);
+                            }
                             if (snap.has_self) {
                                 demo.self_hp = snap.self.hp;
                                 demo.self_max_hp = snap.self.max_hp;
@@ -738,6 +791,11 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Keyed by stage index rather than a bare flag: if a StageStarted event
+        // is ever missed, the next stage still becomes reportable instead of
+        // staying latched forever.
+        const bool ready_reported = demo.ready_sent && demo.ready_stage == demo.stage_index;
+
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
 
@@ -761,6 +819,9 @@ int main(int argc, char** argv) {
                 SendPayload(kLoginRequest, payload::EncodeLoginRequest(login));
             }
 
+            // Matchmaking runs once per fresh session. A resumed session is
+            // already bound to its room, so it must never enqueue a new match
+            // request (A5 item C-e).
             if (demo.login_ok && !demo.match_sent) {
                 demo.match_sent = true;
                 demo.match_note = "queued";
@@ -777,15 +838,29 @@ int main(int argc, char** argv) {
                 SendPayload(kPing, payload::EncodePing(ping));
             }
 
-            // D7: while in the Reward state, ENTER reports "ready for the next
-            // stage". The server applies the ready barrier; repeat presses are
-            // idempotent server-side.
-            if (demo.in_room && demo.stage_state == 3 && IsKeyPressed(KEY_ENTER)) {
-                SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
-                demo.ready_sent = true;
-                demo.last_event_note = "next stage ready sent";
-                std::printf("main: next stage ready sent\n");
-                std::fflush(stdout);
+            // D7 / A5 item C-a: report "ready for the next stage" only when the
+            // authoritative state is PreparingNextStage - the server moves there
+            // itself once the reward round is complete - and this client's own
+            // reward is settled. Pressing ENTER earlier only produces a request
+            // the room cannot use, so it is refused here with a visible reason.
+            if (demo.in_room && IsKeyPressed(KEY_ENTER)) {
+                if (CanReportReady(demo.in_room, demo.stage_state, reward_view.State(),
+                                   ready_reported)) {
+                    SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
+                    demo.ready_sent = true;
+                    demo.ready_stage = demo.stage_index;
+                    demo.last_event_note = "next stage ready sent";
+                    std::printf("main: next stage ready sent stage=%u state=%s\n",
+                                demo.stage_index, StageStateName(demo.stage_state));
+                    std::fflush(stdout);
+                } else {
+                    const char* reason = ReadyBlockReason(demo.in_room, demo.stage_state,
+                                                          reward_view.State(), ready_reported);
+                    demo.last_event_note = std::string("ready blocked: ") + reason;
+                    std::printf("main: ready blocked (%s) stage=%u state=%s\n", reason,
+                                demo.stage_index, StageStateName(demo.stage_state));
+                    std::fflush(stdout);
+                }
             }
         }
 
@@ -876,11 +951,21 @@ int main(int argc, char** argv) {
             std::to_string(demo.deaths);
         DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
 
+        // Ready is gated on the authoritative preparing state (A5 C-a): show why
+        // ENTER is unavailable instead of leaving the operator guessing.
+        const std::string ready_text =
+            ready_reported ? "sent"
+                           : (CanReportReady(demo.in_room, demo.stage_state, reward_view.State(),
+                                             ready_reported)
+                                  ? "ready"
+                                  : std::string("blocked: ") +
+                                        ReadyBlockReason(demo.in_room, demo.stage_state,
+                                                         reward_view.State(), ready_reported));
         const std::string stats_line =
             "Stats(snapshot): ATK=" + std::to_string(static_cast<int>(demo.self_attack)) +
             " DEF=" + std::to_string(static_cast<int>(demo.self_defense)) +
             " SPD=" + std::to_string(static_cast<int>(demo.self_move_speed)) +
-            "  Ready: " + (demo.ready_sent ? "sent" : "no") +
+            "  Ready: " + ready_text +
             "  seed=" + std::to_string(combat_view.Stage().seed);
         DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
         DrawText(("Last event: " + demo.last_event_note).c_str(), 470, 400, 18, MAROON);

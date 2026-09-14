@@ -148,6 +148,18 @@ public:
         }
     }
 
+    // The authoritative stage state already says the reward phase ended (the
+    // server completes the round itself), but this client is still waiting - a
+    // missed or reordered RewardApplied must not leave the panel open and block
+    // the ready barrier. The server owns the outcome, so nothing is invented
+    // here beyond "it is over".
+    void SettleAfterAuthoritativeEnd() {
+        if (state_ == RewardState::kOffered || state_ == RewardState::kChosen) {
+            state_ = RewardState::kTimedOut;
+            note_ = "reward phase ended (server settled it)";
+        }
+    }
+
     void Clear() {
         options_.clear();
         deadline_tick_ = 0;

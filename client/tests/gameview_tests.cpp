@@ -7,6 +7,7 @@
 #include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
+#include "sync/SessionGate.h"
 
 #include <cmath>
 #include <cstdint>
@@ -32,9 +33,15 @@ using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
 using odyssey::client::sync::CombatView;
+using odyssey::client::sync::AuthoritativeRewardPhaseEnded;
+using odyssey::client::sync::CanReportReady;
+using odyssey::client::sync::CanSendInput;
+using odyssey::client::sync::EquipmentDisplay;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
 using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::InputSeqFloor;
+using odyssey::client::sync::IsPreparingNextStage;
 using odyssey::client::sync::kArenaMax;
 using odyssey::client::sync::kSimulationStepSeconds;
 using odyssey::client::sync::MonsterEntity;
@@ -42,13 +49,17 @@ using odyssey::client::sync::MovementPredictor;
 using odyssey::client::sync::ParseEquipmentTable;
 using odyssey::client::sync::PlayerView;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::ReadyBlockReason;
 using odyssey::client::sync::RecoveryPhase;
 using odyssey::client::sync::RecoveryState;
+using odyssey::client::sync::RewardSettled;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotView;
 using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
+using odyssey::client::sync::StageState;
+using odyssey::client::sync::StageStateName;
 using odyssey::client::sync::StepMovement;
 
 constexpr float kEps = 1e-5f;
@@ -493,6 +504,177 @@ void TestSnapshotInterpolation() {
     CHECK(interpolator.Count() == 0);
 }
 
+void TestStageStateWireValues() {
+    // The enum must stay numerically identical to the server's stage.State iota
+    // order (server/internal/game/stage/plan.go), because it is compared against
+    // the raw WorldSnapshot.stage.state field. If the server renumbers the
+    // states, this table is the tripwire.
+    struct Case {
+        std::uint32_t wire;
+        StageState state;
+        const char* name;
+    };
+    Case cases[] = {
+        {0, StageState::kWaiting, "waiting"},
+        {1, StageState::kPlaying, "playing"},
+        {2, StageState::kStageClear, "clear"},
+        {3, StageState::kReward, "reward"},
+        {4, StageState::kPreparingNextStage, "preparing"},
+        {5, StageState::kFailed, "failed"},
+        {6, StageState::kClosed, "closed"},
+    };
+    for (const Case& item : cases) {
+        CHECK(static_cast<std::uint32_t>(item.state) == item.wire);
+        CHECK(std::string(StageStateName(item.wire)) == item.name);
+    }
+
+    // Unknown wire values are reported as unknown, never mapped onto a state.
+    CHECK(std::string(StageStateName(7)) == "?");
+    CHECK(std::string(StageStateName(99)) == "?");
+
+    CHECK(IsPreparingNextStage(4));
+    CHECK(!IsPreparingNextStage(3));
+    CHECK(!IsPreparingNextStage(5));
+}
+
+void TestAuthoritativeRewardPhaseEnded() {
+    CHECK(AuthoritativeRewardPhaseEnded(4));
+    CHECK(AuthoritativeRewardPhaseEnded(5));
+    CHECK(AuthoritativeRewardPhaseEnded(6));
+    CHECK(!AuthoritativeRewardPhaseEnded(0));
+    CHECK(!AuthoritativeRewardPhaseEnded(1));
+    CHECK(!AuthoritativeRewardPhaseEnded(2));
+    CHECK(!AuthoritativeRewardPhaseEnded(3));
+    CHECK(!AuthoritativeRewardPhaseEnded(99));
+}
+
+void TestRewardSettledStates() {
+    CHECK(RewardSettled(RewardState::kNone));
+    CHECK(RewardSettled(RewardState::kApplied));
+    CHECK(RewardSettled(RewardState::kRejected));
+    CHECK(RewardSettled(RewardState::kTimedOut));
+    CHECK(!RewardSettled(RewardState::kOffered));
+    CHECK(!RewardSettled(RewardState::kChosen));
+}
+
+void TestCanSendInputGating() {
+    CHECK(!CanSendInput(false, false));
+    CHECK(!CanSendInput(false, true));
+    // In a room but before the first snapshot of this session: still muted.
+    CHECK(!CanSendInput(true, false));
+    CHECK(CanSendInput(true, true));
+}
+
+void TestCanReportReadyGating() {
+    const std::uint32_t preparing = static_cast<std::uint32_t>(StageState::kPreparingNextStage);
+    const std::uint32_t reward = static_cast<std::uint32_t>(StageState::kReward);
+
+    CHECK(CanReportReady(true, preparing, RewardState::kNone, false));
+    CHECK(CanReportReady(true, preparing, RewardState::kApplied, false));
+    CHECK(CanReportReady(true, preparing, RewardState::kTimedOut, false));
+    // Not in a room, wrong stage state, unreported reward, or already reported.
+    CHECK(!CanReportReady(false, preparing, RewardState::kNone, false));
+    CHECK(!CanReportReady(true, reward, RewardState::kNone, false));
+    CHECK(!CanReportReady(true, static_cast<std::uint32_t>(StageState::kPlaying),
+                          RewardState::kNone, false));
+    CHECK(!CanReportReady(true, preparing, RewardState::kOffered, false));
+    CHECK(!CanReportReady(true, preparing, RewardState::kChosen, false));
+    CHECK(!CanReportReady(true, preparing, RewardState::kNone, true));
+    // The latch is per stage: a settled reward plus a new stage is reportable.
+    CHECK(CanReportReady(true, preparing, RewardState::kApplied, false));
+}
+
+void TestReadyBlockReasons() {
+    const std::uint32_t preparing = static_cast<std::uint32_t>(StageState::kPreparingNextStage);
+    const std::uint32_t reward = static_cast<std::uint32_t>(StageState::kReward);
+
+    CHECK(std::string(ReadyBlockReason(false, preparing, RewardState::kNone, false)) ==
+          "not in room");
+    CHECK(std::string(ReadyBlockReason(true, reward, RewardState::kNone, false)) ==
+          "waiting for authoritative preparing state");
+    CHECK(std::string(ReadyBlockReason(true, preparing, RewardState::kOffered, false)) ==
+          "your reward choice is still pending");
+    CHECK(std::string(ReadyBlockReason(true, preparing, RewardState::kTimedOut, true)) ==
+          "already reported for this stage");
+}
+
+void TestInputSeqFloor() {
+    CHECK(InputSeqFloor(0, 0) == 0);
+    CHECK(InputSeqFloor(10, 4) == 10);
+    CHECK(InputSeqFloor(4, 10) == 10);
+    CHECK(InputSeqFloor(7, 7) == 7);
+}
+
+void TestEnsureGreaterThan() {
+    InputSequencer sequencer;
+    // Raising the counter makes the next report strictly greater than the floor,
+    // so a resumed session never replays a range the server already processed.
+    sequencer.EnsureGreaterThan(7);
+    CHECK(sequencer.LastSequence() == 7);
+    CHECK(sequencer.HasSent());
+    const auto first = sequencer.Tick(InputSample{1, 0});
+    CHECK(first.sequence == 8);
+
+    // A lower floor never rewinds the counter.
+    sequencer.EnsureGreaterThan(3);
+    CHECK(sequencer.Tick(InputSample{}).sequence == 9);
+
+    // Equal floor leaves the next report strictly greater as well.
+    sequencer.EnsureGreaterThan(9);
+    CHECK(sequencer.Tick(InputSample{}).sequence == 10);
+
+    // A fresh session still restarts at 1 unless a floor is applied.
+    sequencer.Reset();
+    CHECK(!sequencer.HasSent());
+    CHECK(sequencer.Tick(InputSample{}).sequence == 1);
+    sequencer.EnsureGreaterThan(0);
+    CHECK(sequencer.Tick(InputSample{}).sequence == 2);
+}
+
+void TestSettleAfterAuthoritativeEnd() {
+    EquipmentTable table;
+    table[1001] = EquipmentDisplay{1001, "Blade", "weapon", "+10 Attack"};
+
+    // Offered but the server already ended the phase: the panel must close so it
+    // cannot block the ready barrier, and the note says who settled it.
+    RewardView offered;
+    offered.SetOptions({1001}, 500, table);
+    CHECK(offered.State() == RewardState::kOffered);
+    offered.SettleAfterAuthoritativeEnd();
+    CHECK(offered.State() == RewardState::kTimedOut);
+    CHECK(offered.Note().find("server settled") != std::string::npos);
+    CHECK(!offered.Active());
+
+    // Same for a choice awaiting its acknowledgement.
+    RewardView chosen;
+    chosen.SetOptions({1001}, 500, table);
+    std::uint32_t id = 0;
+    CHECK(chosen.ChooseByIndex(0, id));
+    CHECK(chosen.State() == RewardState::kChosen);
+    chosen.SettleAfterAuthoritativeEnd();
+    CHECK(chosen.State() == RewardState::kTimedOut);
+
+    // Already-settled and never-offered panels are untouched.
+    RewardView applied;
+    applied.SetOptions({1001}, 500, table);
+    applied.ApplyResult(true, 1001, 0);
+    const std::string applied_note = applied.Note();
+    applied.SettleAfterAuthoritativeEnd();
+    CHECK(applied.State() == RewardState::kApplied);
+    CHECK(applied.Note() == applied_note);
+
+    RewardView rejected;
+    rejected.SetOptions({1001}, 500, table);
+    rejected.ApplyResult(false, 1001, 7);
+    rejected.SettleAfterAuthoritativeEnd();
+    CHECK(rejected.State() == RewardState::kRejected);
+
+    RewardView idle;
+    CHECK(idle.State() == RewardState::kNone);
+    idle.SettleAfterAuthoritativeEnd();
+    CHECK(idle.State() == RewardState::kNone);
+}
+
 }  // namespace
 
 int main() {
@@ -513,6 +695,15 @@ int main() {
     TestMovementPredictorReconciliation();
     TestStepMovementRules();
     TestSnapshotInterpolation();
+    TestStageStateWireValues();
+    TestAuthoritativeRewardPhaseEnded();
+    TestRewardSettledStates();
+    TestCanSendInputGating();
+    TestCanReportReadyGating();
+    TestReadyBlockReasons();
+    TestInputSeqFloor();
+    TestEnsureGreaterThan();
+    TestSettleAfterAuthoritativeEnd();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

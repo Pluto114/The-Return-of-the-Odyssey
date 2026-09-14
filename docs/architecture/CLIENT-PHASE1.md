@@ -2,8 +2,9 @@
 
 状态（第二周 D4–D9 客户端侧已完成，A5 缺口硬化进行中）：开发分支 `feature/week2-client-hardening`（基于集成后的 main）。
 战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
-（`ctest` 五套件；`odyssey_logic_tests` 158 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
-A5 硬化进度：C-g（端点配置化）已完成；C-a/C-b/C-d/C-e/C-f 见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
+（`ctest` 五套件；`odyssey_logic_tests` 233 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
+A5 硬化进度：C-a（Ready 门控）、C-e（恢复期匹配/续号/输入静默）、C-g（端点配置化）已完成；
+其余见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
 仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
 端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
 
@@ -27,6 +28,7 @@ A5 硬化进度：C-g（端点配置化）已完成；C-a/C-b/C-d/C-e/C-f 见 [W
 | 奖励视图 | `client/src/sync/RewardView.h` | 奖励选项/选择/超时/Applied 状态；本地静态装备显示表（可选文件） |
 | 恢复状态机 | `client/src/sync/RecoveryState.h` | 有界退避重连、Resume 与全新登录决策、令牌失效处理 |
 | 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | 本地预测+服务器校正（只重放未确认输入）；远端/怪物 10Hz 插值 |
+| 会话/关卡门控 | `client/src/sync/SessionGate.h` | 纯谓词：StageState 与服务器 iota 对齐、可否发输入（需本会话首帧快照）、可否报 Ready（权威 `PreparingNextStage` + 自身奖励结清 + 每关一次）、InputSeq 下界 |
 | 窗口/HUD | `client/src/main.cpp` | 连接/登录/匹配/战斗/奖励/恢复/网络统计 HUD；R 重试；ESC/关窗干净退出 |
 
 构建与自检：
@@ -85,6 +87,7 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 | 5.3 | 开发登录（dev token → Session/Player ID） | ✅ 客户端已实现登录流程（A 网络层支持 dev 登录） | 真实服务器就绪后联调 |
 | 5.4 | 可联调的真实 Go Server + 地址/端口（及 D 的 lobby/匹配） | ⏳ A 网络层可独立起服；Room/匹配未接线 | 用于 D2/D3 验收（stub 只到 D1） |
 | 5.5 | B 域语义（出生/速度/地图/30Hz/InputSeq） | ✅ GAME-CORE-PHASE1 已声明，客户端对齐 | 轴符号与 `move` 方向在联调前确认 |
+| 5.6 | **Ready 屏障的服务端处理**（`MSG_NEXT_STAGE_REQUEST`） | ⏳ 全仓仅存在于 `server/internal/session/session.go` 的合法性表，**无任何 handler 消费**；`PreparingNextStage` 由服务器在奖励轮次 `Complete()` 后自行推进（`server/internal/game/rewards.go`） | C 已按 A5 把发送时机收敛到 `PreparingNextStage`；A 接线后才能做屏障端到端验收 |
 
 ## 6. 输入契约（C → 服务器）
 
@@ -92,7 +95,9 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 - **只发意图，不发坐标/速度/最终结果**。释放按键产生零向量（服务器停止）。
 - 键盘映射：A/D → 服务器平面 x ∓、W/S → y（客户端 x/z 语义）；对角输入归一化到单位圆。
 - 已按 A 的 `PlayerInput{input_seq, client_tick_ms, move(Vec2), aim, shoot}` 编码（`PayloadCodec::EncodePlayerInput`）。
-- 真发门控：需「已登录 + 已入房（MatchFound/Join 回执）」状态；当前 A 服务器未接 Room，先留门控，联调时放开。
+- 真发门控（A5 C-a/C-b/C-e）：需「已登录 + 已入房」且**本会话已收到首帧权威快照**；恢复会话在首帧快照到达前完全静默（不采样、不发包、不喂预测）。
+- Ready 门控（A5 C-a）：只在权威 `stage.state == PreparingNextStage` 且自身奖励已结清（无待选项、无待确认选择）时报一次，按关卡 latch；提前按只产生可见的拦截原因，不发包。
+- 恢复续号（A5 C-e）：Resume 成功后不重发 MatchRequest；恢复会话首帧快照把 InputSeq 抬到 `max(断线前最高已发, last_processed_input)` 之上，绝不重放旧区间。
 
 ## 7. 快照消费契约（服务器 → C）
 

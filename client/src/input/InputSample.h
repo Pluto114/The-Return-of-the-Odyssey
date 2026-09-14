@@ -75,6 +75,15 @@ public:
     bool HasSent() const { return sequence_ > 0; }
     void Reset() { sequence_ = 0; }
 
+    // Resuming a session must not look like a replay: raise the counter so the
+    // next Tick() is strictly greater than every sequence the server has already
+    // processed on that session. Never lowers the counter.
+    void EnsureGreaterThan(std::uint32_t sequence) {
+        if (sequence_ < sequence) {
+            sequence_ = sequence;
+        }
+    }
+
 private:
     std::uint32_t sequence_ = 0;
 };

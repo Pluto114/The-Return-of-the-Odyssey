@@ -74,7 +74,7 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 | 鼠标 | 瞄准方向（相对自身权威位置归一化） |
 | `SPACE` | 射击（按住持续开火，冷却由服务器决定） |
 | `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
-| `ENTER` | Reward 状态下“准备下一关”（Ready 屏障归服务器） |
+| `ENTER` | 报告“准备下一关”：仅当权威状态已是 `PreparingNextStage` 且自身奖励已结清；提前按会显示被拦截原因 |
 | `R` | 失败后手动重连 |
 | `ESC` / 关闭按钮 | 停止网络线程并退出 |
 
@@ -96,13 +96,16 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 ## 已实现（A5 收尾硬化，分支 `feature/week2-client-hardening`）
 
 - **C-g 端点配置化**：`--host`/`--port`/`--server` 与 `ODYSSEY_SERVER_HOST`/`ODYSSEY_SERVER_PORT`，带校验、默认本机、启动日志标注来源（详见上节）
-- 待办：C-a Ready 门控、C-b 阶段输入门控、C-c 药水、C-d 服务器移速预测、C-e 恢复后匹配/续号、C-f 有界等待与令牌轮换
+- **C-a Ready 门控**：只认权威 `PreparingNextStage`（服务器在奖励轮次 `Complete()` 后自行进入该状态）+ 自身奖励已结清，并按关卡一次性 latch；权威状态已结束而本地面板仍挂着（漏收 `RewardApplied`）时会自动收口，避免永久阻塞
+- **C-e 恢复期会话/续号**：Resume 成功后**不再发送 MatchRequest**；每个连接在收到首帧权威快照前**不发输入、不喂预测**；恢复会话的首帧快照会把 InputSeq 抬到 `max(断线前最高已发, LastProcessedInputSeq)` 之上，绝不重放旧区间
+- 待办：C-b 阶段/存活输入门控、C-c 药水、C-d 服务器移速预测、C-f 有界等待与令牌轮换
 
 ## 已知限制 / 依赖
 
 - 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：当前 ID 1–6 与 B 的版本化目录不一致，D 需从 `data/equipment/catalog.json` 生成同源显示数据；
   客户端不从此表推导任何战斗效果。
-- Ready 当前只在 Reward=3 发送，与 B 奖励完成后的 PreparingNextStage=4 不匹配；阶段输入门控、恢复后匹配门控/续号、药水与装备移速预测均按收尾清单修正，尚未宣称真实三关/恢复通过。
+- **`NextStageRequest` 服务器侧尚无处理逻辑**：全仓只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**。
+- 阶段输入门控（仅按 `in_room` + 首帧快照，尚未按存活/阶段细分）、恢复后 Token 轮换（`ResumeResponse` 无新 token 字段，待 A4）、药水与装备移速预测均按收尾清单修正，尚未宣称真实三关/恢复通过。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：
   `EndDrawing()` 只提交绘制，需要显式 `SwapScreenBuffer()`（已在 main/probe 中调用）。
