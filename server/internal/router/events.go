@@ -1,6 +1,7 @@
 package router
 
 import (
+	"log/slog"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -29,13 +30,23 @@ type EventSink interface {
 // shutdown). It performs no network I/O directly — it encodes each event and
 // hands the frame to each player's EventSink.
 type EventDispatcher struct {
-	mu    sync.RWMutex
-	sinks map[entity.ID]EventSink
+	mu     sync.RWMutex
+	sinks  map[entity.ID]EventSink
+	logger *slog.Logger
 }
 
 // NewEventDispatcher returns a dispatcher with no subscribers.
 func NewEventDispatcher() *EventDispatcher {
-	return &EventDispatcher{sinks: make(map[entity.ID]EventSink)}
+	return &EventDispatcher{sinks: make(map[entity.ID]EventSink), logger: slog.Default()}
+}
+
+// SetLogger installs the logger used to report reliable-queue saturation
+// (Send returning false). The default is slog.Default(); a nil logger silences
+// saturation reporting entirely.
+func (d *EventDispatcher) SetLogger(logger *slog.Logger) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.logger = logger
 }
 
 // Subscribe registers (or replaces) the sink for a player. Passing nil
@@ -102,10 +113,20 @@ func (d *EventDispatcher) Dispatch(batch game.EventBatch) {
 // broadcast delivers one already-encoded frame to every subscriber. It takes
 // the lock once per event (not per sink) so a slow sink cannot block the room
 // tick indirectly; Send itself is non-blocking.
+//
+// A sink returning false means its reliable queue is saturated. The sink is
+// responsible for the disconnect (the closingSink closes the slow connection);
+// the dispatcher's job here is to surface the event — not to silently drop it
+// — so saturation is observable as an event_backpressure signal. Delivery to
+// other subscribers is unaffected.
 func (d *EventDispatcher) broadcast(frame []byte) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	for _, sink := range d.sinks {
-		sink.Send(frame)
+		if !sink.Send(frame) {
+			if d.logger != nil {
+				d.logger.Warn("reliable queue saturated, event delivery rejected")
+			}
+		}
 	}
 }

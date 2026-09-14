@@ -40,8 +40,14 @@
 
 ## Reliable Queue
 
-- 有界 FIFO，建议容量 256。
-- 满时策略：丢最早 + metric 报警（**不要**断连，reliable 语义就毁了）。
+- 有界 FIFO，固定容量 256（`network.Connection.out`）。
+- 满时策略（v1 定案）：**宁断勿丢** —— `Send` 非阻塞返回 `false`，由 sink 关闭该
+  慢连接（`closingSink` 异步 `Close`），而不是丢弃最早帧。理由：丢帧会破坏
+  "可靠"语义，让战斗事件（伤害/死亡/清场）静默丢失，客户端终局状态与服务器
+  不一致。
+- 仅关闭出问题的慢连接；同房其他玩家的可靠队列与快照投递不受影响。
+- 饱和必须可观测：dispatcher 在 `Send=false` 时打 `WARN` 日志（`reliable queue
+  saturated`），便于定位 event_backpressure 的根因。
 - v1 不实现补发；v2 才加 `event_seq` + receiver ack。
 
 ## Event Backpressure（对接 B 的 room.EventCapacity）
@@ -55,6 +61,9 @@ B 的房间事件队列有硬上限（默认 64 个 Tick 批次）。当事件�
 2. 收到房间关闭（`Done` 关闭 + `Stats.CloseReason == "event_backpressure"`）时，
    向房内客户端发 `Disconnect(REASON_EVENT_BACKPRESSURE)`，并通知 D 注销房间。
 3. **绝不能**把事件拥塞当作清场/团灭成功路径上报。
+
+> 两个层面要分清：**房间级** `event_backpressure` 是 B 的事件出口溢出，整房关闭；
+> **连接级**可靠队列满（256）是单个慢客户端，只断该连接（宁断勿丢），不拖累房间。
 
 对应 ReasonCode：`REASON_ROOM_CLOSED`(requested) / `REASON_ROOM_IDLE`(idle) /
 `REASON_EVENT_BACKPRESSURE`(event_backpressure)。
@@ -81,7 +90,7 @@ Reliable Queue ──── ► Writer Goroutine ──── ► Socket
 
 - Writer Goroutine 是连接级单例，与 Connection 一起创建、一起销毁。
 - Room Tick 永远不直接调 socket write。
-- 慢客户端：Writer 在 socket blocking 时，Reliable Queue 满 → 丢最早 + 报警；Snapshot Queue 满 → 永远是最新（无损失）。
+- 慢客户端：Writer 在 socket blocking 时，Reliable Queue 满 → 关闭慢连接（宁断勿丢，见上）；Snapshot Queue 满 → 永远是最新（无损失）。
 
 ## v2 待办（不在 v1 范围）
 
