@@ -1,21 +1,21 @@
 # 角色 C 第二阶段（D4–D9 客户端侧）：本地验证记录
 
-日期：2026-09-11。范围：C 的客户端 D4–D9 实现（战斗表现、奖励、恢复、预测/插值），
+日期：2026-09-11。范围：C 的客户端 D4–D9 实现（战斗表现、奖励、恢复、预测/插值）**及 A5 缺口硬化**，
 **不是全组端到端验收**。
-分支：`feature/week2-client-gameplay`（基于 `main` `d4809ce`；团队要求 D4 前先把 `develop` 快进到 `e55dad1`，
-本分支在 develop 就绪后 rebase 即可）。
+分支：D4–D9 原为 `feature/week2-client-gameplay`（基于 `main` `d4809ce`），已并入 `main` `a68acfc`；
+A5 硬化在 `feature/week2-client-hardening`（基于集成后的 `main`）上继续。
 
 ## 已执行检查
 
 | 检查 | 环境 / 结果 |
 | --- | --- |
-| `scripts/build/build.ps1 -Target client` | Windows x64 / MSVC 14.44 / CMake 3.31.6 / Ninja / vcpkg 固定基线；客户端与全部测试目标编译链接通过 |
-| `ctest --test-dir build\client-windows -C Debug` | 4/4 passed（D4–D9 时点）：`odyssey_core_tests`、`odyssey_net_tests`、`odyssey_logic_tests`、`odyssey_protocol_tests`；C-g 已加入第 5 套件 `odyssey_config_tests`（待下次完整构建复核为 5/5） |
+| `scripts/build/build.ps1 -Target client` | Windows x64 / MSVC 14.44 / CMake 3.31.6 / Ninja / vcpkg 固定基线；**含 A5 四处改动后重新配置并构建成功（`[24/24] Linking CXX executable client\odyssey_client.exe`）** |
+| `ctest --test-dir build\client-windows -C Debug` | **5/5 passed**（硬化分支 `cc715c1` 实跑：`odyssey_core_tests` 0.15s、`odyssey_net_tests` 2.35s、`odyssey_logic_tests` 0.16s、`odyssey_config_tests` 0.15s、`odyssey_protocol_tests` 0.20s；合计 3.02s）。D4–D9 时点为 4/4，C-g 补入第 5 套件 |
+| 端点配置手测（C-g） | `odyssey_client.exe --help` 打印用法、不开窗；`--port 0` → `invalid port '0' (expected a decimal number in 1..65535)` + 用法、退出码 2；默认启动打印 `main: server endpoint 127.0.0.1:7777 (source=default)`；`--server 192.168.1.20:7777` → `(source=cli)` |
 | `odyssey_logic_tests` | **297 checks**（D4–D9 的 158 + A5 C-a/C-e 的 75 + C-d 的 39 + C-b 的 25）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV/权威收口）、恢复状态机（退避/拒绝/耗尽）、**tick 驱动预测（每 tick 一步、300Hz 发包不加速、服务器移速、静止、死亡、切关瞬移、异常 tick 限幅、`ClearIntent`）**、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入与拦截原因、可否报 Ready、InputSeq 下界）** |
 | `odyssey_protocol_tests` | 载荷往返：Ping/Pong、Login、Match、PlayerInput(含 aim)、WorldSnapshot(玩家/怪物/Stage/属性)、战斗事件（Spawn/Destroy/Damage/Death/Stage）、奖励（Options/Choice/Applied）、Resume |
 | 端点配置解析（C-g） | `client/tests/config_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**129 checks / 0 failures**；`main()` 序言代理程序实测 default/cli/env 三种来源、非法端口 exit 2、`--help` exit 0 |
-| 会话门控逻辑（C-a/C-e） | `client/tests/gameview_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**233 checks / 0 failures**（较改动前 158 增加 75 项） |
-| tick 驱动预测（C-d） | 同上独立编译运行：**297 checks / 0 failures**（C-d 增 39 项：每 tick 一步、300Hz 发包不加速、服务器移速与非法值拒绝、静止、死亡/复活、切关瞬移、异常 tick 限幅；C-b 再增 25 项：输入门控真值表与拦截原因优先级、`ClearIntent` 防残留） |
+| 逻辑套件（独立编译复现） | `client/tests/gameview_tests.cpp` 用 MSVC 14.44 `/std:c++20 /W4` 单独编译运行，无警告；各提交时点：158（D4–D9）→ 233（C-a/C-e）→ 272（C-d）→ **297（C-b，与 `ctest` 中的 `odyssey_logic_tests` 一致）** |
 | 单帧窗口探针 | `odyssey_window_probe.exe`（红块/蓝圆/文字）用于渲染与事件泵诊断 |
 
 ## 覆盖范围（对照 WEEK2 计划）
