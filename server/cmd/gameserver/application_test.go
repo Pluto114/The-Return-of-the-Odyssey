@@ -25,6 +25,9 @@ type appPeer struct {
 func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// The application loads the versioned equipment catalog from the repo root
+	// (data/equipment/catalog.json) relative to the process working directory.
+	t.Chdir("../../..")
 	app, err := newGameApplication(ctx, logger, metrics.New())
 	if err != nil {
 		t.Fatal(err)

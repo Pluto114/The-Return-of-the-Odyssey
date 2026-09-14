@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/convert"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/equipment"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/lobby"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
@@ -34,6 +37,7 @@ type activeRoom struct {
 	room      *room.Room
 	snapshots *router.SnapshotDispatcher
 	events    *router.EventDispatcher
+	rewards   *router.RewardDispatcher
 	close     *router.CloseWatcher
 }
 
@@ -47,6 +51,7 @@ type gameApplication struct {
 	matcher    *lobby.Matchmaker
 	metrics    *metrics.Metrics
 	roomConfig room.Config
+	catalog    equipment.Catalog
 
 	mu          sync.Mutex
 	connections map[*network.Connection]*session.Session
@@ -60,6 +65,13 @@ func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Met
 	if err != nil {
 		return nil, err
 	}
+	catalog, err := loadEquipmentCatalog(logger)
+	if err != nil {
+		// The reward phase cannot start without a valid catalog. A missing or
+		// malformed catalog is a startup failure (D6 requires the single
+		// versioned config source to fail fast), not a runtime degradation.
+		return nil, err
+	}
 	app := &gameApplication{
 		ctx:         ctx,
 		ids:         &idAllocator{},
@@ -67,12 +79,32 @@ func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Met
 		matcher:     matcher,
 		metrics:     m,
 		roomConfig:  room.DefaultConfig(),
+		catalog:     catalog,
 		connections: make(map[*network.Connection]*session.Session),
 		waiting:     make(map[lobby.PlayerID]*participant),
 		rooms:       make(map[room.ID]*activeRoom),
 	}
 	app.publishMetricsLocked()
 	return app, nil
+}
+
+// loadEquipmentCatalog reads the single versioned equipment config source. The
+// path is relative to the process working directory (server/ when run from the
+// repo root). A missing or invalid file fails startup rather than silently
+// disabling the reward phase.
+func loadEquipmentCatalog(logger *slog.Logger) (equipment.Catalog, error) {
+	const defaultPath = "data/equipment/catalog.json"
+	f, err := os.Open(defaultPath)
+	if err != nil {
+		return equipment.Catalog{}, fmt.Errorf("open equipment catalog %s: %w", defaultPath, err)
+	}
+	defer f.Close()
+	catalog, err := equipment.Parse(f)
+	if err != nil {
+		return equipment.Catalog{}, fmt.Errorf("parse equipment catalog: %w", err)
+	}
+	logger.Info("equipment catalog loaded", "path", defaultPath, "version", catalog.Version(), "items", len(catalog.IDs()))
+	return catalog, nil
 }
 
 func (a *gameApplication) handle(c *network.Connection, h network.Header, payload []byte) error {
@@ -105,6 +137,8 @@ func (a *gameApplication) handle(c *network.Connection, h network.Header, payloa
 		return a.handleMatchCancel(payload, sess)
 	case pb.MessageType_MSG_PLAYER_INPUT:
 		return a.handlePlayerInput(payload, sess)
+	case pb.MessageType_MSG_REWARD_CHOICE:
+		return a.handleRewardChoice(payload, sess)
 	default:
 		return nil
 	}
@@ -197,6 +231,26 @@ func (a *gameApplication) handlePlayerInput(payload []byte, sess *session.Sessio
 	return active.room.Input(room.SessionID(sessionID), input)
 }
 
+// handleRewardChoice routes a client's reward selection to the room. The room
+// resolves the player identity from the trusted Session binding and World
+// validates the choice against the private offer (non-candidate, duplicate,
+// expired, or out-of-state choices are rejected without re-applying modifiers).
+func (a *gameApplication) handleRewardChoice(payload []byte, sess *session.Session) error {
+	var message pb.RewardChoice
+	if err := proto.Unmarshal(payload, &message); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	active := a.rooms[room.ID(sess.RoomID())]
+	a.mu.Unlock()
+	if active == nil {
+		return room.ErrClosed
+	}
+	sessionID, _ := sess.Identity()
+	_, err := active.room.ChooseReward(room.SessionID(sessionID), equipment.ID(message.EquipmentId))
+	return err
+}
+
 func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	roomID := room.ID(a.nextRoomID.Add(1))
 	rm, err := room.Start(a.ctx, roomID, a.roomConfig)
@@ -208,11 +262,13 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		room:      rm,
 		snapshots: router.NewSnapshotDispatcher(),
 		events:    router.NewEventDispatcher(),
+		rewards:   router.NewRewardDispatcher(),
 		close:     router.NewCloseWatcher(),
 	}
 	// Route dispatcher saturation warnings through the application logger so
 	// reliable-queue overflow is observable alongside other server logs (T10).
 	active.events.SetLogger(a.logger)
+	active.rewards.SetLogger(a.logger)
 	active.close.SetLogger(a.logger)
 	active.close.OnClose(func(id room.ID, reason string) {
 		a.mu.Lock()
@@ -227,6 +283,7 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	a.mu.Unlock()
 	go active.snapshots.Run(rm)
 	go active.events.Run(rm)
+	go active.rewards.Run(rm)
 	go active.close.Run(rm)
 	go a.observeTicks(rm)
 
@@ -254,6 +311,7 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		active.snapshots.Subscribe(entity.ID(playerID), p.conn)
 		reliable := closingSink{connection: p.conn}
 		active.events.Subscribe(entity.ID(playerID), reliable)
+		active.rewards.Subscribe(entity.ID(playerID), reliable)
 		active.close.Subscribe(entity.ID(playerID), reliable)
 	}
 	for _, p := range players {
@@ -292,6 +350,12 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		return
 	}
 
+	// Orchestrate the reward round once the stage clears. The room's latest
+	// snapshot is polled on a tick cadence; on the StageClear transition the
+	// room is moved into Reward with the shared equipment catalog. Reward is a
+	// server-owned transition — no client message triggers it.
+	go a.orchestrateReward(rm, roomID)
+
 	oldest := time.Now()
 	for _, p := range players {
 		if p.queuedAt.Before(oldest) {
@@ -326,6 +390,7 @@ func (a *gameApplication) disconnected(c *network.Connection) {
 	if active != nil {
 		active.snapshots.Unsubscribe(entity.ID(playerID))
 		active.events.Unsubscribe(entity.ID(playerID))
+		active.rewards.Unsubscribe(entity.ID(playerID))
 		active.close.Unsubscribe(entity.ID(playerID))
 	}
 	sess.Transition(session.StateDisconnected)
@@ -357,6 +422,47 @@ func (a *gameApplication) leaveRoom(sess *session.Session, rm *room.Room) {
 func (a *gameApplication) observeTicks(rm *room.Room) {
 	for sample := range rm.TickSamples() {
 		a.metrics.ObserveTickWork(sample.WorkDuration)
+	}
+}
+
+// rewardSelectionTicks is the reward-round choice window in server ticks
+// (15s at TickRate=30). Exceeding it makes World apply each player's default
+// (first offered) selection.
+const rewardSelectionTicks = 450
+
+// orchestrateReward moves a cleared room into its reward round exactly once.
+// It polls the room's latest snapshot on a tick cadence and, on the first
+// StageClear observation, submits the trusted StartReward command. It exits
+// when the room closes. A failure to start reward is a server-owned transition
+// error and is logged without crashing the room (the room still tears down via
+// its normal close path).
+func (a *gameApplication) orchestrateReward(rm *room.Room, roomID room.ID) {
+	ticker := time.NewTicker(game.TickInterval)
+	defer ticker.Stop()
+	started := false
+	for {
+		select {
+		case <-rm.Done():
+			return
+		case <-ticker.C:
+			if started {
+				return
+			}
+			latest := rm.LatestSnapshot()
+			if latest.Closed {
+				return
+			}
+			if latest.Stage.State != stage.StageClear {
+				continue
+			}
+			seed := int64(roomID)
+			if _, err := rm.StartReward(a.catalog, seed, rewardSelectionTicks); err != nil {
+				a.logger.Error("start reward failed", "room_id", roomID, "err", err)
+				return
+			}
+			started = true
+			a.logger.Info("reward round started", "room_id", roomID)
+		}
 	}
 }
 
