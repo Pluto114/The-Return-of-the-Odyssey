@@ -35,9 +35,14 @@ struct Theme {
     // Ground / structure.
     Rgba background = RgbaFromHex(0x0A0A10);  // deep purple-black; cleared inside the RT
     Rgba letterbox = RgbaFromHex(0x000000);   // bars around the 960x540 image
+    // The play field sits one step above the clear colour: the spec pins the clear
+    // to #0A0A10, but measuring the rendered frame showed 88% of the play area at
+    // 2% luminance - the arena read as "black with a faint grid" rather than a
+    // place. The floor fill keeps the mandated ground and still defines the field.
+    Rgba arena_floor = RgbaFromHex(0x14141F);
     Rgba panel = RgbaFromHex(0x14141F, 235);
-    Rgba panel_edge = RgbaFromHex(0x2A2A3D);
-    Rgba grid = RgbaFromHex(0x1C1C2B);
+    Rgba panel_edge = RgbaFromHex(0x3C3C58);
+    Rgba grid = RgbaFromHex(0x2A2A44);
 
     // Text.
     Rgba text = RgbaFromHex(0xE8E8F0);

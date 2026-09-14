@@ -27,6 +27,7 @@
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -313,6 +314,31 @@ int main(int argc, char** argv) {
     InitWindow(kScreenWidth, kScreenHeight, "The Return of the Odyssey - Client");
     std::printf("main: after InitWindow\n"); fflush(stdout);
     SetWindowMinSize(kScreenWidth, kScreenHeight);
+    // Start at the largest INTEGER multiple of 960x540 the monitor can show, so the
+    // letterbox bars stay small on a large display. Integer-only scaling is the
+    // design rule (fractional scaling would blur the pixel art); the window can be
+    // resized freely afterwards and the layout recomputes on every resize.
+    int window_w = kScreenWidth;
+    int window_h = kScreenHeight;
+    {
+        const int monitor_w = GetMonitorWidth(GetCurrentMonitor());
+        const int monitor_h = GetMonitorHeight(GetCurrentMonitor());
+        if (monitor_w > kScreenWidth && monitor_h > kScreenHeight) {
+            // Leave room for the title bar and taskbar.
+            const int usable_w = (monitor_w * 95) / 100;
+            const int usable_h = (monitor_h * 90) / 100;
+            const int scale = std::max(1, std::min(usable_w / kScreenWidth, usable_h / kScreenHeight));
+            window_w = kScreenWidth * scale;
+            window_h = kScreenHeight * scale;
+            std::printf("main: monitor %dx%d -> window %dx%d (scale %d)\n", monitor_w, monitor_h,
+                        window_w, window_h, scale);
+        } else {
+            std::printf("main: WARN monitor size %dx%d unknown/too small; keeping %dx%d\n",
+                        monitor_w, monitor_h, window_w, window_h);
+        }
+        std::fflush(stdout);
+        SetWindowSize(window_w, window_h);
+    }
     SetExitKey(KEY_NULL);
     SetTargetFPS(kFps);
 
@@ -329,9 +355,11 @@ int main(int argc, char** argv) {
         std::printf("main: WARN render texture unavailable; drawing straight to the window\n");
         std::fflush(stdout);
     }
-    ViewportLayout layout = ComputeViewportLayout(GetScreenWidth(), GetScreenHeight());
-    std::printf("main: viewport scale=%.0f offset=(%.0f,%.0f)\n", layout.scale, layout.offset_x,
-                layout.offset_y);
+    // Use the window size we just asked for rather than reading it back: the layout
+    // must not depend on how quickly the platform applied the resize.
+    ViewportLayout layout = ComputeViewportLayout(window_w, window_h);
+    std::printf("main: viewport %dx%d scale=%.0f offset=(%.0f,%.0f)\n", GetScreenWidth(),
+                GetScreenHeight(), layout.scale, layout.offset_x, layout.offset_y);
     std::fflush(stdout);
     const Theme theme = kDefaultTheme;
     const AccessibilityConfig accessibility = LoadAccessibility();
@@ -1277,8 +1305,14 @@ int main(int argc, char** argv) {
                 return Vector2{rt.x, rt.y};
             };
 
-            // Floor: a unit grid so the near-black ground still reads as an arena and
-            // movement is legible. The centre lines are slightly brighter.
+            // Floor: the mandated #0A0A10 clear sits under a one-step-lighter fill
+            // (Theme::arena_floor) so the field reads as a place rather than "black
+            // with a faint grid" - measuring the rendered frame showed 88% of the
+            // play area at 2% luminance. The unit grid gives distance judgement and
+            // the centre lines are brighter still.
+            DrawRectangle(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
+                          static_cast<int>(kArenaW), static_cast<int>(kArenaH),
+                          ToRayColor(theme.arena_floor));
             for (int i = 0; i <= 20; ++i) {
                 const Color grid_colour =
                     (i == 10) ? ToRayColor(theme.panel_edge) : ToRayColor(theme.grid);
@@ -1380,13 +1414,29 @@ int main(int argc, char** argv) {
 
             // ---- Game HUD (design 搂3/搂4) ------------------------------------------
             if (hud_phase == HudPhase::kOffline) {
-                // Dim the world first so the banner reads as an interruption.
-                DrawRectangle(0, 0, kScreenWidth, kScreenHeight, Fade(BLACK, 0.45f));
-                const char* reason = recovery.Active() ? recovery.Note().c_str()
-                                                       : "connection lost";
-                std::snprintf(line, sizeof(line), "LINK LOST  -  %s",
-                              SanitizeAscii(reason, ascii_a, sizeof(ascii_a)));
-                DrawRectangle(0, 12, kScreenWidth, 34, Fade(ToRayColor(theme.neon_red), 0.30f));
+                // Dim the world so the banner reads as an interruption. Kept light:
+                // the ground is already near-black, and a heavy dim measured out to a
+                // featureless #050507 across the whole play area.
+                DrawRectangle(0, 0, kScreenWidth, kScreenHeight, Fade(BLACK, 0.20f));
+                // Name the actual state: on a first launch nothing was lost, so
+                // "LINK LOST" would be misleading. The endpoint is included because a
+                // failed connect is the most common playtest symptom.
+                char endpoint_text[96] = {0};
+                std::snprintf(endpoint_text, sizeof(endpoint_text), "%s:%u", endpoint.host.c_str(),
+                              static_cast<unsigned>(endpoint.port));
+                if (recovery.Active()) {
+                    std::snprintf(line, sizeof(line), "LINK LOST  -  %s  (%s)",
+                                  SanitizeAscii(recovery.Note().c_str(), ascii_a, sizeof(ascii_a)),
+                                  endpoint_text);
+                } else if (demo.state == ConnectionState::kFailed) {
+                    std::snprintf(line, sizeof(line), "CONNECTION FAILED  -  %s", endpoint_text);
+                } else if (demo.state == ConnectionState::kConnecting) {
+                    std::snprintf(line, sizeof(line), "CONNECTING  -  %s", endpoint_text);
+                } else {
+                    std::snprintf(line, sizeof(line), "NOT CONNECTED  -  %s", endpoint_text);
+                }
+                DrawRectangle(0, 12, kScreenWidth, 34, Fade(ToRayColor(theme.neon_red), 0.45f));
+                DrawRectangleLines(0, 12, kScreenWidth, 34, ToRayColor(theme.neon_red));
                 DrawHudText(line, CenteredTextX(line, 20), 18, 20, ToRayColor(theme.text));
                 if (recovery.Phase() == RecoveryPhase::kExhausted ||
                     recovery.Phase() == RecoveryPhase::kFailed) {

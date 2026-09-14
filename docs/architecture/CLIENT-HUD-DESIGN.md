@@ -69,6 +69,8 @@ stdout 周期性/事件日志（每 120 帧、login/match/first snapshot/stage e
 
 **世界几何（已定）**：竞技场**居中放大**为 `480×480 @ (240,30)`（世界是 [0,20]² 正方形；原 `340×280 @ (560,190)` 偏右是为 Phase 1 的左侧诊断列让位，诊断收进 F1 后不再需要）。只改 `kArenaView`/`kArena*` 一处常量，坐标变换代码不变。
 
+**启动窗口（已定）**：保持**整数缩放**，但启动时取显示器能容纳的**最大整数倍**（1920×1080 显示器取 2×，即 1920×1080；实测 1155×918 窗口在 scale=1 下上下各浪费 ~170px 黑边）。窗口仍可自由缩放，`IsWindowResized()` 每次重算 layout；窗口小于 960×540 时按 `max(1, …)` 裁切属已知边界（`SetWindowMinSize` 已尽量阻止）。
+
 ---
 
 ## 4. 状态矩阵（优先级自上而下）
@@ -108,8 +110,10 @@ stdout 周期性/事件日志（每 120 帧、login/match/first snapshot/stage e
 
 | 项目 | 规范 |
 | --- | --- |
-| 底色 | `theme.background` `#0A0A10`（RT 内清屏）；Letterbox 用 `theme.letterbox`；默认帧缓冲再清一次 |
-| 战斗地板 | `theme.grid` 单位网格（中线 `panel_edge` 提亮） |
+| 底色 | `theme.background` `#0A0A10`（RT 内清屏，提示词钉死）；Letterbox 用 `theme.letterbox`；默认帧缓冲再清一次 |
+| 战斗地板 | `theme.arena_floor` `#14141F` 填充在 `#0A0A10` 之上（实测：只留底色时 88% 游玩区域亮度仅 2%，观感是"黑屏 + 一层看不见的网格"）；其上叠 `theme.grid` `#2A2A44` 单位网格（中线 `panel_edge` `#3C3C58` 提亮） |
+| 亮度阶梯（相对值，Luma/255） | background 10.7 → arena_floor 21.3 → grid 45.0 → panel_edge 63.2，单调递增；单测断言这条阶梯，防止有人把地板调回与底色相同 |
+| 离线压暗 | `Fade(BLACK, 0.20)`（原 0.45；暗底再重压会让整个游玩区落到 `#050507`） |
 | 文字 | 主 `theme.text`、次 `text_dim`、警告 `text_warn`、危险/断线 `text_danger` |
 | 霓虹强调 | `neon_cyan`（正常连接/自己/瞄准线）、`neon_magenta`（过渡横幅）、`neon_yellow`（受击环/奖励标题）、`neon_red`（怪物血条） |
 | 实体 | 自己 `player`、队友 `peer`、怪物 `monster`、尸体 `dead`、弹丸 `projectile` |

@@ -1451,6 +1451,20 @@ void TestThemePaletteAndAccessibility() {
     CHECK(theme.background.b == 0x10u);
     CHECK(theme.background.a == 255u);
     CHECK(theme.letterbox == RgbaFromHex(0x000000));
+    // The play field must be visibly above the mandated clear colour, otherwise the
+    // arena reads as "black with a faint grid" (measured: 88% of the play area at 2%
+    // luminance before this was added).
+    const int background_luma = 299 * theme.background.r + 587 * theme.background.g +
+                                114 * theme.background.b;
+    const int floor_luma =
+        299 * theme.arena_floor.r + 587 * theme.arena_floor.g + 114 * theme.arena_floor.b;
+    const int grid_luma = 299 * theme.grid.r + 587 * theme.grid.g + 114 * theme.grid.b;
+    const int edge_luma =
+        299 * theme.panel_edge.r + 587 * theme.panel_edge.g + 114 * theme.panel_edge.b;
+    CHECK(floor_luma > background_luma);
+    CHECK(grid_luma > floor_luma);
+    CHECK(edge_luma > grid_luma);
+    CHECK(theme.text.a == 255u);
     // Panels are translucent so the world shows through.
     CHECK(theme.panel.a == 235u);
     // Accents stay distinct (a copy/paste slip would collapse two neon colours).
