@@ -19,22 +19,29 @@ import (
 // Config holds the runtime configuration for the gameserver. Field names map
 // 1:1 to the ODYSSEY_* environment keys in configs/.env.example.
 type Config struct {
-	Env              string // development | production
-	TCPAddr          string
-	AdminAddr        string
-	MetricsAddr      string
-	PprofAddr        string
-	TickHz           int
-	SnapshotHz       int
-	AIHz             int
-	LogLevel         string
-	MySQLDSN         string
-	RedisAddr        string
-	RedisPass        string
-	RedisDB          int
-	ResumeEnabled    bool
-	ResumeTTLSeconds int
-	RedisOperationMS int
+	Env                      string // development | production
+	TCPAddr                  string
+	AdminAddr                string
+	MetricsAddr              string
+	PprofAddr                string
+	TickHz                   int
+	SnapshotHz               int
+	AIHz                     int
+	LogLevel                 string
+	MySQLDSN                 string
+	RedisAddr                string
+	RedisPass                string
+	RedisDB                  int
+	ResumeEnabled            bool
+	ResumeTTLSeconds         int
+	RedisOperationMS         int
+	ResultsEnabled           bool
+	ResultQueueCapacity      int
+	ResultMaxAttempts        int
+	ResultAttemptTimeoutMS   int
+	ResultRetryBackoffMS     int
+	ResultShutdownTimeoutSec int
+	ResultDeadLetterPath     string
 
 	EquipmentCatalogPath       string
 	RewardDurationSec          int
@@ -73,6 +80,13 @@ func Default() *Config {
 		ResumeEnabled:              false,
 		ResumeTTLSeconds:           30,
 		RedisOperationMS:           2000,
+		ResultsEnabled:             false,
+		ResultQueueCapacity:        256,
+		ResultMaxAttempts:          3,
+		ResultAttemptTimeoutMS:     2000,
+		ResultRetryBackoffMS:       100,
+		ResultShutdownTimeoutSec:   5,
+		ResultDeadLetterPath:       "var/odyssey/result-dead-letter.jsonl",
 		EquipmentCatalogPath:       "data/equipment/catalog.json",
 		RewardDurationSec:          10,
 		StageLimit:                 3,
@@ -142,6 +156,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Env == "production" && !c.ResumeEnabled {
 		return fmt.Errorf("config: ODYSSEY_RESUME_ENABLED must be true in production")
+	}
+	if c.Env == "production" && !c.ResultsEnabled {
+		return fmt.Errorf("config: ODYSSEY_RESULTS_ENABLED must be true in production")
+	}
+	if c.ResultsEnabled && (strings.TrimSpace(c.MySQLDSN) == "" || c.ResultQueueCapacity < 1 || c.ResultQueueCapacity > 100000 ||
+		c.ResultMaxAttempts < 1 || c.ResultMaxAttempts > 100 || c.ResultAttemptTimeoutMS < 10 || c.ResultAttemptTimeoutMS > 30000 ||
+		c.ResultRetryBackoffMS < 0 || c.ResultRetryBackoffMS > 30000 || c.ResultShutdownTimeoutSec < 1 ||
+		strings.TrimSpace(c.ResultDeadLetterPath) == "") {
+		return fmt.Errorf("config: enabled result persistence has invalid MySQL, queue, retry, timeout, shutdown, or dead-letter settings")
 	}
 	if c.ResumeEnabled {
 		if strings.TrimSpace(c.RedisAddr) == "" || c.RedisDB < 0 || c.ResumeTTLSeconds < 1 || c.ResumeTTLSeconds > 3600 || c.RedisOperationMS < 10 || c.RedisOperationMS > 30000 {
@@ -239,6 +262,20 @@ func applyKey(cfg *Config, key, val string) {
 		applyInt(cfg, key, val, &cfg.ResumeTTLSeconds)
 	case "ODYSSEY_REDIS_OPERATION_TIMEOUT_MS":
 		applyInt(cfg, key, val, &cfg.RedisOperationMS)
+	case "ODYSSEY_RESULTS_ENABLED":
+		applyBool(cfg, key, val, &cfg.ResultsEnabled)
+	case "ODYSSEY_RESULT_QUEUE_CAPACITY":
+		applyInt(cfg, key, val, &cfg.ResultQueueCapacity)
+	case "ODYSSEY_RESULT_MAX_ATTEMPTS":
+		applyInt(cfg, key, val, &cfg.ResultMaxAttempts)
+	case "ODYSSEY_RESULT_ATTEMPT_TIMEOUT_MS":
+		applyInt(cfg, key, val, &cfg.ResultAttemptTimeoutMS)
+	case "ODYSSEY_RESULT_RETRY_BACKOFF_MS":
+		applyInt(cfg, key, val, &cfg.ResultRetryBackoffMS)
+	case "ODYSSEY_RESULT_SHUTDOWN_TIMEOUT_SEC":
+		applyInt(cfg, key, val, &cfg.ResultShutdownTimeoutSec)
+	case "ODYSSEY_RESULT_DEAD_LETTER_PATH":
+		cfg.ResultDeadLetterPath = val
 	case "ODYSSEY_EQUIPMENT_CATALOG":
 		cfg.EquipmentCatalogPath = val
 	case "ODYSSEY_REWARD_DURATION_SEC":

@@ -168,6 +168,7 @@ func TestValidateResumeProductionPolicy(t *testing.T) {
 		t.Fatal("production accepted disabled Resume store")
 	}
 	cfg.ResumeEnabled = true
+	cfg.ResultsEnabled = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid production Resume config rejected: %v", err)
 	}
@@ -182,6 +183,31 @@ func TestValidateResumeProductionPolicy(t *testing.T) {
 		if err := candidate.Validate(); err == nil {
 			t.Errorf("unsafe Resume config accepted: %+v", candidate)
 		}
+	}
+}
+
+func TestLoadAndValidateResultPersistenceConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := "ODYSSEY_RESULTS_ENABLED=true\nODYSSEY_RESULT_QUEUE_CAPACITY=64\n" +
+		"ODYSSEY_RESULT_MAX_ATTEMPTS=5\nODYSSEY_RESULT_ATTEMPT_TIMEOUT_MS=800\n" +
+		"ODYSSEY_RESULT_RETRY_BACKOFF_MS=25\nODYSSEY_RESULT_SHUTDOWN_TIMEOUT_SEC=9\n" +
+		"ODYSSEY_RESULT_DEAD_LETTER_PATH=var/test-results.jsonl\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ResultsEnabled || cfg.ResultQueueCapacity != 64 || cfg.ResultMaxAttempts != 5 ||
+		cfg.ResultAttemptTimeoutMS != 800 || cfg.ResultRetryBackoffMS != 25 || cfg.ResultShutdownTimeoutSec != 9 ||
+		cfg.ResultDeadLetterPath != "var/test-results.jsonl" {
+		t.Fatalf("loaded result persistence config = %+v", cfg)
+	}
+	cfg.ResultQueueCapacity = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("invalid result queue capacity accepted")
 	}
 }
 

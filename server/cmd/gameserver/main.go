@@ -95,10 +95,30 @@ func main() {
 		app.setResumeTokenStore(resumeService.Store(), resumeTTL)
 		logger.Info("Resume storage ready", "ttl_seconds", cfg.ResumeTTLSeconds)
 	}
+	var resultService *persistence.ResultService
+	if cfg.ResultsEnabled {
+		resultService, err = persistence.OpenResultService(ctx, persistence.ResultServiceOptions{
+			Store: persistence.ResultStoreOptions{DSN: cfg.MySQLDSN, OperationTimeout: time.Duration(cfg.ResultAttemptTimeoutMS) * time.Millisecond, ApplyMigrations: true},
+			Writer: persistence.ResultWriterOptions{QueueCapacity: cfg.ResultQueueCapacity, MaxAttempts: cfg.ResultMaxAttempts,
+				AttemptTimeout: time.Duration(cfg.ResultAttemptTimeoutMS) * time.Millisecond, RetryBackoff: time.Duration(cfg.ResultRetryBackoffMS) * time.Millisecond},
+			DeadLetterPath: cfg.ResultDeadLetterPath,
+		})
+		if err != nil {
+			_ = resumeService.Close()
+			logger.Error("failed to initialize result persistence", "err", err)
+			os.Exit(1)
+		}
+		app.setResultWriter(resultService.Writer())
+		logger.Info("result persistence ready", "queue_capacity", cfg.ResultQueueCapacity)
+		go observeResultMetrics(ctx, resultService.Writer(), metricSet)
+	}
 	srv := network.NewServer(app.handle, logger)
 	srv.OnDisconnect(app.disconnected)
 	ln, err := net.Listen("tcp", cfg.TCPAddr)
 	if err != nil {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ResultShutdownTimeoutSec)*time.Second)
+		_ = resultService.Shutdown(shutdownContext)
+		cancel()
 		_ = resumeService.Close()
 		logger.Error("failed to listen", "addr", cfg.TCPAddr, "err", err)
 		os.Exit(1)
@@ -118,6 +138,9 @@ func main() {
 	}), time.Second)
 	if err != nil {
 		_ = ln.Close()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ResultShutdownTimeoutSec)*time.Second)
+		_ = resultService.Shutdown(shutdownContext)
+		cancel()
 		_ = resumeService.Close()
 		logger.Error("failed to initialize Admin API", "err", err)
 		os.Exit(1)
@@ -145,7 +168,38 @@ func main() {
 	_ = metricsServer.Shutdown(shutdownCtx)
 	_ = adminHTTPServer.Shutdown(shutdownCtx)
 	_ = pprofServer.Shutdown(shutdownCtx)
+	resultShutdownCtx, resultCancel := context.WithTimeout(context.Background(), time.Duration(cfg.ResultShutdownTimeoutSec)*time.Second)
+	if err := resultService.Shutdown(resultShutdownCtx); err != nil {
+		logger.Error("result persistence shutdown incomplete", "err", err, "stats", resultService.Writer().Stats())
+	} else if resultService != nil {
+		logger.Info("result persistence drained", "stats", resultService.Writer().Stats())
+	}
+	resultCancel()
 	_ = resumeService.Close()
+}
+
+func observeResultMetrics(ctx context.Context, writer *persistence.ResultWriter, metricSet *metrics.Metrics) {
+	var previous metrics.ResultWriterSnapshot
+	publish := func() {
+		stats := writer.Stats()
+		current := metrics.ResultWriterSnapshot{QueueDepth: stats.QueueDepth, InFlight: stats.InFlight, Persisted: stats.Persisted,
+			Idempotent: stats.Idempotent, Retries: stats.Retries, Failed: stats.Failed, Rejected: stats.Rejected,
+			DeadLetterFailures: stats.DeadLetterFailures}
+		_ = metricSet.SetResultWriterSnapshot(current, previous)
+		previous = current
+	}
+	publish()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			publish()
+			return
+		case <-ticker.C:
+			publish()
+		}
+	}
 }
 
 func observeNetworkMetrics(ctx context.Context, server *network.Server, metricSet *metrics.Metrics) {

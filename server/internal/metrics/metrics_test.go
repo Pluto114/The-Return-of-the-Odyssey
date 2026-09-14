@@ -57,6 +57,10 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 	}
 	metrics.ObserveQueueDelta(QueueDelta{RoomRejections: 1, RejectedInputs: 2, DroppedSnapshots: 3,
 		DroppedTickSamples: 4, NetworkReliableRejected: 5, NetworkSnapshotReplaced: 6})
+	if err := metrics.SetResultWriterSnapshot(ResultWriterSnapshot{QueueDepth: 2, InFlight: 1, Persisted: 3,
+		Idempotent: 1, Retries: 2, Failed: 1, Rejected: 4}, ResultWriterSnapshot{}); err != nil {
+		t.Fatal(err)
+	}
 
 	body := scrape(t, metrics)
 	for _, sample := range []string{
@@ -89,6 +93,11 @@ func TestMetricsExposeApplicationState(t *testing.T) {
 		"odyssey_room_dropped_tick_samples_total 4",
 		"odyssey_network_reliable_queue_rejections_total 5",
 		"odyssey_network_snapshot_replacements_total 6",
+		"odyssey_result_queue_depth 2",
+		"odyssey_result_writes_in_flight 1",
+		`odyssey_result_writes_total{result="persisted"} 3`,
+		`odyssey_result_writes_total{result="retry"} 2`,
+		`odyssey_result_writes_total{result="failed"} 1`,
 	} {
 		if !strings.Contains(body, sample) {
 			t.Errorf("scrape does not contain %q", sample)

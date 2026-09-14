@@ -33,6 +33,7 @@ dashboard/dist/
 *.prof
 *.test
 coverage.out
+/var/
 
 # Reproducible protocol outputs; proto/ is the source of truth
 server/generated/protocol/*.pb.go

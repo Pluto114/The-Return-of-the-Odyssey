@@ -36,3 +36,21 @@ pwsh -File scripts/test/integration.ps1 -Target persistence
 - 消费后校验 Session/Player/Room/连接代次，旧 Connection 不得继续提交输入、Ready 或奖励。
 - 绑定新连接后查询 `Room.ResumeState` 并先发完整快照；若绑定或发送失败，由 A 定义是否签发替代 Token。
 - 调用 `ObserveReconnect` 映射 success/invalid_token/expired/backend_error，日志只记录固定原因与 Session/Room ID。
+
+## MySQL 对局结果
+
+`ResultEnvelope` 在 Room 销毁前绑定稳定的 `match_id`、`room_id` 与 B 的 `GameResult`。`ResultWriter.Submit` 只做校验、深拷贝和非阻塞入队，队列有界；Room Tick 不连接 MySQL，也不会等待数据库。队列满会明确返回 `ErrResultQueueFull`，由 A 的终局编排决定暂停销毁或记录处置，不能静默丢弃。
+
+后台单 Worker 使用有界超时和重试写入 `match_results` 与 `match_players`。`match_id` 是主键，版本化结果内容的 SHA-256 用于区分安全重放与同 ID 异内容冲突：相同内容返回 `PersistIdempotent`，不同内容返回 `ErrResultConflict`。耗尽重试和永久冲突写入权限为 `0600` 的 JSONL 死信文件，便于人工核对和补偿。
+
+`ODYSSEY_RESULTS_ENABLED=false` 时开发入口不连接 MySQL；`production` 强制启用。启动会执行有界 `PING` 和内嵌迁移，失败则在监听端口前停止。退出时先停止接收并在 `ODYSSEY_RESULT_SHUTDOWN_TIMEOUT_SEC` 内排空，再关闭 MySQL 和死信文件。Prometheus 提供 `odyssey_result_queue_depth`、`odyssey_result_writes_in_flight` 以及带固定 `result` 标签的 `odyssey_result_writes_total`。
+
+真实 Redis 与 MySQL 验证统一执行：
+
+```powershell
+pwsh -File scripts/test/integration.ps1 -Target persistence
+```
+
+待 A 在唯一终局路由中调用 `Submit`；必须复用同一个 `match_id` 重试，并在确认入队前保留结果信封。当前 D 侧存储完成不代表正式三关流程已经产生结算。
+
+本周最小表保存对局、结算 JSON 与每名玩家的终局属性/装备快照。跨局 `PlayerProgress` 和 `EquipmentOwnership` 暂缓到账号身份与成长规则冻结后实现，避免用临时 Player ID 建立不可迁移的长期数据；这不影响本周 MatchHistory/GameResult 的恰好一次验收。

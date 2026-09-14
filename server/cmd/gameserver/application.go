@@ -78,6 +78,9 @@ type gameApplication struct {
 	recentDirector []admin.DirectorDecision
 	resumeTokens   resumeTokenRepository
 	resumeGrace    time.Duration
+	resultWriter   interface {
+		Submit(persistence.ResultEnvelope) error
+	}
 }
 
 func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics) (*gameApplication, error) {
@@ -579,6 +582,12 @@ func (a *gameApplication) setResumeTokenStore(store resumeTokenRepository, grace
 	a.resumeTokens = store
 	a.resumeGrace = grace
 	a.mu.Unlock()
+}
+
+func (a *gameApplication) setResultWriter(writer interface {
+	Submit(persistence.ResultEnvelope) error
+}) {
+	a.resultWriter = writer
 }
 
 func (a *gameApplication) adminSnapshot() admin.Snapshot {

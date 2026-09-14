@@ -103,6 +103,17 @@ type QueueDelta struct {
 	NetworkSnapshotReplaced uint64
 }
 
+type ResultWriterSnapshot struct {
+	QueueDepth         int
+	InFlight           int64
+	Persisted          uint64
+	Idempotent         uint64
+	Retries            uint64
+	Failed             uint64
+	Rejected           uint64
+	DeadLetterFailures uint64
+}
+
 // Metrics centralizes the project's collector definitions and registry. Its
 // methods are safe for concurrent use through the Prometheus collectors.
 type Metrics struct {
@@ -140,6 +151,9 @@ type Metrics struct {
 	droppedTickSamples          prometheus.Counter
 	networkReliableRejected     prometheus.Counter
 	networkSnapshotReplaced     prometheus.Counter
+	resultQueueDepth            prometheus.Gauge
+	resultInFlight              prometheus.Gauge
+	resultWrites                *prometheus.CounterVec
 }
 
 // New creates an isolated registry containing Go/process collectors and the
@@ -237,6 +251,10 @@ func New() *Metrics {
 		droppedTickSamples:          newCounter("room_dropped_tick_samples_total", "Total lossy Room tick samples dropped before metrics consumption."),
 		networkReliableRejected:     newCounter("network_reliable_queue_rejections_total", "Total reliable network sends rejected by a full or closed queue."),
 		networkSnapshotReplaced:     newCounter("network_snapshot_replacements_total", "Total stale network snapshots replaced by a newer snapshot."),
+		resultQueueDepth:            newGauge("result_queue_depth", "Current asynchronous result queue depth."),
+		resultInFlight:              newGauge("result_writes_in_flight", "Current asynchronous result writes in flight."),
+		resultWrites: prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "odyssey", Name: "result_writes_total",
+			Help: "Asynchronous result writer outcomes by bounded result."}, []string{"result"}),
 	}
 
 	registry.MustRegister(
@@ -274,13 +292,45 @@ func New() *Metrics {
 		result.droppedTickSamples,
 		result.networkReliableRejected,
 		result.networkSnapshotReplaced,
+		result.resultQueueDepth,
+		result.resultInFlight,
+		result.resultWrites,
 	)
 	result.stageResults.WithLabelValues(string(StageResultCleared))
 	result.stageResults.WithLabelValues(string(StageResultDefeated))
 	for _, reward := range []RewardResult{RewardOffered, RewardChosen, RewardDefaulted, RewardInvalid} {
 		result.rewards.WithLabelValues(string(reward))
 	}
+	for _, outcome := range []string{"persisted", "idempotent", "retry", "failed", "rejected", "dead_letter_failure"} {
+		result.resultWrites.WithLabelValues(outcome)
+	}
 	return result
+}
+
+func (m *Metrics) SetResultWriterSnapshot(current, previous ResultWriterSnapshot) error {
+	if current.QueueDepth < 0 || current.InFlight < 0 {
+		return ErrInvalidQueueSnapshot
+	}
+	m.resultQueueDepth.Set(float64(current.QueueDepth))
+	m.resultInFlight.Set(float64(current.InFlight))
+	for result, delta := range map[string]uint64{
+		"persisted":           counterDelta(current.Persisted, previous.Persisted),
+		"idempotent":          counterDelta(current.Idempotent, previous.Idempotent),
+		"retry":               counterDelta(current.Retries, previous.Retries),
+		"failed":              counterDelta(current.Failed, previous.Failed),
+		"rejected":            counterDelta(current.Rejected, previous.Rejected),
+		"dead_letter_failure": counterDelta(current.DeadLetterFailures, previous.DeadLetterFailures),
+	} {
+		m.resultWrites.WithLabelValues(result).Add(float64(delta))
+	}
+	return nil
+}
+
+func counterDelta(current, previous uint64) uint64 {
+	if current < previous {
+		return current
+	}
+	return current - previous
 }
 
 func newGauge(name, help string) prometheus.Gauge {

@@ -90,6 +90,8 @@ go run ./server/cmd/gameserver -env server/configs/.env
 
 开发阶段 A4 尚未接线时可保持 `ODYSSEY_RESUME_ENABLED=false`。需要验证 Redis 装配时，先启动 Compose，再设为 `true`；服务端会在监听 TCP 前执行有界 Redis `PING`，失败即停止启动。`production` 环境禁止关闭 Resume 存储。Token TTL 与未来 A4 的断线宽限期共用 `ODYSSEY_RESUME_TTL_SEC`。
 
+终局路由尚未接线时，开发环境可保持 `ODYSSEY_RESULTS_ENABLED=false`。验证 MySQL 结算时设为 `true`；服务端会在监听前连接 MySQL、应用内嵌迁移并启动有界异步队列。`production` 禁止关闭结果持久化。队列、重试、单次写入超时、退出排空时限和 JSONL 死信路径均在 `server/configs/.env.example` 中配置，死信目录默认位于被 Git 忽略的 `var/`。
+
 Go Modules 会下载并验证依赖。首次初始化后生成的 go.sum、npm 锁文件要提交。
 Go 官方代理连通性不足时，可以在自己的终端配置可信 GOPROXY；不要在项目中关闭 GOSUMDB 或硬编码个人代理。
 如果浏览器可访问 GitHub 而 git/Go/npm 超时，且 Windows 已配置可用的系统代理，可在当前 PowerShell 会话先执行 `. ./scripts/env.ps1 -UseSystemProxy`，再重试上述命令；此选项读取现有代理，不写全局配置或提交个人代理地址。
