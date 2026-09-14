@@ -381,12 +381,17 @@ void TestRecoveryStateFlow() {
     recovery.OnConnected();
     CHECK(recovery.Phase() == RecoveryPhase::kResuming);
     CHECK(recovery.WantsResumeRequest());
-    recovery.MarkResumeSent();
+    CHECK(!recovery.HandshakePending());
+    recovery.MarkResumeSent(5.0);
     CHECK(!recovery.WantsResumeRequest());    // exactly one per connection
+    CHECK(recovery.HandshakePending());
+    CHECK(std::fabs(recovery.HandshakeSecondsLeft(6.0) -
+                    (RecoveryState::kHandshakeTimeoutSeconds - 1.0)) < kEps);
 
     recovery.OnResumeResult(true);
     CHECK(recovery.Phase() == RecoveryPhase::kRestored);
     CHECK(!recovery.Active());
+    CHECK(!recovery.HandshakePending());
     CHECK(recovery.Attempts() == 0);
 
     // Refused token: cleared so the caller performs a fresh login and never
@@ -409,16 +414,108 @@ void TestRecoveryStateFlow() {
         CHECK(exhausted.ShouldRetry(now));
         exhausted.MarkRetryStarted(now);
         now += RecoveryState::kMaxBackoffSeconds;  // past this attempt's slot
+        exhausted.OnDisconnect(now);               // attempt failed
         if (i + 1 < RecoveryState::kMaxAttempts) {
-            exhausted.OnDisconnect(now);           // attempt failed
             now += RecoveryState::kMaxBackoffSeconds;  // wait out the backoff
         }
     }
     CHECK(exhausted.Exhausted());
+    // A5 item C-f: the bound is a real terminal state, not a silent stall.
+    CHECK(exhausted.Phase() == RecoveryPhase::kExhausted);
     CHECK(!exhausted.ShouldRetry(now + 1000.0));
+    CHECK(exhausted.Note().find("press R") != std::string::npos);
 
     recovery.Reset();
     CHECK(recovery.Phase() == RecoveryPhase::kIdle);
+    CHECK(!recovery.HandshakePending());
+    CHECK(recovery.Attempts() == 0);
+}
+
+void TestRecoveryHandshakeTimeout() {
+    // A ResumeRequest that is never answered must not leave the client waiting
+    // forever on a connection that is silently useless (A5 item C-f).
+    RecoveryState recovery;
+    recovery.SetToken({1, 2, 3});
+    recovery.OnDisconnect(0.0);
+    recovery.MarkRetryStarted(0.0);
+    recovery.OnConnected();
+    recovery.MarkResumeSent(10.0);
+
+    CHECK(!recovery.HandshakeTimedOut(10.0 + RecoveryState::kHandshakeTimeoutSeconds - 0.1));
+    CHECK(recovery.HandshakeTimedOut(10.0 + RecoveryState::kHandshakeTimeoutSeconds));
+    CHECK(recovery.HandshakeTimedOut(10.0 + RecoveryState::kHandshakeTimeoutSeconds + 0.1));
+
+    recovery.OnHandshakeTimeout(10.0 + RecoveryState::kHandshakeTimeoutSeconds);
+    CHECK(recovery.Phase() == RecoveryPhase::kFailed);
+    CHECK(!recovery.HasToken());
+    CHECK(!recovery.HandshakePending());
+    // The connection attempt counted once and the silent handshake counts again:
+    // both consume the same bounded budget.
+    CHECK(recovery.Attempts() == 2);
+    CHECK(recovery.Note().find("logging in again") != std::string::npos);
+    // The timeout is no longer reported once handled.
+    CHECK(!recovery.HandshakeTimedOut(10.0 + 100.0));
+
+    // A fresh LoginRequest is itself bounded: repeated silence exhausts the same
+    // attempt budget instead of looping forever.
+    RecoveryState silent_login;
+    silent_login.OnConnected();  // no token -> fresh login
+    CHECK(silent_login.Phase() == RecoveryPhase::kConnecting);
+    double now = 0.0;
+    int timeouts = 0;
+    while (silent_login.Phase() != RecoveryPhase::kExhausted && timeouts < 20) {
+        silent_login.MarkLoginSent(now);
+        now += RecoveryState::kHandshakeTimeoutSeconds;
+        CHECK(silent_login.HandshakeTimedOut(now));
+        silent_login.OnHandshakeTimeout(now);
+        ++timeouts;
+    }
+    CHECK(timeouts == RecoveryState::kMaxAttempts);
+    CHECK(silent_login.Exhausted());
+    CHECK(!silent_login.HandshakeTimedOut(now + 1000.0));
+}
+
+void TestRecoverySecondDropIsRecoverable() {
+    // Two outages in a row: after a successful resume the machine must be able to
+    // start over (attempts and backoff reset), not stay latched in kRestored.
+    RecoveryState recovery;
+    recovery.SetToken({7});
+    recovery.OnDisconnect(0.0);
+    recovery.MarkRetryStarted(0.0);
+    recovery.OnConnected();
+    recovery.MarkResumeSent(1.0);
+    recovery.OnResumeResult(true);
+    CHECK(recovery.Phase() == RecoveryPhase::kRestored);
+
+    // Second drop while restored: retry immediately with a fresh attempt budget.
+    recovery.OnDisconnect(20.0);
+    CHECK(recovery.Phase() == RecoveryPhase::kWaitingToRetry);
+    CHECK(recovery.Attempts() == 0);
+    CHECK(recovery.ShouldRetry(20.0));
+    CHECK(recovery.HasToken());  // token rotation is an A4 dependency; keep trying
+
+    recovery.MarkRetryStarted(20.0);
+    recovery.OnConnected();
+    CHECK(recovery.Phase() == RecoveryPhase::kResuming);
+    CHECK(recovery.WantsResumeRequest());
+    recovery.MarkResumeSent(20.5);
+    recovery.OnResumeResult(false);
+    CHECK(recovery.Phase() == RecoveryPhase::kFailed);
+    CHECK(!recovery.HasToken());
+
+    // A third drop from the failed state still retries (fresh login path).
+    recovery.OnDisconnect(21.0);
+    CHECK(recovery.Phase() == RecoveryPhase::kWaitingToRetry);
+    CHECK(recovery.ShouldRetry(21.0));
+
+    // A retry that drops while resuming keeps the attempt budget growing.
+    recovery.MarkRetryStarted(21.0);
+    recovery.OnConnected();
+    recovery.OnDisconnect(22.0);
+    CHECK(recovery.Phase() == RecoveryPhase::kWaitingToRetry);
+    CHECK(recovery.Attempts() == 1);
+    CHECK(!recovery.ShouldRetry(22.0));
+    CHECK(recovery.ShouldRetry(22.0 + RecoveryState::kMaxBackoffSeconds));
 }
 
 void TestMovementPredictorReconciliation() {
@@ -915,6 +1012,8 @@ int main() {
     TestParseEquipmentTable();
     TestRewardViewFlow();
     TestRecoveryStateFlow();
+    TestRecoveryHandshakeTimeout();
+    TestRecoverySecondDropIsRecoverable();
     TestMovementPredictorReconciliation();
     TestPredictorStepsPerTickNotPerPacket();
     TestPredictorUsesServerMoveSpeed();

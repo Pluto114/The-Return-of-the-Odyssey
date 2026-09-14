@@ -862,10 +862,27 @@ int main(int argc, char** argv) {
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
 
+            // A5 item C-f: a handshake the server never answers must not leave the
+            // client "connected" but permanently mute. On timeout the token is
+            // dropped and the fresh-login path below runs in this same frame.
+            if (recovery.HandshakeTimedOut(now)) {
+                const bool was_resuming = recovery.Phase() == RecoveryPhase::kResuming;
+                recovery.OnHandshakeTimeout(now);
+                demo.login_sent = false;
+                demo.login_ok = false;
+                demo.login_note = recovery.Note();
+                if (was_resuming) {
+                    demo.resume_token.clear();
+                    demo.resumed = false;
+                }
+                std::printf("main: %s\n", recovery.Note().c_str());
+                std::fflush(stdout);
+            }
+
             // Resume first when we still hold a token (D8); otherwise perform a
             // fresh development login.
             if (recovery.WantsResumeRequest()) {
-                recovery.MarkResumeSent();
+                recovery.MarkResumeSent(now);
                 demo.login_sent = true;
                 demo.login_note = "sending ResumeRequest";
                 SendPayload(kResumeRequest,
@@ -875,6 +892,7 @@ int main(int argc, char** argv) {
             } else if (!demo.login_sent && recovery.Phase() != RecoveryPhase::kResuming) {
                 demo.login_sent = true;
                 demo.login_note = "sent, awaiting response";
+                recovery.MarkLoginSent(now);
                 LoginRequestData login;
                 login.protocol_version = kClientProtocolVersion;
                 login.token = kDevToken;
@@ -946,11 +964,19 @@ int main(int argc, char** argv) {
             case RecoveryPhase::kResuming: recovery_phase = "resuming"; break;
             case RecoveryPhase::kRestored: recovery_phase = "restored"; break;
             case RecoveryPhase::kFailed: recovery_phase = "failed"; break;
+            case RecoveryPhase::kExhausted: recovery_phase = "exhausted (press R)"; break;
         }
+        // The handshake countdown makes an unanswered ResumeRequest/LoginRequest
+        // visible instead of looking like a hang (A5 item C-f).
+        char handshake_text[32] = {0};
+        std::snprintf(handshake_text, sizeof(handshake_text), "%.1f",
+                      recovery.HandshakeSecondsLeft(GetTime()));
         const std::string recovery_line =
             std::string("Recovery: ") + recovery_phase + " attempts=" +
             std::to_string(recovery.Attempts()) + " token_bytes=" +
             std::to_string(demo.resume_token.size()) +
+            (recovery.HandshakePending() ? std::string(" handshake_left=") + handshake_text + "s"
+                                         : std::string()) +
             (demo.resumed ? " (resumed session)" : "") + "  " + recovery.Note();
         DrawText(recovery_line.c_str(), 24, 115, 18, GRAY);
 

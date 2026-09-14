@@ -3,8 +3,8 @@
 状态（第二周 D4–D9 客户端侧已完成，A5 缺口硬化进行中）：开发分支 `feature/week2-client-hardening`（基于集成后的 main）。
 战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
 （`ctest` 五套件；`odyssey_logic_tests` 233 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
-A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控）、C-d（tick 驱动预测 + 服务器移速）、C-e（恢复期匹配/续号/输入静默）、C-g（端点配置化）已完成；
-其余见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
+A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控）、C-d（tick 驱动预测 + 服务器移速）、C-e（恢复期匹配/续号/输入静默）、C-f（有界等待/二次闪断）、C-g（端点配置化）已完成；
+剩 C-c（药水，阻塞于 A2/A3 协议字段）与 Token 轮换（待 A4）；其余见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
 仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
 端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
 
@@ -128,4 +128,5 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 - 输入轴符号（W/S 在服务器平面上的正负）需在联调前与 A/B 定稿，防止方向镜像。
 - PlayerInput 真发、Match/入房门控、双人绘制画面验收，依赖 5.4（Room 接线 + D lobby）与本机渲染环境修复。
 - 预测/校正（A5 C-d）：tick 驱动。每 30Hz 边界恰好一步，步数按服务器 tick 时间线计算，**不按收发包数**；移速取自快照 `self.move_speed`（装备/属性加成即时生效），死亡时不推进。因此收包频率（30Hz/300Hz）不改变预测速度。
+- 恢复等待（A5 C-f）全部有界：重连最多 5 次（退避 2s→10s），用尽后进入终止态 `kExhausted`（需按 R，不再无声重试）；`ResumeRequest`/`LoginRequest` 5s 无响应即超时 → 丢弃令牌回落全新登录，超时与连接失败共用同一预算；恢复成功后再次闪断会重置预算（可反复恢复）。Token 轮换需协议先给新 token 字段（A4）。
 - 本机 raylib 动态库呈现问题（纯色图元不上屏）记录在验证文档，属环境待办，不影响逻辑/网络联调。

@@ -12,10 +12,10 @@ A5 硬化在 `feature/week2-client-hardening`（基于集成后的 `main`）上�
 | `scripts/build/build.ps1 -Target client` | Windows x64 / MSVC 14.44 / CMake 3.31.6 / Ninja / vcpkg 固定基线；**含 A5 四处改动后重新配置并构建成功（`[24/24] Linking CXX executable client\odyssey_client.exe`）** |
 | `ctest --test-dir build\client-windows -C Debug` | **5/5 passed**（硬化分支 `cc715c1` 实跑：`odyssey_core_tests` 0.15s、`odyssey_net_tests` 2.35s、`odyssey_logic_tests` 0.16s、`odyssey_config_tests` 0.15s、`odyssey_protocol_tests` 0.20s；合计 3.02s）。D4–D9 时点为 4/4，C-g 补入第 5 套件 |
 | 端点配置手测（C-g） | `odyssey_client.exe --help` 打印用法、不开窗；`--port 0` → `invalid port '0' (expected a decimal number in 1..65535)` + 用法、退出码 2；默认启动打印 `main: server endpoint 127.0.0.1:7777 (source=default)`；`--server 192.168.1.20:7777` → `(source=cli)` |
-| `odyssey_logic_tests` | **297 checks**（D4–D9 的 158 + A5 C-a/C-e 的 75 + C-d 的 39 + C-b 的 25）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV/权威收口）、恢复状态机（退避/拒绝/耗尽）、**tick 驱动预测（每 tick 一步、300Hz 发包不加速、服务器移速、静止、死亡、切关瞬移、异常 tick 限幅、`ClearIntent`）**、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入与拦截原因、可否报 Ready、InputSeq 下界）** |
+| `odyssey_logic_tests` | **338 checks**（D4–D9 的 158 + A5：C-a/C-e 75、C-d 39、C-b 25、C-f 41；其中 297 为硬化分支 `cc715c1` 的 `ctest` 实测值，338 为 C-f 后的独立编译结果，待下次完整构建复核）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV/权威收口）、**恢复状态机（退避/拒绝/耗尽/握手超时终止/二次闪断可恢复）**、**tick 驱动预测（每 tick 一步、300Hz 发包不加速、服务器移速、静止、死亡、切关瞬移、异常 tick 限幅、`ClearIntent`）**、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入与拦截原因、可否报 Ready、InputSeq 下界）** |
 | `odyssey_protocol_tests` | 载荷往返：Ping/Pong、Login、Match、PlayerInput(含 aim)、WorldSnapshot(玩家/怪物/Stage/属性)、战斗事件（Spawn/Destroy/Damage/Death/Stage）、奖励（Options/Choice/Applied）、Resume |
 | 端点配置解析（C-g） | `client/tests/config_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**129 checks / 0 failures**；`main()` 序言代理程序实测 default/cli/env 三种来源、非法端口 exit 2、`--help` exit 0 |
-| 逻辑套件（独立编译复现） | `client/tests/gameview_tests.cpp` 用 MSVC 14.44 `/std:c++20 /W4` 单独编译运行，无警告；各提交时点：158（D4–D9）→ 233（C-a/C-e）→ 272（C-d）→ **297（C-b，与 `ctest` 中的 `odyssey_logic_tests` 一致）** |
+| 逻辑套件（独立编译复现） | `client/tests/gameview_tests.cpp` 用 MSVC 14.44 `/std:c++20 /W4` 单独编译运行，无警告；各提交时点：158（D4–D9）→ 233（C-a/C-e）→ 272（C-d）→ 297（C-b，与 `ctest` 实测一致）→ **338（C-f）** |
 | 单帧窗口探针 | `odyssey_window_probe.exe`（红块/蓝圆/文字）用于渲染与事件泵诊断 |
 
 ## 覆盖范围（对照 WEEK2 计划）
@@ -37,7 +37,7 @@ A5 硬化在 `feature/week2-client-hardening`（基于集成后的 `main`）上�
 | **C-b 阶段/存活/恢复输入门控** | ✅ 已完成（客户端侧） | `SessionGate.h` 的 `InputGate` + `CanSendInput` + `InputBlockReason`：已入房、本会话有快照、无恢复、存活、`stage.state == playing` 才发；门控翻转时 `MovementPredictor::ClearIntent()` 丢弃残留方向，`kStageStartedEvent` 同样清空；`main.cpp` 每帧计算门控并与 HUD/日志共用原因。**在途旧输入的服务器侧丢弃策略仍待 A 确认** |
 | C-c 药水 | 阻塞 | 需 A 解除 `UsePotion` 占位拒绝 + 快照补装备/药水字段 |
 | **C-d 服务器移速预测 / ACK 语义** | ✅ 已完成 | `Prediction.h` 重写为 tick 驱动：`AdvanceTick()` 每 30Hz 边界一步、`ApplyAuthoritative(x,z,ack,server_tick,move_speed,alive)` 只用 tick 时间线补推进（上限 10 tick）；服务器 `world.go` 的 "stages the newest intent; does not advance position or ack" 即依据。单测覆盖 300Hz 发包不加速、装备移速、静止、死亡/复活、切关瞬移、异常 tick 限幅 |
-| C-f 有界等待/令牌轮换 | 部分 | 客户端侧可做；`ResumeResponse` 无新 token 字段，轮换语义待 A4 |
+| **C-f 有界等待 / 二次闪断** | ✅ 已完成（客户端侧） | `RecoveryState`：新增终止态 `kExhausted`（尝试用尽后不再无声等待，HUD `exhausted (press R)`）；`kHandshakeTimeoutSeconds=5` 覆盖 `ResumeRequest` 与 `LoginRequest`（`MarkResumeSent(now)`/`MarkLoginSent(now)`/`HandshakeTimedOut(now)`/`OnHandshakeTimeout(now)`），超时即丢令牌回落全新登录，且与连接失败共用同一尝试预算；恢复成功后再次闪断会重置预算（可反复恢复）。**Token 轮换仍待 A4**（`ResumeResponse` 无新 token 字段，客户端在二次闪断时用旧 token 尝试、被拒后回落全新登录） |
 
 端点解析为纯函数（无窗口/无 socket），因此上述 129 checks 可在任意终端独立复现：
 
