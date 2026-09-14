@@ -31,6 +31,13 @@ pwsh -File scripts/generate-equipment/generate.ps1 -Check   # 判表是否过期
 
 - 构建后 `client/assets/` 会被复制到 `<exe 目录>/assets`；客户端启动时按 `<exe>/assets` → `<CWD>/assets` → `<CWD>/client/assets` 的顺序解析**并缓存**一次资源根（渲染循环内不做路径解析），因此可以从任意工作目录启动
 - 资源缺失只告警并回退（字体缺 → raylib 默认字体；装备表缺 → 奖励面板显示原始 ID），不会崩溃
+
+## HUD 字体（P1）
+
+- HUD 使用点阵字体：把 TTF 放到 **`client/assets/fonts/pixel_hud.ttf`**（随源码提交对应 LICENSE，例如 OFL 授权字体）
+- 启动时用 `LoadFontEx` 加载一次（基础字号 32，只取可打印 ASCII 32–126 的字符集）并做 `TEXTURE_FILTER_POINT`；文件缺失/无效 → 自动回退 `GetFontDefault()` 并打印 `main: WARN HUD font ...`，**不会崩溃**
+- 界面统一英文 + 数字 + 十六进制；任何可能来自服务器/操作系统的字符串（如本地化的连接错误）都会经 `SanitizeAscii` 把非 ASCII 字节降级为 `?`，避免采样图集里不存在的字形；只有 ID 可信时使用 `[RAW_ID_<id>]` 占位
+- 渲染循环内的自研代码**不构造 `std::string`/`std::vector`**：所有 HUD 行都用定长 `char buf[]` + `snprintf` 拼装（已核对渲染块内相关构造为 0）
 - `settings.ini` 写入系统配置目录（Windows `%APPDATA%\Odyssey\`，POSIX `$XDG_CONFIG_HOME/odyssey/` 或 `~/.config/odyssey/`，都不行才落到 exe 目录），**绝不写入源码树**；读取失败或目录不可写只告警并保留内存默认值
 - 窗口：可缩放（最小 960×540），画面按**整数倍**缩放并加黑边（`scale = max(1, floor(min(w/960, h/540)))`）；`ESC` 由客户端接管（raylib 默认关窗已被禁用），当前无 ImGui 面板时按 ESC 直接退出
 

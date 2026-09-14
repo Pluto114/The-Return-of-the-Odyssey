@@ -22,6 +22,8 @@
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
 #include "ui/AssetPath.h"
+#include "ui/HudMath.h"
+#include "ui/PixelFont.h"
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
 
@@ -124,10 +126,13 @@ using odyssey::client::sync::StageStateName;
 using odyssey::client::ui::AccessibilityConfig;
 using odyssey::client::ui::AssetRoot;
 using odyssey::client::ui::ComputeViewportLayout;
+using odyssey::client::ui::DrawHudText;
 using odyssey::client::ui::GetAssetPath;
 using odyssey::client::ui::kDefaultTheme;
 using odyssey::client::ui::LoadAccessibility;
+using odyssey::client::ui::ReleaseHudFont;
 using odyssey::client::ui::RTToWorld;
+using odyssey::client::ui::SanitizeAscii;
 using odyssey::client::ui::SettingsFileExists;
 using odyssey::client::ui::SettingsFilePath;
 using odyssey::client::ui::Theme;
@@ -1034,13 +1039,24 @@ int main(int argc, char** argv) {
         }
         ClearBackground(ToRayColor(theme.background));
 
-        DrawText("The Return of the Odyssey", 24, 24, 32, DARKGRAY);
-        DrawText("Phase 1 - authoritative two-player movement", 24, 64, 20, GRAY);
+        // HUD text is drawn with the pixel font through DrawHudText. Every line is
+        // formatted into a fixed stack buffer - no std::string or std::vector is
+        // built per frame - and anything that can carry server/OS text goes through
+        // SanitizeAscii first: the atlas holds printable ASCII only, so a localized
+        // error message must degrade to '?' instead of sampling missing glyphs.
+        char line[256] = {0};
+        char ascii_a[160] = {0};
+        char ascii_b[160] = {0};
+        char ascii_c[160] = {0};
+        char suffix[80] = {0};
 
-        const std::string state_line =
-            std::string("Connection: ") + ToString(demo.state) + "  (" + demo.state_detail + ")";
-        DrawText(state_line.c_str(), 24, 100, 20,
-                 demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
+        DrawHudText("The Return of the Odyssey", 24, 24, 32, DARKGRAY);
+        DrawHudText("Phase 1 - authoritative two-player movement", 24, 64, 20, GRAY);
+
+        std::snprintf(line, sizeof(line), "Connection: %s  (%s)", ToString(demo.state),
+                      SanitizeAscii(demo.state_detail.c_str(), ascii_a, sizeof(ascii_a)));
+        DrawHudText(line, 24, 100, 20,
+                    demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
 
         const char* recovery_phase = "idle";
         switch (recovery.Phase()) {
@@ -1054,134 +1070,139 @@ int main(int argc, char** argv) {
         }
         // The handshake countdown makes an unanswered ResumeRequest/LoginRequest
         // visible instead of looking like a hang (A5 item C-f).
-        char handshake_text[32] = {0};
-        std::snprintf(handshake_text, sizeof(handshake_text), "%.1f",
-                      recovery.HandshakeSecondsLeft(GetTime()));
-        const std::string recovery_line =
-            std::string("Recovery: ") + recovery_phase + " attempts=" +
-            std::to_string(recovery.Attempts()) + " token_bytes=" +
-            std::to_string(demo.resume_token.size()) +
-            (recovery.HandshakePending() ? std::string(" handshake_left=") + handshake_text + "s"
-                                         : std::string()) +
-            (demo.resumed ? " (resumed session)" : "") + "  " + recovery.Note();
-        DrawText(recovery_line.c_str(), 24, 115, 18, GRAY);
+        if (recovery.HandshakePending()) {
+            std::snprintf(suffix, sizeof(suffix), " handshake_left=%.1fs",
+                          recovery.HandshakeSecondsLeft(GetTime()));
+        } else {
+            suffix[0] = '\0';
+        }
+        std::snprintf(line, sizeof(line), "Recovery: %s attempts=%d token_bytes=%zu%s%s  %s",
+                      recovery_phase, recovery.Attempts(), demo.resume_token.size(), suffix,
+                      demo.resumed ? " (resumed session)" : "", recovery.Note().c_str());
+        DrawHudText(line, 24, 115, 18, GRAY);
 
-        const std::string login_line =
-            "Login: " + demo.login_note +
-            (demo.login_ok ? ("  session=" + std::to_string(demo.session_id) +
-                              " player=" + std::to_string(demo.player_id))
-                           : "");
-        DrawText(login_line.c_str(), 24, 130, 20, demo.login_ok ? DARKGREEN : GRAY);
+        if (demo.login_ok) {
+            std::snprintf(suffix, sizeof(suffix), "  session=%llu player=%llu",
+                          static_cast<unsigned long long>(demo.session_id),
+                          static_cast<unsigned long long>(demo.player_id));
+        } else {
+            suffix[0] = '\0';
+        }
+        std::snprintf(line, sizeof(line), "Login: %s%s",
+                      SanitizeAscii(demo.login_note.c_str(), ascii_a, sizeof(ascii_a)), suffix);
+        DrawHudText(line, 24, 130, 20, demo.login_ok ? DARKGREEN : GRAY);
 
-        DrawText(("Match: " + demo.match_note).c_str(), 520, 130, 20,
-                 demo.in_room ? DARKGREEN : GRAY);
+        std::snprintf(line, sizeof(line), "Match: %s",
+                      SanitizeAscii(demo.match_note.c_str(), ascii_b, sizeof(ascii_b)));
+        DrawHudText(line, 520, 130, 20, demo.in_room ? DARKGREEN : GRAY);
 
         if (demo.received_any) {
-            const std::string msg = "Inbound: type=" + std::to_string(demo.last_type) +
-                                    " seq=" + std::to_string(demo.last_sequence) +
-                                    " bytes=" + std::to_string(demo.last_payload_bytes);
-            DrawText(msg.c_str(), 24, 160, 20, GRAY);
+            std::snprintf(line, sizeof(line), "Inbound: type=%u seq=%u bytes=%zu", demo.last_type,
+                          demo.last_sequence, demo.last_payload_bytes);
+            DrawHudText(line, 24, 160, 20, GRAY);
         } else {
-            DrawText("Inbound: (none yet)", 24, 160, 20, GRAY);
+            DrawHudText("Inbound: (none yet)", 24, 160, 20, GRAY);
         }
 
-        const std::string hb_line =
-            "Ping sent: " + std::to_string(demo.pings_sent) +
-            "   Pong: nonce=" + std::to_string(demo.pong_nonce) +
-            " server_time_ms=" + std::to_string(demo.pong_server_time_ms);
-        DrawText(hb_line.c_str(), 24, 190, 20, GRAY);
-        DrawText(("Outbound drops: " + std::to_string(demo.outbound_drops)).c_str(), 24, 220, 20, GRAY);
+        std::snprintf(line, sizeof(line),
+                      "Ping sent: %u   Pong: nonce=%llu server_time_ms=%llu", demo.pings_sent,
+                      static_cast<unsigned long long>(demo.pong_nonce),
+                      static_cast<unsigned long long>(demo.pong_server_time_ms));
+        DrawHudText(line, 24, 190, 20, GRAY);
+        std::snprintf(line, sizeof(line), "Outbound drops: %d", demo.outbound_drops);
+        DrawHudText(line, 24, 220, 20, GRAY);
         if (!demo.server_note.empty()) {
-            DrawText(demo.server_note.c_str(), 24, 250, 20, MAROON);
+            DrawHudText(SanitizeAscii(demo.server_note.c_str(), ascii_c, sizeof(ascii_c)), 24, 250,
+                        20, MAROON);
         }
 
-        const std::string input_line =
-            "Input intent: keys(dx=" + std::to_string(last_sample.dx) +
-            ", dz=" + std::to_string(last_sample.dz) + ") vec(" +
-            std::to_string(last_report.vector.x) + ", " + std::to_string(last_report.vector.z) +
-            ") seq=" + std::to_string(last_report.sequence) + " @30Hz";
-        DrawText(input_line.c_str(), 24, 280, 20, GRAY);
+        std::snprintf(line, sizeof(line),
+                      "Input intent: keys(dx=%d, dz=%d) vec(%.2f, %.2f) seq=%u @30Hz",
+                      last_sample.dx, last_sample.dz, last_report.vector.x, last_report.vector.z,
+                      last_report.sequence);
+        DrawHudText(line, 24, 280, 20, GRAY);
 
-        const std::string view_line =
-            "View: players=" + std::to_string(game_view.PlayerCount()) +
-            " room=" + std::to_string(game_view.RoomId()) +
-            " tick=" + std::to_string(game_view.ServerTick()) +
-            " snaps=" + std::to_string(demo.snapshots_received);
-        DrawText(view_line.c_str(), 24, 310, 20, GRAY);
+        std::snprintf(line, sizeof(line), "View: players=%zu room=%llu tick=%llu snaps=%llu",
+                      game_view.PlayerCount(),
+                      static_cast<unsigned long long>(game_view.RoomId()),
+                      static_cast<unsigned long long>(game_view.ServerTick()),
+                      static_cast<unsigned long long>(demo.snapshots_received));
+        DrawHudText(line, 24, 310, 20, GRAY);
 
-        const std::string combat_line =
-            "Stage: idx=" + std::to_string(demo.stage_index) +
-            " state=" + StageStateName(demo.stage_state) +
-            " remain=" + std::to_string(demo.monsters_remaining) +
-            " | monsters=" + std::to_string(combat_view.MonsterCount()) +
-            " bullets=" + std::to_string(combat_view.ProjectileCount());
-        DrawText(combat_line.c_str(), 24, 340, 20, GRAY);
+        std::snprintf(line, sizeof(line),
+                      "Stage: idx=%u state=%s remain=%u | monsters=%zu bullets=%zu",
+                      demo.stage_index, StageStateName(demo.stage_state), demo.monsters_remaining,
+                      combat_view.MonsterCount(), combat_view.ProjectileCount());
+        DrawHudText(line, 24, 340, 20, GRAY);
 
-        const std::string hp_line =
-            "HP self=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
-            std::to_string(static_cast<int>(demo.self_max_hp)) +
-            "  shoot=" + std::string(last_shoot ? "yes" : "no") +
-            "  input=" + (input_enabled
-                              ? std::string("on")
-                              : std::string("muted:") + InputBlockReason(input_gate)) +
-            "  events sp/dst/dmg/dth=" + std::to_string(demo.spawns) + "/" +
-            std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
-            std::to_string(demo.deaths);
-        DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
+        std::snprintf(line, sizeof(line),
+                      "HP self=%d/%d  shoot=%s  input=%s  events sp/dst/dmg/dth=%u/%u/%u/%u",
+                      static_cast<int>(demo.self_hp), static_cast<int>(demo.self_max_hp),
+                      last_shoot ? "yes" : "no",
+                      input_enabled ? "on" : InputBlockReason(input_gate), demo.spawns,
+                      demo.destroys, demo.damages, demo.deaths);
+        DrawHudText(line, 24, 370, 20, GRAY);
 
         // Ready is gated on the authoritative preparing state (A5 C-a): show why
         // ENTER is unavailable instead of leaving the operator guessing.
-        const std::string ready_text =
-            ready_reported ? "sent"
-                           : (CanReportReady(demo.in_room, demo.stage_state, reward_view.State(),
-                                             ready_reported)
-                                  ? "ready"
-                                  : std::string("blocked: ") +
-                                        ReadyBlockReason(demo.in_room, demo.stage_state,
-                                                         reward_view.State(), ready_reported));
-        const std::string stats_line =
-            "Stats(snapshot): ATK=" + std::to_string(static_cast<int>(demo.self_attack)) +
-            " DEF=" + std::to_string(static_cast<int>(demo.self_defense)) +
-            " SPD=" + std::to_string(static_cast<int>(demo.self_move_speed)) +
-            "  Ready: " + ready_text +
-            "  seed=" + std::to_string(combat_view.Stage().seed);
-        DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
-        DrawText(("Last event: " + demo.last_event_note).c_str(), 470, 400, 18, MAROON);
+        char ready_text[96] = {0};
+        if (ready_reported) {
+            std::snprintf(ready_text, sizeof(ready_text), "sent");
+        } else if (CanReportReady(demo.in_room, demo.stage_state, reward_view.State(),
+                                  ready_reported)) {
+            std::snprintf(ready_text, sizeof(ready_text), "ready");
+        } else {
+            std::snprintf(ready_text, sizeof(ready_text), "blocked: %s",
+                          ReadyBlockReason(demo.in_room, demo.stage_state, reward_view.State(),
+                                           ready_reported));
+        }
+        std::snprintf(line, sizeof(line),
+                      "Stats(snapshot): ATK=%d DEF=%d SPD=%d  Ready: %s  seed=%lld",
+                      static_cast<int>(demo.self_attack), static_cast<int>(demo.self_defense),
+                      static_cast<int>(demo.self_move_speed), ready_text,
+                      static_cast<long long>(combat_view.Stage().seed));
+        DrawHudText(line, 24, 400, 20, GRAY);
+        std::snprintf(line, sizeof(line), "Last event: %s",
+                      SanitizeAscii(demo.last_event_note.c_str(), ascii_b, sizeof(ascii_b)));
+        DrawHudText(line, 470, 400, 18, MAROON);
 
-        char correction_text[32] = {0};
-        std::snprintf(correction_text, sizeof(correction_text), "%.3f",
-                      predictor.LastCorrectionDistance());
-        const std::string netcode_line =
-            "Netcode: pending=" + std::to_string(predictor.PendingCount()) +
-            " corr=" + correction_text +
-            " predTick=" + std::to_string(predictor.PredictedTick()) +
-            " ack=" + std::to_string(predictor.AckSeq()) +
-            " spd=" + std::to_string(static_cast<int>(predictor.MoveSpeed())) +
-            " alive=" + std::string(predictor.Alive() ? "y" : "n") +
-            " interpDelay=" + std::to_string(static_cast<int>(remote_interp.DelayTicks())) +
-            "t tracks=" + std::to_string(remote_interp.Count()) + "/" +
-            std::to_string(monster_interp.Count());
-        DrawText(netcode_line.c_str(), 24, 430, 20, GRAY);
+        std::snprintf(line, sizeof(line),
+                      "Netcode: pending=%zu corr=%.3f predTick=%llu ack=%u spd=%d alive=%s "
+                      "interpDelay=%dt tracks=%zu/%zu",
+                      predictor.PendingCount(), predictor.LastCorrectionDistance(),
+                      static_cast<unsigned long long>(predictor.PredictedTick()),
+                      predictor.AckSeq(), static_cast<int>(predictor.MoveSpeed()),
+                      predictor.Alive() ? "y" : "n",
+                      static_cast<int>(remote_interp.DelayTicks()), remote_interp.Count(),
+                      monster_interp.Count());
+        DrawHudText(line, 24, 430, 20, GRAY);
+
 
         // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
         // projectiles gold. Projectiles exist only via spawn/destroy events.
         DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
                            static_cast<int>(kArenaW), static_cast<int>(kArenaH), LIGHTGRAY);
-        const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
-        const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
+        // World -> RT through the shared transform (the same mapping the crosshair
+        // and the damage floaters use), instead of a second local copy of the math.
+        const auto to_screen = [](float wx, float wz) {
+            const Vec2f rt = WorldToRT(Vec2f{wx, wz}, kArenaView);
+            return Vector2{rt.x, rt.y};
+        };
 
         for (const auto& [id, projectile] : combat_view.Projectiles()) {
             (void)id;
-            DrawCircleV(Vector2{to_screen_x(projectile.x), to_screen_y(projectile.z)}, 3.0f, GOLD);
+            DrawCircleV(to_screen(projectile.x, projectile.z), 3.0f, GOLD);
         }
 
+        char label[32] = {0};
         for (const auto& [id, monster] : combat_view.Monsters()) {
             // D9: render monsters from the interpolated 10Hz buffer.
             float mx = monster.x;
             float mz = monster.z;
             monster_interp.SampleEntity(id, mx, mz);
-            const float sx = to_screen_x(mx);
-            const float sy = to_screen_y(mz);
+            const Vector2 screen = to_screen(mx, mz);
+            const float sx = screen.x;
+            const float sy = screen.y;
             const bool dead = combat_view.IsDead(id);
             DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
                           dead ? DARKGRAY : ORANGE);
@@ -1198,26 +1219,27 @@ int main(int argc, char** argv) {
             if (combat_view.IsHitFlashing(id)) {
                 DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f, GOLD);
             }
-            DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 9,
-                     static_cast<int>(sy) - 8, 12, DARKGRAY);
+            std::snprintf(label, sizeof(label), "%llu", static_cast<unsigned long long>(id));
+            DrawHudText(label, sx + 9, sy - 8, 12, DARKGRAY);
         }
 
         for (const auto& player : game_view.Players()) {
             const bool is_self = (player.id == demo.player_id);
-            float px = player.x;
-            float pz = player.z;
+            float wx = player.x;
+            float wz = player.z;
             if (is_self) {
                 // D9: draw our predicted position (reconciled each snapshot).
                 if (predictor.HasPrediction()) {
-                    px = predictor.X();
-                    pz = predictor.Z();
+                    wx = predictor.X();
+                    wz = predictor.Z();
                 }
             } else {
                 // D9: remote players come from the interpolated buffer.
-                remote_interp.SampleEntity(player.id, px, pz);
+                remote_interp.SampleEntity(player.id, wx, wz);
             }
-            px = to_screen_x(px);
-            pz = to_screen_y(pz);
+            const Vector2 screen = to_screen(wx, wz);
+            const float px = screen.x;
+            const float pz = screen.y;
             DrawCircleV(Vector2{px, pz}, 9.0f,
                         !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
             if (combat_view.IsHitFlashing(player.id)) {
@@ -1233,30 +1255,43 @@ int main(int argc, char** argv) {
                 DrawLineV(Vector2{px, pz},
                           Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f}, DARKBLUE);
             }
-            DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
-                     static_cast<int>(pz - 8), 16, DARKGRAY);
+            std::snprintf(label, sizeof(label), "%llu",
+                          static_cast<unsigned long long>(player.id));
+            DrawHudText(label, px + 12, pz - 8, 16, DARKGRAY);
         }
 
         if (!demo.banner.empty()) {
-            DrawText(demo.banner.c_str(), 300, 20, 32, MAROON);
+            DrawHudText(SanitizeAscii(demo.banner.c_str(), ascii_c, sizeof(ascii_c)), 300, 20, 32,
+                        MAROON);
         }
 
         if (reward_view.State() != RewardState::kNone) {
             // Treasure chest panel: options come from the server; display text
             // comes from the local static table (ids travel on the wire).
             DrawRectangle(20, 452, 920, 72, Fade(LIGHTGRAY, 0.45f));
-            DrawText(("REWARD - " + reward_view.Note() + "   (keys 1-3 choose)").c_str(),
-                     30, 456, 20, MAROON);
-            std::string row;
+            std::snprintf(line, sizeof(line), "REWARD - %s   (keys 1-3 choose)",
+                          SanitizeAscii(reward_view.Note().c_str(), ascii_a, sizeof(ascii_a)));
+            DrawHudText(line, 30, 456, 20, MAROON);
+            // The option row is appended in place: up to three entries with names,
+            // slots and stats must not build a std::string per frame.
+            char row[512] = {0};
+            std::size_t used = 0;
             const auto& options = reward_view.Options();
             for (std::size_t i = 0; i < options.size(); ++i) {
-                row += "[" + std::to_string(i + 1) + "] " + options[i].display.name + " (" +
-                       options[i].display.slot + ") " + options[i].display.stats + "   ";
+                const int written = std::snprintf(
+                    row + used, sizeof(row) - used, "[%zu] %s (%s) %s   ", i + 1,
+                    SanitizeAscii(options[i].display.name.c_str(), ascii_b, sizeof(ascii_b)),
+                    SanitizeAscii(options[i].display.slot.c_str(), ascii_c, sizeof(ascii_c)),
+                    SanitizeAscii(options[i].display.stats.c_str(), ascii_a, sizeof(ascii_a)));
+                if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(row) - used) {
+                    break;  // truncated: keep what fits rather than overflowing
+                }
+                used += static_cast<std::size_t>(written);
             }
-            DrawText(row.c_str(), 30, 486, 18, DARKGRAY);
+            DrawHudText(row, 30, 486, 18, DARKGRAY);
         } else {
-            DrawText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
-                     24, kScreenHeight - 60, 20, LIGHTGRAY);
+            DrawHudText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
+                        24, kScreenHeight - 60, 20, LIGHTGRAY);
         }
         DrawFPS(kScreenWidth - 90, 12);
 
@@ -1296,6 +1331,7 @@ int main(int argc, char** argv) {
     if (target_ready) {
         UnloadRenderTexture(target);
     }
+    ReleaseHudFont();
     CloseWindow();
     std::printf("main: exit\n"); fflush(stdout);
     return 0;

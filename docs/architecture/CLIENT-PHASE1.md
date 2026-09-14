@@ -31,7 +31,8 @@ A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控
 | 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | tick 驱动的本地预测 + 服务器校正（每 30Hz 边界一步、按 tick 而非按包重放，采用快照移速与存活）；远端/怪物 10Hz 插值 |
 | 会话/关卡门控 | `client/src/sync/SessionGate.h` | 纯谓词：StageState 与服务器 iota 对齐、可否发输入（需本会话首帧快照）、可否报 Ready（权威 `PreparingNextStage` + 自身奖励结清 + 每关一次）、InputSeq 下界 |
 | UI 基础设施（P0a） | `client/src/ui/UiGeometry.h`、`HealthBar.h`、`FloaterPool.h`、`AssetPath.h`、`Theme.h` | 960×540 整数缩放 + Letterbox 布局与三支坐标变换（Window→RT、RT↔World、World→Window）、分段血条数学、128 槽飘字池与 `(server_tick, source, target)` 去重表、资源根/设置路径解析（纯决策部分）、Katana Zero 主题与 `AccessibilityConfig`；**全部 raylib-free**，测试并入 `odyssey_logic_tests` |
-| 渲染管线（P0b） | `client/src/main.cpp`、`client/src/ui/AssetPath.cpp` | 可缩放窗口 + `SetWindowMinSize(960,540)` + `SetExitKey(KEY_NULL)`（不启用 HIGHDPI）；`LoadRenderTexture(960×540)` + `IsRenderTextureReady` + `TEXTURE_FILTER_POINT` + 退出时 `UnloadRenderTexture`；世界与 HUD 统一画进 RT，双层清屏（RT 内 `theme.background`、默认帧缓冲 BLACK）后按 `-540` 负高度翻转 blit，`rlDrawRenderBatchActive()` 提交批处理；`IsWindowResized` 时重算缩放/黑边；assets 由 CMake post-build 拷到 exe 旁 |
+| 渲染管线（P0b） | `client/src/main.cpp`、`client/src/ui/AssetPath.cpp` | 可缩放窗口 + `SetWindowMinSize(960,540)` + `SetExitKey(KEY_NULL)`（不启用 HIGHDPI）；`LoadRenderTexture(960×540)` + `IsRenderTextureValid`（raylib 6.0 名，5.x 叫 `IsRenderTextureReady`）+ `TEXTURE_FILTER_POINT` + 退出时 `UnloadRenderTexture`；世界与 HUD 统一画进 RT，双层清屏（RT 内 `theme.background`、默认帧缓冲 BLACK）后按 `-540` 负高度翻转 blit，`rlDrawRenderBatchActive()` 提交批处理；`IsWindowResized` 时重算缩放/黑边；assets 由 CMake post-build 拷到 exe 旁 |
+| HUD 字体与文本（P1a） | `client/src/ui/PixelFont.{h,cpp}`、`client/src/ui/HudMath.h` | `LoadFontEx(assets/fonts/pixel_hud.ttf)` 启动加载一次 + `IsFontValid` 回退默认字体并告警；`DrawHudText`/`MeasureHudText`（像素字距、整数坐标）；`SanitizeAscii`/`FormatRawIdFallback` 做非 ASCII 降级；`HudMath` 提供受击方向、血条受伤残影（含确定性抖动）与六边形准星顶点（纯逻辑、可无头测试） |
 | 窗口/HUD | `client/src/main.cpp` | 连接/登录/匹配/战斗/奖励/恢复/网络统计 HUD；R 重试；ESC/关窗干净退出 |
 
 构建与自检：
@@ -142,6 +143,6 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 | --- | --- | --- |
 | **P0a** | `ui/Theme.h`、`ui/UiGeometry.h`（布局 + 三支坐标变换，含 `scale=1` 与 `scale≥2` 用例）、`ui/HealthBar.h`、`ui/FloaterPool.h`（128 槽 FIFO + 去重键 + 过期）、`ui/AssetPath.h`（资源根与 settings 路径的纯决策） | ✅ 已完成（`odyssey_logic_tests` 内 192 项新断言） |
 | **P0b** | `main.cpp` 渲染闭环接线：可缩放窗口 + `SetWindowMinSize(960,540)`、`SetExitKey(KEY_NULL)`、RenderTexture(960×540) 生命周期与 `TEXTURE_FILTER_POINT`、双层清屏、`-540` 翻转 blit、`IsWindowResized` 重算 layout、assets post-build 拷贝、`ui/AssetPath.cpp` 平台实现（exe 目录 / `%APPDATA%` / XDG） | ✅ 已完成（窗口表现待本地构建目视确认） |
-| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | ⏳ 待做（字体来源与 LICENSE 待确认） |
+| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | 🟡 P1a（字体加载 + `DrawTextEx` 重构 + 零分配）✅；P1b（准星/血条/受击指示/飘字上屏）⏳ |
 | **P2** | ImGui 顶层：奖励面板与 Raylib 旧面板互斥、单次提交锁定、键鼠门控、ESC 优先级 | ⏸ 门禁：rlImGui 依赖审批 |
 | **P3** | F1/F2/F3 调试与无障碍面板、双向队列深度 EMA 折线、`--no-ui`/`ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收 | ⏸ 门禁：D 的 Release 预设 |

@@ -11,6 +11,7 @@
 #include "ui/AssetPath.h"
 #include "ui/FloaterPool.h"
 #include "ui/HealthBar.h"
+#include "ui/HudMath.h"
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
 
@@ -81,8 +82,7 @@ using odyssey::client::ui::Floater;
 using odyssey::client::ui::FloaterKey;
 using odyssey::client::ui::FloaterPool;
 using odyssey::client::ui::IsInsideTarget;
-using odyssey::client::ui::JoinPath;
-using odyssey::client::ui::kDefaultAccessibility;
+using odyssey::client::ui::JoinPath;using odyssey::client::ui::kDefaultAccessibility;
 using odyssey::client::ui::kDefaultTheme;
 using odyssey::client::ui::kTargetHeight;
 using odyssey::client::ui::kTargetWidth;
@@ -94,6 +94,16 @@ using odyssey::client::ui::RTToWorld;
 using odyssey::client::ui::SegmentWidth;
 using odyssey::client::ui::SettingsFilePathIn;
 using odyssey::client::ui::Theme;
+using odyssey::client::ui::DamageGhost;
+using odyssey::client::ui::DamageShakeOffset;
+using odyssey::client::ui::HexagonCrosshair;
+using odyssey::client::ui::HitMarker;
+using odyssey::client::ui::HitMarkerFade;
+using odyssey::client::ui::kCrosshairPoints;
+using odyssey::client::ui::OnHealthFraction;
+using odyssey::client::ui::SetHitDirection;
+using odyssey::client::ui::UpdateDamageGhost;
+using odyssey::client::ui::UpdateHitMarker;
 using odyssey::client::ui::Vec2f;
 using odyssey::client::ui::WindowToRT;
 using odyssey::client::ui::WorldToRT;
@@ -1466,6 +1476,111 @@ void TestThemePaletteAndAccessibility() {
     CHECK(!access.disable_damage_floaters);
 }
 
+void TestHitMarkerDirection() {
+    HitMarker marker;
+    CHECK(!marker.active);
+    // Attacker to the east of the player.
+    CHECK(SetHitDirection(marker, 10.0f, 10.0f, 13.0f, 14.0f, 5.0f));
+    CHECK(marker.active);
+    CHECK(std::fabs(marker.dir_x - 0.6f) < 1e-5f);
+    CHECK(std::fabs(marker.dir_z - 0.8f) < 1e-5f);
+    const float length = std::sqrt(marker.dir_x * marker.dir_x + marker.dir_z * marker.dir_z);
+    CHECK(std::fabs(length - 1.0f) < 1e-5f);
+    CHECK(std::fabs(HitMarkerFade(marker, 5.0f) - 1.0f) < 1e-5f);
+    CHECK(std::fabs(HitMarkerFade(marker, 5.0f + marker.lifetime * 0.5f) - 0.5f) < 1e-4f);
+
+    // Expiry is driven by the injected clock. The epsilon avoids asserting on the
+    // exact float boundary (5.0f + 0.7f - 5.0f is not exactly 0.7f).
+    UpdateHitMarker(marker, 5.0f + marker.lifetime - 0.01f);
+    CHECK(marker.active);
+    UpdateHitMarker(marker, 5.0f + marker.lifetime + 0.001f);
+    CHECK(!marker.active);
+    CHECK(HitMarkerFade(marker, 6.0f) == 0.0f);
+
+    // An attacker on top of the player carries no direction: the old marker is
+    // left alone instead of reporting a bogus angle.
+    HitMarker kept;
+    CHECK(SetHitDirection(kept, 0.0f, 0.0f, 1.0f, 0.0f, 3.0f));
+    CHECK(SetHitDirection(kept, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f) == false);
+    CHECK(kept.active);
+    CHECK(kept.born_seconds == 3.0f);  // untouched by the rejected update
+    CHECK(std::fabs(kept.dir_x - 1.0f) < 1e-5f);
+}
+
+void TestDamageGhost() {
+    DamageGhost ghost;
+    CHECK(!ghost.active);
+
+    // Healing (or no change) does not raise a ghost.
+    OnHealthFraction(ghost, 0.8f, 0.9f);
+    CHECK(!ghost.active);
+    OnHealthFraction(ghost, 0.8f, 0.8f);
+    CHECK(!ghost.active);
+
+    // A drop holds the pre-hit level, then drains towards the real bar.
+    OnHealthFraction(ghost, 1.0f, 0.6f);
+    CHECK(ghost.active);
+    CHECK(std::fabs(ghost.shown_fraction - 1.0f) < 1e-5f);
+    CHECK(std::fabs(ghost.amount - 0.4f) < 1e-5f);
+    CHECK(DamageShakeOffset(ghost, 3.0f) == 0.0f);  // shake starts at t=0 exactly
+
+    UpdateDamageGhost(ghost, ghost.hold_seconds * 0.5f);
+    CHECK(ghost.active);
+    CHECK(std::fabs(ghost.shown_fraction - 1.0f) < 1e-5f);  // still holding
+
+    // Shake is bounded by its amplitude and decays to nothing.
+    float max_shake = 0.0f;
+    float time = 0.0f;
+    while (time < 0.6f) {
+        time += 1.0f / 60.0f;
+        UpdateDamageGhost(ghost, 1.0f / 60.0f);
+        const float offset = DamageShakeOffset(ghost, 3.0f);
+        max_shake = std::max(max_shake, std::fabs(offset));
+    }
+    CHECK(max_shake <= 3.0f);
+    CHECK(max_shake > 0.0f);
+    CHECK(!ghost.active);  // drained and retired
+    CHECK(ghost.amount == 0.0f);
+    CHECK(DamageShakeOffset(ghost, 3.0f) == 0.0f);
+
+    // A second hit during the animation restarts it from the new level.
+    OnHealthFraction(ghost, 0.6f, 0.2f);
+    CHECK(ghost.active);
+    CHECK(std::fabs(ghost.shown_fraction - 0.6f) < 1e-5f);
+    UpdateDamageGhost(ghost, 0.0f);  // a zero-length frame must not advance it
+    CHECK(ghost.since_hit == 0.0f);
+    // Non-finite input is ignored rather than poisoning the ghost.
+    OnHealthFraction(ghost, std::nanf(""), 0.1f);
+    CHECK(std::fabs(ghost.shown_fraction - 0.6f) < 1e-5f);
+}
+
+void TestHexagonCrosshair() {
+    float points[kCrosshairPoints * 2] = {0};
+    CHECK(HexagonCrosshair(100.0f, 50.0f, 8.0f, 0.0f, points, kCrosshairPoints * 2) ==
+          kCrosshairPoints * 2);
+    // First vertex points right (rotation 0), second is 60 degrees further round.
+    CHECK(std::fabs(points[0] - 108.0f) < 1e-3f);
+    CHECK(std::fabs(points[1] - 50.0f) < 1e-3f);
+    CHECK(std::fabs(points[2] - (100.0f + 8.0f * std::cos(1.04719755f))) < 1e-3f);
+    CHECK(std::fabs(points[3] - (50.0f + 8.0f * std::sin(1.04719755f))) < 1e-3f);
+    // Every vertex sits exactly `radius` from the centre.
+    for (int i = 0; i < kCrosshairPoints; ++i) {
+        const float dx = points[i * 2] - 100.0f;
+        const float dy = points[i * 2 + 1] - 50.0f;
+        CHECK(std::fabs(std::sqrt(dx * dx + dy * dy) - 8.0f) < 1e-3f);
+    }
+    // Rotation turns the whole outline.
+    float rotated[kCrosshairPoints * 2] = {0};
+    CHECK(HexagonCrosshair(0.0f, 0.0f, 1.0f, 1.57079633f, rotated, kCrosshairPoints * 2) ==
+          kCrosshairPoints * 2);
+    CHECK(std::fabs(rotated[0]) < 1e-3f);
+    CHECK(std::fabs(rotated[1] - 1.0f) < 1e-3f);
+
+    // Degenerate buffers report 0 instead of writing out of bounds.
+    CHECK(HexagonCrosshair(0.0f, 0.0f, 1.0f, 0.0f, points, kCrosshairPoints * 2 - 1) == 0);
+    CHECK(HexagonCrosshair(0.0f, 0.0f, 1.0f, 0.0f, nullptr, kCrosshairPoints * 2) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1518,6 +1633,9 @@ int main() {
     TestAssetRootResolution();
     TestSettingsPathSelection();
     TestThemePaletteAndAccessibility();
+    TestHitMarkerDirection();
+    TestDamageGhost();
+    TestHexagonCrosshair();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

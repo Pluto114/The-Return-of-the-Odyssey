@@ -99,7 +99,8 @@ endif()
 add_executable(odyssey_client
     src/main.cpp
     src/input/InputSampler.cpp
-    src/ui/AssetPath.cpp)
+    src/ui/AssetPath.cpp
+    src/ui/PixelFont.cpp)
 target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
