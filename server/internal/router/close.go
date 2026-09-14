@@ -60,6 +60,7 @@ type CloseWatcher struct {
 	sinks   map[entity.ID]EventSink
 	onClose func(roomID room.ID, reason string)
 	logger  *slog.Logger
+	roomID  room.ID
 }
 
 // NewCloseWatcher returns a watcher with no subscribers and no callback.
@@ -109,6 +110,9 @@ func (w *CloseWatcher) Unsubscribe(playerID entity.ID) {
 func (w *CloseWatcher) Run(rm *room.Room) {
 	<-rm.Done()
 	stats := rm.Stats()
+	w.mu.Lock()
+	w.roomID = stats.RoomID
+	w.mu.Unlock()
 	reason := CloseReasonCode(stats.CloseReason)
 	frame, err := DisconnectFrame(reason, stats.CloseReason)
 	if err != nil {
@@ -128,10 +132,11 @@ func (w *CloseWatcher) Run(rm *room.Room) {
 func (w *CloseWatcher) broadcast(frame []byte) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	for _, sink := range w.sinks {
+	for playerID, sink := range w.sinks {
 		if !sink.Send(frame) {
 			if w.logger != nil {
-				w.logger.Warn("reliable queue saturated, disconnect delivery rejected")
+				w.logger.Warn("reliable queue saturated, disconnect delivery rejected",
+					"room_id", w.roomID, "player_id", playerID)
 			}
 		}
 	}
