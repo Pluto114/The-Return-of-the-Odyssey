@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/equipment"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 )
 
@@ -89,11 +90,52 @@ type Stats struct {
 }
 
 type control struct {
-	join      bool
-	sessionID SessionID
-	playerID  entity.ID
-	result    chan error
-	stagePlan *stage.Plan
+	join         bool
+	sessionID    SessionID
+	playerID     entity.ID
+	result       chan error
+	stagePlan    *stage.Plan
+	rewardStart  *rewardStart
+	rewardChoice equipment.ID
+	stageResult  chan StageResultReceipt
+	resumeState  chan ResumeStateReceipt
+	gameOutcome  game.GameOutcome
+	gameResult   chan GameResultReceipt
+}
+
+type rewardStart struct {
+	catalog       equipment.Catalog
+	seed          int64
+	durationTicks uint64
+}
+
+type StageResultReceipt struct {
+	Result game.StageResult
+	Err    error
+}
+
+type ResumeState struct {
+	Snapshot Snapshot
+	Reward   *game.RewardUpdate
+}
+
+func (s ResumeState) clone() ResumeState {
+	s.Snapshot = s.Snapshot.clone()
+	if s.Reward != nil {
+		copy := s.Reward.Clone()
+		s.Reward = &copy
+	}
+	return s
+}
+
+type ResumeStateReceipt struct {
+	State ResumeState
+	Err   error
+}
+
+type GameResultReceipt struct {
+	Result game.GameResult
+	Err    error
 }
 
 type movement struct {
@@ -123,6 +165,7 @@ type Room struct {
 	updates  chan Snapshot
 	samples  chan TickSample
 	events   chan game.EventBatch
+	rewards  chan game.RewardUpdateBatch
 	latest   atomic.Pointer[Snapshot]
 	status   atomic.Pointer[Stats]
 	rejected atomic.Uint64
@@ -154,8 +197,9 @@ func Start(ctx context.Context, id ID, config Config) (*Room, error) {
 	r := &Room{id: id, config: config, ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		controls: make(chan control, config.ControlCapacity), inputs: make(chan movement, config.InputCapacity),
 		updates: make(chan Snapshot, 1), samples: make(chan TickSample, config.TickSampleCapacity),
-		events: make(chan game.EventBatch, config.EventCapacity),
-		world:  w, members: make(map[SessionID]binding), emptyTimer: time.NewTimer(config.EmptyTimeout), stats: Stats{RoomID: id}}
+		events:  make(chan game.EventBatch, config.EventCapacity),
+		rewards: make(chan game.RewardUpdateBatch, config.EventCapacity),
+		world:   w, members: make(map[SessionID]binding), emptyTimer: time.NewTimer(config.EmptyTimeout), stats: Stats{RoomID: id}}
 	s := Snapshot{RoomID: id, Snapshot: w.Snapshot()}
 	r.latest.Store(&s)
 	r.storeStats()
@@ -195,6 +239,85 @@ func (r *Room) StartStage(plan stage.Plan) (<-chan error, error) {
 	}
 	plan = plan.Clone()
 	return r.submit(control{stagePlan: &plan})
+}
+
+// StartReward moves a cleared stage into its server-owned reward round. The
+// catalog must have been loaded and validated outside the Room tick.
+func (r *Room) StartReward(catalog equipment.Catalog, seed int64, durationTicks uint64) (<-chan error, error) {
+	return r.submit(control{rewardStart: &rewardStart{catalog: catalog, seed: seed, durationTicks: durationTicks}})
+}
+
+// ChooseReward resolves player identity from the trusted Session binding. A
+// client can submit only an equipment ID; World validates its private offer.
+func (r *Room) ChooseReward(sessionID SessionID, equipmentID equipment.ID) (<-chan error, error) {
+	if sessionID == 0 {
+		return nil, ErrInvalidSession
+	}
+	if equipmentID == 0 {
+		return nil, equipment.ErrUnknownEquipment
+	}
+	return r.submit(control{sessionID: sessionID, rewardChoice: equipmentID})
+}
+
+// CompletedStage reads the immutable plan and frozen metrics through the Room
+// owner. Director orchestration can use the result without accessing World.
+func (r *Room) CompletedStage() (<-chan StageResultReceipt, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan StageResultReceipt, 1)
+	select {
+	case r.controls <- control{stageResult: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
+}
+
+// ResumeState reconstructs a full authoritative snapshot and this player's
+// private reward state on the owner goroutine. Token validation and connection
+// replacement happen before this call in A/D; the SessionID itself is retained.
+func (r *Room) ResumeState(sessionID SessionID) (<-chan ResumeStateReceipt, error) {
+	if sessionID == 0 {
+		return nil, ErrInvalidSession
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan ResumeStateReceipt, 1)
+	select {
+	case r.controls <- control{sessionID: sessionID, resumeState: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
+}
+
+// GameResult returns a detached terminal value for asynchronous persistence.
+// The World validates the trusted outcome against its current stage state.
+func (r *Room) GameResult(outcome game.GameOutcome) (<-chan GameResultReceipt, error) {
+	if !outcome.Valid() {
+		return nil, game.ErrInvalidGameOutcome
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan GameResultReceipt, 1)
+	select {
+	case r.controls <- control{gameOutcome: outcome, gameResult: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
 }
 
 func (r *Room) submit(c control) (<-chan error, error) {
@@ -253,7 +376,11 @@ func (r *Room) TickSamples() <-chan TickSample { return r.samples }
 // Events is for one reliable-event dispatcher. Saturation closes the room and
 // records event_backpressure; combat events are never silently replaced.
 func (r *Room) Events() <-chan game.EventBatch { return r.events }
-func (r *Room) Done() <-chan struct{}          { return r.done }
+
+// RewardUpdates has one consumer and carries targeted reliable updates. A
+// must deliver each row only to its PlayerID rather than broadcasting it.
+func (r *Room) RewardUpdates() <-chan game.RewardUpdateBatch { return r.rewards }
+func (r *Room) Done() <-chan struct{}                        { return r.done }
 
 func (r *Room) Stats() Stats {
 	s := *r.status.Load()
@@ -299,9 +426,32 @@ func (r *Room) tick(now time.Time) {
 	for range r.config.ControlsPerTick {
 		select {
 		case c := <-r.controls:
-			err := r.applyControl(c)
-			c.result <- err
-			close(c.result)
+			switch {
+			case c.stageResult != nil:
+				completed, err := r.world.CompletedStage()
+				c.stageResult <- StageResultReceipt{Result: completed.Clone(), Err: err}
+				close(c.stageResult)
+			case c.resumeState != nil:
+				r.mu.Lock()
+				member, joined := r.members[c.sessionID]
+				r.mu.Unlock()
+				if !joined {
+					c.resumeState <- ResumeStateReceipt{Err: ErrNotJoined}
+				} else {
+					state, err := r.world.ResumeState(member.playerID)
+					roomState := ResumeState{Snapshot: Snapshot{RoomID: r.id, Snapshot: state.Snapshot}, Reward: state.Reward}
+					c.resumeState <- ResumeStateReceipt{State: roomState.clone(), Err: err}
+				}
+				close(c.resumeState)
+			case c.gameResult != nil:
+				result, err := r.world.GameResult(c.gameOutcome)
+				c.gameResult <- GameResultReceipt{Result: result.Clone(), Err: err}
+				close(c.gameResult)
+			default:
+				err := r.applyControl(c)
+				c.result <- err
+				close(c.result)
+			}
 			sample.Controls++
 		default:
 			goto inputs
@@ -336,6 +486,16 @@ simulate:
 			r.stats.CloseReason = "event_backpressure"
 		}
 	}
+	rewardBatch := r.world.TakeRewardUpdates()
+	if rewardBatch.Overflow {
+		r.stats.CloseReason = "event_backpressure"
+	} else if len(rewardBatch.Updates) > 0 {
+		select {
+		case r.rewards <- rewardBatch:
+		default:
+			r.stats.CloseReason = "event_backpressure"
+		}
+	}
 	if r.world.Tick()%game.SnapshotEvery == 0 {
 		r.publish(false)
 	}
@@ -353,6 +513,18 @@ simulate:
 func (r *Room) applyControl(c control) error {
 	if c.stagePlan != nil {
 		return r.world.StartStage(*c.stagePlan)
+	}
+	if c.rewardStart != nil {
+		return r.world.StartReward(c.rewardStart.catalog, c.rewardStart.seed, c.rewardStart.durationTicks)
+	}
+	if c.rewardChoice != 0 {
+		r.mu.Lock()
+		member, joined := r.members[c.sessionID]
+		r.mu.Unlock()
+		if !joined {
+			return ErrNotJoined
+		}
+		return r.world.ChooseReward(member.playerID, c.rewardChoice)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -409,8 +581,20 @@ func (r *Room) finish() {
 	for {
 		select {
 		case c := <-r.controls:
-			c.result <- ErrClosed
-			close(c.result)
+			switch {
+			case c.stageResult != nil:
+				c.stageResult <- StageResultReceipt{Err: ErrClosed}
+				close(c.stageResult)
+			case c.resumeState != nil:
+				c.resumeState <- ResumeStateReceipt{Err: ErrClosed}
+				close(c.resumeState)
+			case c.gameResult != nil:
+				c.gameResult <- GameResultReceipt{Err: ErrClosed}
+				close(c.gameResult)
+			default:
+				c.result <- ErrClosed
+				close(c.result)
+			}
 		default:
 			goto drainInputs
 		}
@@ -432,5 +616,6 @@ cleared:
 	close(r.updates)
 	close(r.samples)
 	close(r.events)
+	close(r.rewards)
 	close(r.done)
 }

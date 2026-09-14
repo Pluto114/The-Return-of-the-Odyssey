@@ -26,4 +26,13 @@ type Player struct {
 	Health                  float64
 	Alive                   bool
 	Aim                     Vec2
+	Equipment               EquipmentState
+}
+
+// EquipmentState carries stable static-data IDs in authoritative snapshots.
+// Zero means that the corresponding logical slot is empty.
+type EquipmentState struct {
+	WeaponID uint32
+	RelicID  uint32
+	PotionID uint32
 }

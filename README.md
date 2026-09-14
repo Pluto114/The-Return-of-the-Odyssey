@@ -43,7 +43,7 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 
 客户端依赖验证与基础设施启动见 [SETUP.md](docs/SETUP.md)。
 当前 gameserver 入口可运行 Ping/Login，但正式 Match/Input/Room 尚未接线；Bot 和游戏客户端尚无可执行入口。不要将环境构建成功视为游戏已可运行。
-角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；规则、接口和待办见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)。
+角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；战斗、装备奖励、连续关卡和恢复结果接口分别见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)、[装备与奖励领域接口](docs/architecture/EQUIPMENT-REWARD.md)、[Director 接口](docs/architecture/DIRECTOR.md) 和 [恢复与结果接口](docs/architecture/RESUME-GAME-RESULT.md)。
 
 ## 固定架构边界
 
@@ -56,5 +56,5 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 ## 验证与待办
 
 本机验证结果见 [初始化验收记录](docs/VERIFICATION.md)。
-B 的原实现检查见 [角色 B 第一阶段验证记录](docs/verification/phase1-b/README.md)，合入 A 后的 TCP 移动/战斗检查见 [A/B 集成验证](docs/verification/network-core/README.md)。A/D 接入正式入口后再与 C 做真实客户端验收。
+B 的原实现检查见 [角色 B 第一阶段验证记录](docs/verification/phase1-b/README.md)，合入 A 后的 TCP 移动/战斗检查见 [A/B 集成验证](docs/verification/network-core/README.md)，D6–D7 服务端核心进展见 [奖励接线验证](docs/verification/week2-b-d6-world/README.md) 和 [Director/三关验证](docs/verification/week2-b-d7/README.md)，D9 数据见 [游戏核心性能与隔离基线](docs/benchmark/WEEK2-B-D9.md)。A/D 接入正式入口后再与 C 做真实客户端验收。
 三周功能计划、玩法与性能目标以架构文档为参考；尚无性能数据。
