@@ -11,10 +11,11 @@
 | --- | --- |
 | `scripts/build/build.ps1 -Target client` | Windows x64 / MSVC 14.44 / CMake 3.31.6 / Ninja / vcpkg 固定基线；客户端与全部测试目标编译链接通过 |
 | `ctest --test-dir build\client-windows -C Debug` | 4/4 passed（D4–D9 时点）：`odyssey_core_tests`、`odyssey_net_tests`、`odyssey_logic_tests`、`odyssey_protocol_tests`；C-g 已加入第 5 套件 `odyssey_config_tests`（待下次完整构建复核为 5/5） |
-| `odyssey_logic_tests` | **233 checks**（D4–D9 的 158 + A5 C-a/C-e 新增 75）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV/权威收口）、恢复状态机（退避/拒绝/耗尽）、预测校正重放、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入、可否报 Ready、拦截原因、InputSeq 下界）** |
+| `odyssey_logic_tests` | **272 checks**（D4–D9 的 158 + A5 C-a/C-e 的 75 + C-d 的 39）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV/权威收口）、恢复状态机（退避/拒绝/耗尽）、**tick 驱动预测（每 tick 一步、300Hz 发包不加速、服务器移速、静止、死亡、切关瞬移、异常 tick 限幅）**、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入、可否报 Ready、拦截原因、InputSeq 下界）** |
 | `odyssey_protocol_tests` | 载荷往返：Ping/Pong、Login、Match、PlayerInput(含 aim)、WorldSnapshot(玩家/怪物/Stage/属性)、战斗事件（Spawn/Destroy/Damage/Death/Stage）、奖励（Options/Choice/Applied）、Resume |
 | 端点配置解析（C-g） | `client/tests/config_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**129 checks / 0 failures**；`main()` 序言代理程序实测 default/cli/env 三种来源、非法端口 exit 2、`--help` exit 0 |
 | 会话门控逻辑（C-a/C-e） | `client/tests/gameview_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**233 checks / 0 failures**（较改动前 158 增加 75 项） |
+| tick 驱动预测（C-d） | 同上独立编译运行：**272 checks / 0 failures**（再增 39 项：每 tick 一步、300Hz 发包不加速、服务器移速与非法值拒绝、静止、死亡/复活、切关瞬移、异常 tick 限幅） |
 | 单帧窗口探针 | `odyssey_window_probe.exe`（红块/蓝圆/文字）用于渲染与事件泵诊断 |
 
 ## 覆盖范围（对照 WEEK2 计划）
@@ -24,7 +25,7 @@
 - **D6**：宝箱面板（名称/槽位/属性文本）、1–3 选择、超时、`RewardApplied` 如实显示；HUD 属性来自快照
 - **D7（部分）**：关卡号/状态/剩余怪物、Ready 发送；难度/Modifier/Director 摘要等待协议字段
 - **D8**：有界退避自动重连、Resume 单次发送、令牌被拒回退登录、不重放旧 Session 输入
-- **D9**：本地预测 + 服务器校正（仅重放未确认输入）、远端/怪物 10Hz 插值（1 快照延迟）
+- **D9**：tick 驱动的本地预测 + 服务器校正（A5 C-d 后：每 30Hz 边界一步、按 tick 而非按包重放、移速与存活取自快照）、远端/怪物 10Hz 插值（1 快照延迟）
 
 ## A5 缺口硬化（分支 `feature/week2-client-hardening`，基于集成后 `main` `a68acfc`）
 
@@ -35,7 +36,7 @@
 | **C-e 恢复期匹配/续号/输入静默** | ✅ 已完成 | Resume 成功置 `match_sent`（**不再发 MatchRequest**）；`session_snapshots` 按连接清零，`CanSendInput` 要求本会话首帧快照后才发输入；首帧快照 `InputSequencer::EnsureGreaterThan(InputSeqFloor(最高已发, LastProcessedInputSeq))`，绝不重放旧区间 |
 | C-b 输入阶段门控 | 待做 | 现按 `in_room` + 首帧快照；存活/阶段细分与在途旧输入丢弃策略待 A |
 | C-c 药水 | 阻塞 | 需 A 解除 `UsePotion` 占位拒绝 + 快照补装备/药水字段 |
-| C-d 服务器移速预测 | 待做 | 真实验证需 A2 后 |
+| **C-d 服务器移速预测 / ACK 语义** | ✅ 已完成 | `Prediction.h` 重写为 tick 驱动：`AdvanceTick()` 每 30Hz 边界一步、`ApplyAuthoritative(x,z,ack,server_tick,move_speed,alive)` 只用 tick 时间线补推进（上限 10 tick）；服务器 `world.go` 的 "stages the newest intent; does not advance position or ack" 即依据。单测覆盖 300Hz 发包不加速、装备移速、静止、死亡/复活、切关瞬移、异常 tick 限幅 |
 | C-f 有界等待/令牌轮换 | 部分 | 客户端侧可做；`ResumeResponse` 无新 token 字段，轮换语义待 A4 |
 
 端点解析为纯函数（无窗口/无 socket），因此上述 129 checks 可在任意终端独立复现：

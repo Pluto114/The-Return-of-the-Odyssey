@@ -91,21 +91,22 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 - D6 奖励：宝箱面板（名称/槽位/属性）、1–3 选择、超时、`RewardApplied` 如实显示
 - D7（部分）：关卡号/状态/剩余怪物与 Ready 发送（难度/全局 Modifier/Director 摘要**等待协议字段**）
 - D8 恢复：有界退避自动重连、`ResumeRequest` 单次发送、令牌被拒后回退全新登录、**不重放旧会话输入**
-- D9 同步质量：本地预测 + 服务器校正（只重放未确认输入）、远端玩家/怪物 10Hz 插值
+- D9 同步质量：tick 驱动的本地预测 + 服务器校正（每 30Hz 边界一步、按 tick 而非按包重放）、远端玩家/怪物 10Hz 插值
 
 ## 已实现（A5 收尾硬化，分支 `feature/week2-client-hardening`）
 
 - **C-g 端点配置化**：`--host`/`--port`/`--server` 与 `ODYSSEY_SERVER_HOST`/`ODYSSEY_SERVER_PORT`，带校验、默认本机、启动日志标注来源（详见上节）
 - **C-a Ready 门控**：只认权威 `PreparingNextStage`（服务器在奖励轮次 `Complete()` 后自行进入该状态）+ 自身奖励已结清，并按关卡一次性 latch；权威状态已结束而本地面板仍挂着（漏收 `RewardApplied`）时会自动收口，避免永久阻塞
 - **C-e 恢复期会话/续号**：Resume 成功后**不再发送 MatchRequest**；每个连接在收到首帧权威快照前**不发输入、不喂预测**；恢复会话的首帧快照会把 InputSeq 抬到 `max(断线前最高已发, LastProcessedInputSeq)` 之上，绝不重放旧区间
-- 待办：C-b 阶段/存活输入门控、C-c 药水、C-d 服务器移速预测、C-f 有界等待与令牌轮换
+- **C-d 预测口径**：改为 tick 驱动——每 30Hz 边界恰好一步（发包 30Hz 还是 300Hz 都不改变预测速度）、移速取快照 `self.move_speed`（装备加成即时生效、非法值拒绝并保留上次有效值）、死亡时不推进、校正只补"本地已模拟过快照 tick"的那几 tick 且限幅 10，杜绝按包加步
+- 待办：C-b 阶段/存活输入门控、C-c 药水、C-f 有界等待与令牌轮换
 
 ## 已知限制 / 依赖
 
 - 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：当前 ID 1–6 与 B 的版本化目录不一致，D 需从 `data/equipment/catalog.json` 生成同源显示数据；
   客户端不从此表推导任何战斗效果。
 - **`NextStageRequest` 服务器侧尚无处理逻辑**：全仓只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**。
-- 阶段输入门控（仅按 `in_room` + 首帧快照，尚未按存活/阶段细分）、恢复后 Token 轮换（`ResumeResponse` 无新 token 字段，待 A4）、药水与装备移速预测均按收尾清单修正，尚未宣称真实三关/恢复通过。
+- 药水（C-c）与阶段/存活输入门控（C-b）尚未收口；恢复后 Token 轮换需协议先给新 token 字段（`ResumeResponse` 目前没有，待 A4）。真实三关/恢复的端到端验收仍依赖服务器侧接线。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：
   `EndDrawing()` 只提交绘制，需要显式 `SwapScreenBuffer()`（已在 main/probe 中调用）。

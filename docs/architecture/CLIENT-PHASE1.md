@@ -3,7 +3,7 @@
 状态（第二周 D4–D9 客户端侧已完成，A5 缺口硬化进行中）：开发分支 `feature/week2-client-hardening`（基于集成后的 main）。
 战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
 （`ctest` 五套件；`odyssey_logic_tests` 233 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
-A5 硬化进度：C-a（Ready 门控）、C-e（恢复期匹配/续号/输入静默）、C-g（端点配置化）已完成；
+A5 硬化进度：C-a（Ready 门控）、C-d（tick 驱动预测 + 服务器移速）、C-e（恢复期匹配/续号/输入静默）、C-g（端点配置化）已完成；
 其余见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
 仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
 端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
@@ -27,7 +27,7 @@ A5 硬化进度：C-a（Ready 门控）、C-e（恢复期匹配/续号/输入静
 | 战斗视图 | `client/src/sync/CombatView.h` | 怪物全量集合、子弹仅由 Spawn/Destroy 事件增删、受击闪环/死亡标记 |
 | 奖励视图 | `client/src/sync/RewardView.h` | 奖励选项/选择/超时/Applied 状态；本地静态装备显示表（可选文件） |
 | 恢复状态机 | `client/src/sync/RecoveryState.h` | 有界退避重连、Resume 与全新登录决策、令牌失效处理 |
-| 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | 本地预测+服务器校正（只重放未确认输入）；远端/怪物 10Hz 插值 |
+| 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | tick 驱动的本地预测 + 服务器校正（每 30Hz 边界一步、按 tick 而非按包重放，采用快照移速与存活）；远端/怪物 10Hz 插值 |
 | 会话/关卡门控 | `client/src/sync/SessionGate.h` | 纯谓词：StageState 与服务器 iota 对齐、可否发输入（需本会话首帧快照）、可否报 Ready（权威 `PreparingNextStage` + 自身奖励结清 + 每关一次）、InputSeq 下界 |
 | 窗口/HUD | `client/src/main.cpp` | 连接/登录/匹配/战斗/奖励/恢复/网络统计 HUD；R 重试；ESC/关窗干净退出 |
 
@@ -126,5 +126,5 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 
 - 输入轴符号（W/S 在服务器平面上的正负）需在联调前与 A/B 定稿，防止方向镜像。
 - PlayerInput 真发、Match/入房门控、双人绘制画面验收，依赖 5.4（Room 接线 + D lobby）与本机渲染环境修复。
-- 预测/校正/插值（渲染平滑）不在本阶段；10Hz 阶梯感不作为失败项。
+- 预测/校正（A5 C-d）：tick 驱动。每 30Hz 边界恰好一步，步数按服务器 tick 时间线计算，**不按收发包数**；移速取自快照 `self.move_speed`（装备/属性加成即时生效），死亡时不推进。因此收包频率（30Hz/300Hz）不改变预测速度。
 - 本机 raylib 动态库呈现问题（纯色图元不上屏）记录在验证文档，属环境待办，不影响逻辑/网络联调。

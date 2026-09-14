@@ -43,6 +43,7 @@ using odyssey::client::sync::InputCommand;
 using odyssey::client::sync::InputSeqFloor;
 using odyssey::client::sync::IsPreparingNextStage;
 using odyssey::client::sync::kArenaMax;
+using odyssey::client::sync::kMoveSpeedUnitsPerSecond;
 using odyssey::client::sync::kSimulationStepSeconds;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::MovementPredictor;
@@ -420,53 +421,196 @@ void TestRecoveryStateFlow() {
 
 void TestMovementPredictorReconciliation() {
     MovementPredictor predictor;
-    // Two unconfirmed inputs at 30Hz, 5 units/s => 5/30 per tick.
-    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
-    predictor.RecordInput(InputCommand{2, 1.0f, 0.0f});
+    // First snapshot anchors the tick timeline and adopts the server pose.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 0, 100, 5.0f, true);
     CHECK(predictor.HasPrediction());
-    CHECK(predictor.PendingCount() == 2);
-    CHECK(std::fabs(predictor.X() - (10.0f / 30.0f)) < kEps);
+    CHECK(predictor.PredictedTick() == 100);
+    CHECK(predictor.AckSeq() == 0);
+    CHECK(predictor.PendingCount() == 0);
+    CHECK(std::fabs(predictor.MoveSpeed() - 5.0f) < kEps);
 
-    // Server confirms only input 1 and reports its own position: we snap there
-    // and replay the still-pending input 2.
-    predictor.ApplyAuthoritative(5.0f, 7.0f, 1);
+    // Two ticks of intent at 5 units/s => 5/30 per tick.
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    predictor.RecordInput(InputCommand{2, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    CHECK(predictor.PredictedTick() == 102);
+    CHECK(predictor.PendingCount() == 2);
+    CHECK(std::fabs(predictor.X() - (5.0f + 10.0f / 30.0f)) < kEps);
+
+    // A snapshot generated at tick 101 acks input 1: one tick of prediction was
+    // simulated past it and must be re-applied from the authoritative pose.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 1, 101, 5.0f, true);
     CHECK(predictor.PendingCount() == 1);
+    CHECK(predictor.AckSeq() == 1);
+    CHECK(predictor.PredictedTick() == 102);
     CHECK(std::fabs(predictor.X() - (5.0f + 5.0f / 30.0f)) < kEps);
     CHECK(std::fabs(predictor.Z() - 7.0f) < kEps);
     CHECK(predictor.LastCorrectionDistance() > 0.0f);
 
-    // Server confirms everything: no pending inputs, exact authoritative pose.
-    predictor.ApplyAuthoritative(5.0f, 7.0f, 2);
+    // Everything acked and the snapshot covers our whole timeline: exact pose.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 2, 102, 5.0f, true);
     CHECK(predictor.PendingCount() == 0);
     CHECK(std::fabs(predictor.X() - 5.0f) < kEps);
     CHECK(std::fabs(predictor.Z() - 7.0f) < kEps);
+    CHECK(predictor.PredictedTick() == 102);
+
+    // A snapshot after our timeline moves the anchor forward without replaying.
+    predictor.ApplyAuthoritative(6.0f, 7.0f, 2, 105, 5.0f, true);
+    CHECK(predictor.PredictedTick() == 105);
+    CHECK(std::fabs(predictor.X() - 6.0f) < kEps);
 
     // Reset (new session / resume) drops predictions entirely.
     predictor.Reset();
     CHECK(!predictor.HasPrediction());
     CHECK(predictor.PendingCount() == 0);
+    CHECK(predictor.PredictedTick() == 0);
+}
+
+void TestPredictorStepsPerTickNotPerPacket() {
+    // A5 item C-d: the server applies one step per tick using the newest intent,
+    // so ten inputs inside one tick must still produce exactly one step.
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 100, 5.0f, true);
+    for (std::uint32_t seq = 1; seq <= 10; ++seq) {
+        predictor.RecordInput(InputCommand{seq, 1.0f, 0.0f});
+    }
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - (5.0f / 30.0f)) < kEps);
+    CHECK(predictor.PendingCount() == 10);
+
+    // ... and one tick later the newest intent still applies exactly once.
+    predictor.RecordInput(InputCommand{11, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - (2.0f * 5.0f / 30.0f)) < kEps);
+
+    // 30 more packets but no tick: the position must not move at all.
+    const float before = predictor.X();
+    for (std::uint32_t seq = 12; seq <= 41; ++seq) {
+        predictor.RecordInput(InputCommand{seq, 1.0f, 0.0f});
+    }
+    CHECK(std::fabs(predictor.X() - before) < kEps);
+}
+
+void TestPredictorUsesServerMoveSpeed() {
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 100, 5.0f, true);
+    // Equipment that raises MoveSpeed to 7.5 changes the predicted step with it.
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 100, 7.5f, true);
+    CHECK(std::fabs(predictor.MoveSpeed() - 7.5f) < kEps);
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - (7.5f / 30.0f)) < kEps);
+
+    // Nonsensical speeds cannot come from a real player state: keep the last
+    // valid value instead of freezing or teleporting prediction.
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 100, 0.0f, true);
+    CHECK(std::fabs(predictor.MoveSpeed() - 7.5f) < kEps);
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 100, -3.0f, true);
+    CHECK(std::fabs(predictor.MoveSpeed() - 7.5f) < kEps);
+}
+
+void TestPredictorStationary() {
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(4.0f, 4.0f, 0, 50, 5.0f, true);
+    // Released keys produce a zero-intent report: no movement, no correction.
+    predictor.RecordInput(InputCommand{1, 0.0f, 0.0f});
+    predictor.AdvanceTick();
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - 4.0f) < kEps);
+    CHECK(std::fabs(predictor.Z() - 4.0f) < kEps);
+    predictor.ApplyAuthoritative(4.0f, 4.0f, 1, 52, 5.0f, true);
+    CHECK(predictor.LastCorrectionDistance() < kEps);
+}
+
+void TestPredictorDeadPlayerDoesNotAdvance() {
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(3.0f, 3.0f, 0, 60, 5.0f, true);
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - (3.0f + 5.0f / 30.0f)) < kEps);
+
+    // Death: the server does not move a corpse, so prediction must stop too.
+    predictor.ApplyAuthoritative(3.0f, 3.0f, 1, 61, 5.0f, false);
+    CHECK(!predictor.Alive());
+    predictor.RecordInput(InputCommand{2, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - 3.0f) < kEps);
+    CHECK(std::fabs(predictor.Z() - 3.0f) < kEps);
+    // The tick timeline keeps running even while dead.
+    CHECK(predictor.PredictedTick() == 63);
+
+    // Revival resumes prediction from the authoritative pose.
+    predictor.ApplyAuthoritative(8.0f, 3.0f, 2, 64, 5.0f, true);
+    CHECK(predictor.Alive());
+    predictor.RecordInput(InputCommand{3, 1.0f, 0.0f});
+    predictor.AdvanceTick();
+    CHECK(std::fabs(predictor.X() - (8.0f + 5.0f / 30.0f)) < kEps);
+}
+
+void TestPredictorStageChangeJump() {
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(18.0f, 18.0f, 0, 200, 5.0f, true);
+    predictor.RecordInput(InputCommand{1, 1.0f, 1.0f});
+    predictor.AdvanceTick();
+
+    // A new stage teleports the player to the spawn point: the correction is
+    // large, but with nothing owed on the tick timeline the pose is exact.
+    predictor.ApplyAuthoritative(1.0f, 1.0f, 1, 201, 5.0f, true);
+    CHECK(predictor.LastCorrectionDistance() > 1.0f);
+    CHECK(std::fabs(predictor.X() - 1.0f) < kEps);
+    CHECK(std::fabs(predictor.Z() - 1.0f) < kEps);
+    CHECK(predictor.PredictedTick() == 201);
+}
+
+void TestPredictorRejectsAbsurdTickGap() {
+    MovementPredictor predictor;
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 1000, 5.0f, true);
+    for (int i = 0; i < 5; ++i) {
+        predictor.AdvanceTick();
+    }
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    CHECK(predictor.PredictedTick() == 1005);
+
+    // A stale snapshot (older than what we already simulated by a lot) must not
+    // replay an unbounded number of steps: accept its tick and stay put.
+    predictor.ApplyAuthoritative(0.0f, 0.0f, 0, 100, 5.0f, true);
+    CHECK(predictor.PredictedTick() == 100);
+    CHECK(std::fabs(predictor.X()) < kEps);
+    CHECK(std::fabs(predictor.Z()) < kEps);
 }
 
 void TestStepMovementRules() {
-    // Diagonal is length-limited: 30 ticks diagonal == 30 ticks straight.
+    // Diagonal is length-limited: 30 ticks diagonal == 30 ticks straight. The
+    // speed is passed in (server-authoritative), so the expectation tracks it.
+    const float speed = kMoveSpeedUnitsPerSecond;
     float dx = 0.0f;
     float dz = 0.0f;
     {
-        auto [x1, z1] = StepMovement(0.0f, 0.0f, 1.0f, 0.0f, 30.0f * kSimulationStepSeconds);
+        auto [x1, z1] = StepMovement(0.0f, 0.0f, 1.0f, 0.0f, speed, 30.0f * kSimulationStepSeconds);
         dx = x1;
         dz = z1;
     }
-    const auto [x2, z2] = StepMovement(0.0f, 0.0f, 1.0f, 1.0f, 30.0f * kSimulationStepSeconds);
+    const auto [x2, z2] =
+        StepMovement(0.0f, 0.0f, 1.0f, 1.0f, speed, 30.0f * kSimulationStepSeconds);
     const float diagonal_length = std::sqrt(x2 * x2 + z2 * z2);
     CHECK(std::fabs(diagonal_length - 5.0f) < 1e-3f);
     CHECK(std::fabs(dx - 5.0f) < 1e-3f);
     CHECK(std::fabs(dz) < kEps);
 
+    // A faster authoritative speed covers proportionally more ground.
+    const auto [fast_x, fast_z] =
+        StepMovement(0.0f, 0.0f, 1.0f, 0.0f, 2.0f * speed, kSimulationStepSeconds);
+    CHECK(std::fabs(fast_x - (2.0f * speed / 30.0f)) < kEps);
+    CHECK(fast_z == 0.0f);
+
     // Zero intent does not move, and the arena clamps.
-    const auto [x3, z3] = StepMovement(3.0f, 4.0f, 0.0f, 0.0f, kSimulationStepSeconds);
+    const auto [x3, z3] = StepMovement(3.0f, 4.0f, 0.0f, 0.0f, speed, kSimulationStepSeconds);
     CHECK(x3 == 3.0f);
     CHECK(z3 == 4.0f);
-    const auto [x4, z4] = StepMovement(19.9f, 19.9f, 1.0f, 1.0f, kSimulationStepSeconds);
+    const auto [x4, z4] =
+        StepMovement(19.9f, 19.9f, 1.0f, 1.0f, speed, kSimulationStepSeconds);
     CHECK(x4 <= kArenaMax);
     CHECK(z4 <= kArenaMax);
 }
@@ -693,6 +837,12 @@ int main() {
     TestRewardViewFlow();
     TestRecoveryStateFlow();
     TestMovementPredictorReconciliation();
+    TestPredictorStepsPerTickNotPerPacket();
+    TestPredictorUsesServerMoveSpeed();
+    TestPredictorStationary();
+    TestPredictorDeadPlayerDoesNotAdvance();
+    TestPredictorStageChangeJump();
+    TestPredictorRejectsAbsurdTickGap();
     TestStepMovementRules();
     TestSnapshotInterpolation();
     TestStageStateWireValues();

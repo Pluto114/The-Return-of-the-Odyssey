@@ -389,11 +389,15 @@ int main(int argc, char** argv) {
                     last_aim_x = aim_x;
                     last_aim_z = aim_z;
                     last_shoot = input.shoot;
-                    // Predict immediately and remember the input for replay
-                    // until the server confirms it via last_processed_input.
+                    // Predict with the same rules the server uses: record the
+                    // intent, then advance exactly one 1/30 step per 30Hz
+                    // boundary. Steps are counted in ticks, never per sent packet
+                    // (A5 item C-d), so a faster send rate cannot outrun the
+                    // server.
                     predictor.RecordInput(InputCommand{last_report.sequence,
                                                        last_report.vector.x,
                                                        last_report.vector.z});
+                    predictor.AdvanceTick();
                     SendPayload(kPlayerInput, payload::EncodePlayerInput(input));
                 } else {
                     last_report.sequence = 0;
@@ -656,11 +660,15 @@ int main(int argc, char** argv) {
                                 demo.self_attack = snap.self.attack;
                                 demo.self_defense = snap.self.defense;
                                 demo.self_move_speed = snap.self.move_speed;
-                                // D9: snap to the authoritative position and
-                                // replay only the inputs the server has not
-                                // confirmed yet.
+                                // D9/A5 C-d: snap to the authoritative pose, adopt
+                                // the server's move speed and alive flag, then
+                                // re-advance only the ticks already simulated past
+                                // this snapshot (tick timeline, not packet count).
                                 predictor.ApplyAuthoritative(snap.self.pos_x, snap.self.pos_z,
-                                                             snap.last_processed_input);
+                                                             snap.last_processed_input,
+                                                             snap.server_tick,
+                                                             snap.self.move_speed,
+                                                             snap.self.alive);
                             }
 
                             // D9: remote entities are rendered from an
@@ -976,6 +984,10 @@ int main(int argc, char** argv) {
         const std::string netcode_line =
             "Netcode: pending=" + std::to_string(predictor.PendingCount()) +
             " corr=" + correction_text +
+            " predTick=" + std::to_string(predictor.PredictedTick()) +
+            " ack=" + std::to_string(predictor.AckSeq()) +
+            " spd=" + std::to_string(static_cast<int>(predictor.MoveSpeed())) +
+            " alive=" + std::string(predictor.Alive() ? "y" : "n") +
             " interpDelay=" + std::to_string(static_cast<int>(remote_interp.DelayTicks())) +
             "t tracks=" + std::to_string(remote_interp.Count()) + "/" +
             std::to_string(monster_interp.Count());
