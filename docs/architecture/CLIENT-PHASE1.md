@@ -1,8 +1,9 @@
 # 角色 C：客户端与接入契约
 
-状态（第二周 D4–D9 客户端侧已完成）：分支 `feature/week2-client-gameplay`（基于 main）。
+状态（第二周 D4–D9 客户端侧已完成，A5 缺口硬化进行中）：开发分支 `feature/week2-client-hardening`（基于集成后的 main）。
 战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
-（`ctest` 四套件；`odyssey_logic_tests` 158 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
+（`ctest` 五套件；`odyssey_logic_tests` 158 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
+A5 硬化进度：C-g（端点配置化）已完成；C-a/C-b/C-d/C-e/C-f 见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
 仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
 端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
 
@@ -15,6 +16,7 @@
 | Frame 编解码 | `client/src/core/Frame.{h,cpp}` | 16B 大端帧头编解码；body 超限在分配前拒绝 |
 | 流式组帧 | `client/src/core/FramingReader.{h,cpp}` | TCP 字节流 → 完整帧；拆包/粘包；坏 Magic/Version/超限/EOF 截断分类 |
 | 有界队列 | `client/src/core/BoundedQueue.h` | 线程安全有界队列：Push(丢最旧)/TryPush(拒绝)；Close 唤醒等待者 |
+| 端点配置 | `client/src/core/ClientConfig.h` | 命令行/环境变量解析 + 校验（host/port），默认本机；无 raylib/asio/protobuf 依赖，可无头测试 |
 | 网络线程 | `client/src/network/NetClient.{h,cpp}` | Asio TCP 客户端，独立 Network Thread；异步连接/读写；断连事件 |
 | 消息 ID 适配 | `client/src/network/ProtocolIds.h` | A 的 `MessageType` 枚举 → 客户端 constexpr 常量（单一映射点） |
 | 载荷编解码 | `client/src/network/PayloadCodec.h` | Ping/Pong/Login/Resume/Match/Input/Snapshot/战斗事件/奖励 ↔ POD 视图 |
@@ -43,7 +45,7 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 | Transport | TCP 长连接 | 定稿 |
 | Frame 头 | 16B、大端：Magic 2B `0x4E52` + Version 1B `1` + Flags 1B + MessageType 2B + Reserved 2B + BodyLength 4B + Sequence 4B | A 复核 |
 | Body 上限 | 64 KiB，**解码端在读到长度后、分配前检查** | A 复核 |
-| 连接端点 | 默认 `127.0.0.1:7777`（当前为 main.cpp 常量；地址进配置由 A/D 的 config 阶段统一） | A + D |
+| 连接端点 | 默认 `127.0.0.1:7777`；由 `--host`/`--port`/`--server`（命令行）或 `ODYSSEY_SERVER_HOST`/`ODYSSEY_SERVER_PORT`（环境变量）覆盖，优先级 命令行 > 环境变量 > 默认；非法值一律报错退出，不静默回退 | C 已实现（`core/ClientConfig.h`）；A/D 只需对齐同名环境变量 |
 | 入站解码 | Network Thread 只产出 `NetEvent`（见 §4），payload 不在此层解析 | A 提供 proto |
 
 Frame Sequence 与 Input Sequence 相互独立（架构 §8.1）。客户端不使用 Sequence 做可靠性判断。

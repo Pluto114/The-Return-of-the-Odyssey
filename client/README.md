@@ -26,8 +26,9 @@ pwsh -File scripts/build/build.ps1 -Target client
 ctest --test-dir build\client-windows -C Debug --output-on-failure
 ```
 
-四个无头套件：`odyssey_core_tests`（帧编解码/组帧/队列）、`odyssey_net_tests`（网络线程/断连/背压）、
-`odyssey_logic_tests`（输入、视图、战斗、奖励、恢复、预测/插值）、`odyssey_protocol_tests`（协议载荷往返）。
+五个无头套件：`odyssey_core_tests`（帧编解码/组帧/队列）、`odyssey_net_tests`（网络线程/断连/背压）、
+`odyssey_logic_tests`（输入、视图、战斗、奖励、恢复、预测/插值）、`odyssey_protocol_tests`（协议载荷往返）、
+`odyssey_config_tests`（端点配置解析与校验，129 checks）。
 
 ## 运行（本地联调）
 
@@ -39,7 +40,29 @@ go run ./server/cmd/gameserver
 build\client-windows\client\odyssey_client.exe
 ```
 
-当前客户端在 `client/src/main.cpp` 顶部将 `kServerHost` 写为 `10.22.31.251`、`kServerPort` 写为 `7777`。本机体验先将 Host 改为 `127.0.0.1` 并重新构建；跨主机体验填写服务端局域网地址，同时配置服务端监听和端口放行。可配置端点属于本轮待收口项，不能假设当前已有命令行参数。
+## 端点配置（A5 / C-g）
+
+客户端不再硬编码服务器地址，端点按 **命令行 > 环境变量 > 内置默认** 解析，默认 `127.0.0.1:7777`：
+
+| 方式 | 写法 |
+| --- | --- |
+| 命令行 | `--host <addr>`、`--port <n>`、`--server <host[:port]>`（均支持 `--opt=value` 形式）；`--help` / `-h` 打印用法 |
+| 环境变量 | `ODYSSEY_SERVER_HOST`、`ODYSSEY_SERVER_PORT` |
+
+```powershell
+build\client-windows\client\odyssey_client.exe                              # 127.0.0.1:7777
+build\client-windows\client\odyssey_client.exe --server 192.168.1.20:7777   # 跨机联调
+build\client-windows\client\odyssey_client.exe --host localhost --port 9000
+```
+
+非法值（端口 `0`/`65536`/非数字、host 含空白或超长、未知选项、缺参数值、同一项重复指定）**直接报错退出（exit 2）**，
+不会静默回退或连到别的地址；`--help` 不开窗直接退出（exit 0）。启动第一行日志打印实际生效的端点与来源，便于联调核对：
+
+```text
+main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | default
+```
+
+跨机还需要服务端监听 `0.0.0.0` 并放行该 TCP 端口（属 A/D 侧）。解析与校验实现见 `client/src/core/ClientConfig.h`，单测 `odyssey_config_tests`。
 
 当前主分支正式入口支持匹配和移动，但尚未启动首关；下列战斗/奖励/恢复操作需 A/D 接通入口后联调。完整剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
 
@@ -69,6 +92,11 @@ build\client-windows\client\odyssey_client.exe
 - D7（部分）：关卡号/状态/剩余怪物与 Ready 发送（难度/全局 Modifier/Director 摘要**等待协议字段**）
 - D8 恢复：有界退避自动重连、`ResumeRequest` 单次发送、令牌被拒后回退全新登录、**不重放旧会话输入**
 - D9 同步质量：本地预测 + 服务器校正（只重放未确认输入）、远端玩家/怪物 10Hz 插值
+
+## 已实现（A5 收尾硬化，分支 `feature/week2-client-hardening`）
+
+- **C-g 端点配置化**：`--host`/`--port`/`--server` 与 `ODYSSEY_SERVER_HOST`/`ODYSSEY_SERVER_PORT`，带校验、默认本机、启动日志标注来源（详见上节）
+- 待办：C-a Ready 门控、C-b 阶段输入门控、C-c 药水、C-d 服务器移速预测、C-e 恢复后匹配/续号、C-f 有界等待与令牌轮换
 
 ## 已知限制 / 依赖
 

@@ -78,6 +78,13 @@ if(BUILD_TESTING)
     set_target_properties(odyssey_logic_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
     add_test(NAME odyssey_logic_tests COMMAND odyssey_logic_tests)
 
+    # Endpoint configuration parsing: header-only, so this target needs no
+    # library beyond its own translation unit.
+    add_executable(odyssey_config_tests tests/config_tests.cpp)
+    target_include_directories(odyssey_config_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set_target_properties(odyssey_config_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    add_test(NAME odyssey_config_tests COMMAND odyssey_config_tests)
+
     add_executable(odyssey_protocol_tests tests/protocol_tests.cpp)
     target_include_directories(odyssey_protocol_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(odyssey_protocol_tests PRIVATE odyssey_protocol)

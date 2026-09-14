@@ -5,6 +5,7 @@
 // 30Hz PlayerInput -> authoritative WorldSnapshot. ESC / close
 // stops the Network Thread cleanly. 'R' retries a failed connect.
 #include "core/BoundedQueue.h"
+#include "core/ClientConfig.h"
 #include "input/InputSample.h"
 #include "input/InputSampler.h"
 #include "network/NetClient.h"
@@ -43,9 +44,8 @@ constexpr float kArenaY = 190.0f;
 constexpr float kArenaW = 340.0f;
 constexpr float kArenaH = 280.0f;
 
-// Gameserver endpoint reserved in the infra docs; read from config later.
-constexpr const char* kServerHost = "10.22.31.251";
-constexpr std::uint16_t kServerPort = 7777;
+// Gameserver endpoint: resolved from the command line or the environment, with
+// a loopback default (see core/ClientConfig.h). Never hardcode an address here.
 
 // Development-mode login (Phase 1 has no real auth; server assigns identity).
 constexpr const char* kDevToken = "dev";
@@ -71,6 +71,11 @@ const char* StageStateName(std::uint32_t state) {
 using namespace odyssey::client::network::ids;
 namespace payload = odyssey::client::network::payload;
 using odyssey::client::core::BoundedQueue;
+using odyssey::client::core::ClientEndpoint;
+using odyssey::client::core::ClientUsageText;
+using odyssey::client::core::ConfigParseResult;
+using odyssey::client::core::ParseClientOptions;
+using odyssey::client::core::ToString;
 using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSampler;
@@ -179,7 +184,21 @@ struct DemoState {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Resolve the endpoint before creating the window so that --help and
+    // invalid arguments both exit without opening one.
+    const ConfigParseResult config = ParseClientOptions(argc, argv);
+    if (!config.ok) {
+        std::fprintf(stderr, "odyssey_client: %s\n", config.error.c_str());
+        std::fprintf(stderr, "\n%s", ClientUsageText());
+        return 2;
+    }
+    if (config.options.help_requested) {
+        std::printf("%s", ClientUsageText());
+        return 0;
+    }
+    const ClientEndpoint endpoint = config.options.endpoint;
+
     std::printf("main: before InitWindow\n"); fflush(stdout);
     InitWindow(kScreenWidth, kScreenHeight, "The Return of the Odyssey - Client");
     std::printf("main: after InitWindow\n"); fflush(stdout);
@@ -222,8 +241,12 @@ int main() {
     }
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
+    // Prints the effective endpoint and where it came from, so a LAN playtest can
+    // tell a mistyped argument from a server that is simply not running.
+    std::printf("main: server endpoint %s:%u (source=%s)\n", endpoint.host.c_str(),
+                static_cast<unsigned>(endpoint.port), ToString(config.options.source));
     std::printf("main: starting net thread\n"); fflush(stdout);
-    client.Start(kServerHost, kServerPort);
+    client.Start(endpoint.host, endpoint.port);
     std::printf("main: net thread started, entering loop\n"); fflush(stdout);
 
     double last_ping_sent = 0.0;
@@ -288,7 +311,7 @@ int main() {
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
             demo.ready_sent = false;
-            client.Connect(kServerHost, kServerPort);
+            client.Connect(endpoint.host, endpoint.port);
         }
 
         // Automatic reconnect with bounded backoff after a transient outage.
@@ -299,7 +322,7 @@ int main() {
             demo.state_detail = recovery.Note();
             std::printf("main: %s\n", recovery.Note().c_str());
             std::fflush(stdout);
-            client.Connect(kServerHost, kServerPort);
+            client.Connect(endpoint.host, endpoint.port);
         }
 
         // Reward choice: keys 1..3 pick one of the offered options. Only a

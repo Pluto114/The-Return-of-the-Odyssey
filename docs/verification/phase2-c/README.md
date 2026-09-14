@@ -10,9 +10,10 @@
 | 检查 | 环境 / 结果 |
 | --- | --- |
 | `scripts/build/build.ps1 -Target client` | Windows x64 / MSVC 14.44 / CMake 3.31.6 / Ninja / vcpkg 固定基线；客户端与全部测试目标编译链接通过 |
-| `ctest --test-dir build\client-windows -C Debug` | 4/4 passed：`odyssey_core_tests`、`odyssey_net_tests`、`odyssey_logic_tests`、`odyssey_protocol_tests` |
+| `ctest --test-dir build\client-windows -C Debug` | 4/4 passed（D4–D9 时点）：`odyssey_core_tests`、`odyssey_net_tests`、`odyssey_logic_tests`、`odyssey_protocol_tests`；C-g 已加入第 5 套件 `odyssey_config_tests`（待下次完整构建复核为 5/5） |
 | `odyssey_logic_tests` | **158 checks**：输入归一化/序号、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV）、恢复状态机（退避/拒绝/耗尽）、预测校正重放、步进规则、插值 |
 | `odyssey_protocol_tests` | 载荷往返：Ping/Pong、Login、Match、PlayerInput(含 aim)、WorldSnapshot(玩家/怪物/Stage/属性)、战斗事件（Spawn/Destroy/Damage/Death/Stage）、奖励（Options/Choice/Applied）、Resume |
+| 端点配置解析（C-g） | `client/tests/config_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**129 checks / 0 failures**；`main()` 序言代理程序实测 default/cli/env 三种来源、非法端口 exit 2、`--help` exit 0 |
 | 单帧窗口探针 | `odyssey_window_probe.exe`（红块/蓝圆/文字）用于渲染与事件泵诊断 |
 
 ## 覆盖范围（对照 WEEK2 计划）
@@ -23,6 +24,24 @@
 - **D7（部分）**：关卡号/状态/剩余怪物、Ready 发送；难度/Modifier/Director 摘要等待协议字段
 - **D8**：有界退避自动重连、Resume 单次发送、令牌被拒回退登录、不重放旧 Session 输入
 - **D9**：本地预测 + 服务器校正（仅重放未确认输入）、远端/怪物 10Hz 插值（1 快照延迟）
+
+## A5 缺口硬化（分支 `feature/week2-client-hardening`，基于集成后 `main` `a68acfc`）
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| **C-g 端点配置化** | ✅ 已完成 | `client/src/core/ClientConfig.h`（命令行 `--host`/`--port`/`--server`、环境变量 `ODYSSEY_SERVER_HOST`/`ODYSSEY_SERVER_PORT`、默认 `127.0.0.1:7777`、非法值报错退出、`--help` 不开窗）；`client/tests/config_tests.cpp` 独立编译运行 **129 checks / 0 failures**（MSVC 14.44 `/W4` 无警告）；`main.cpp` 启动日志打印实际端点与来源 |
+| C-a Ready 门控 | 待做 | 需改按权威 `PreparingNextStage` + 自身奖励完成 |
+| C-b 输入阶段门控 | 待做 | 现仅按 `in_room`；在途旧输入丢弃策略待 A |
+| C-c 药水 | 阻塞 | 需 A 解除 `UsePotion` 占位拒绝 + 快照补装备/药水字段 |
+| C-d 服务器移速预测 | 待做 | 真实验证需 A2 后 |
+| C-e 恢复后匹配/续号 | 待做 | Resume 不重发 Match、首快照前禁输入、InputSeq 下界 |
+| C-f 有界等待/令牌轮换 | 部分 | 客户端侧可做；轮换语义待 A4 |
+
+端点解析为纯函数（无窗口/无 socket），因此上述 129 checks 可在任意终端独立复现：
+
+```powershell
+ctest --test-dir build\client-windows -C Debug -R odyssey_config_tests --output-on-failure
+```
 
 ## 未完成 / 依赖
 
