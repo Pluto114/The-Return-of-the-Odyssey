@@ -28,8 +28,30 @@ struct EquipmentDisplay {
 
 using EquipmentTable = std::map<std::uint32_t, EquipmentDisplay>;
 
+// Removes one layer of surrounding double quotes and unescapes doubled quotes, so
+// a field such as "Attack +5, Speed +1" arrives as display text without the
+// quoting that CSV needs. Unquoted fields pass through untouched.
+inline std::string UnquoteField(const std::string& field) {
+    if (field.size() < 2 || field.front() != '"' || field.back() != '"') {
+        return field;
+    }
+    std::string out;
+    out.reserve(field.size() - 2);
+    for (std::size_t i = 1; i + 1 < field.size(); ++i) {
+        if (field[i] == '"' && i + 2 < field.size() && field[i + 1] == '"') {
+            out.push_back('"');
+            ++i;
+        } else {
+            out.push_back(field[i]);
+        }
+    }
+    return out;
+}
+
 // Parses "id,name,slot,stats" lines; '#' starts a comment; blank lines are
-// ignored; the stats column may itself contain commas.
+// ignored; the stats column is the rest of the line and may contain commas. The
+// file is generated from data/equipment/catalog.json by
+// scripts/generate-equipment/generate.ps1, which quotes name/slot/stats.
 inline std::size_t ParseEquipmentTable(const std::string& text, EquipmentTable& out) {
     std::size_t loaded = 0;
     std::istringstream stream(text);
@@ -59,11 +81,11 @@ inline std::size_t ParseEquipmentTable(const std::string& text, EquipmentTable& 
         } catch (...) {
             continue;
         }
-        display.name = fields[1];
+        display.name = UnquoteField(fields[1]);
         if (fields.size() > 2) {
-            display.slot = fields[2];
+            display.slot = UnquoteField(fields[2]);
         }
-        display.stats = stats;
+        display.stats = UnquoteField(stats);
         out[display.id] = display;
         ++loaded;
     }

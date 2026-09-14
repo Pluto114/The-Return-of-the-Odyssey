@@ -1,10 +1,12 @@
-# Client-side DISPLAY table for equipment (ids are what the server sends).
-# Format: id,name,slot,stats
-# NOTE: placeholder content until Role B's versioned equipment config lands
-# (WEEK2 D6); the client never derives gameplay effects from this file.
-1,Blade of the Odyssey,Weapon,"+10 Attack"
-2,Oak Shield,Offhand,"+8 Defense"
-3,Swift Boots,Boots,"+15% Move Speed"
-4,Amber Potion,Potion,"Heal 40 (once)"
-5,Vitality Relic,Relic,"+25 Max HP"
-6,Glass Cannon,Relic,"+20 Attack, -10 Defense"
+# Client-side DISPLAY table for equipment (the server only ever sends ids).
+# Generated from data/equipment/catalog.json (version 1) by scripts/generate-equipment/generate.ps1
+# Format: id,name,slot,stats   (stats is the catalog description, quoted)
+# Do not edit by hand: change the catalog and re-run the generator.
+#   pwsh -File scripts/generate-equipment/generate.ps1
+#   pwsh -File scripts/generate-equipment/generate.ps1 -Check   # CI staleness gate
+1001,"Iron Sidearm","weapon","Attack +5"
+1002,"Rapid Sidearm","weapon","Attack speed x1.2"
+2001,"Vitality Relic","relic","Max health +25"
+2002,"Wind Relic","relic","Move speed x1.1"
+3001,"Healing Potion","potion","Restore 30 health"
+3002,"Greater Healing Potion","potion","Restore 60 health"

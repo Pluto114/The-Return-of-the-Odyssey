@@ -12,10 +12,10 @@ A5 硬化在 `feature/week2-client-hardening`（基于集成后的 `main`）上�
 | `scripts/build/build.ps1 -Target client` | Windows x64 / MSVC 14.44 / CMake 3.31.6 / Ninja / vcpkg 固定基线；**含 A5 四处改动后重新配置并构建成功（`[24/24] Linking CXX executable client\odyssey_client.exe`）** |
 | `ctest --test-dir build\client-windows -C Debug` | **5/5 passed**（硬化分支 `cc715c1` 实跑：`odyssey_core_tests` 0.15s、`odyssey_net_tests` 2.35s、`odyssey_logic_tests` 0.16s、`odyssey_config_tests` 0.15s、`odyssey_protocol_tests` 0.20s；合计 3.02s）。D4–D9 时点为 4/4，C-g 补入第 5 套件 |
 | 端点配置手测（C-g） | `odyssey_client.exe --help` 打印用法、不开窗；`--port 0` → `invalid port '0' (expected a decimal number in 1..65535)` + 用法、退出码 2；默认启动打印 `main: server endpoint 127.0.0.1:7777 (source=default)`；`--server 192.168.1.20:7777` → `(source=cli)` |
-| `odyssey_logic_tests` | **338 checks**（D4–D9 的 158 + A5：C-a/C-e 75、C-d 39、C-b 25、C-f 41；其中 297 为硬化分支 `cc715c1` 的 `ctest` 实测值，338 为 C-f 后的独立编译结果，待下次完整构建复核）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、奖励（选项/选择/拒绝/超时/CSV/权威收口）、**恢复状态机（退避/拒绝/耗尽/握手超时终止/二次闪断可恢复）**、**tick 驱动预测（每 tick 一步、300Hz 发包不加速、服务器移速、静止、死亡、切关瞬移、异常 tick 限幅、`ClearIntent`）**、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入与拦截原因、可否报 Ready、InputSeq 下界）** |
+| `odyssey_logic_tests` | **352 checks**（D4–D9 的 158 + A5：C-a/C-e 75、C-d 39、C-b 25、C-f 41、装备表解析/去引号 14；其中 297 为硬化分支 `cc715c1` 的 `ctest` 实测值，后续为独立编译结果，待下次完整构建复核）：输入归一化/序号（含 `EnsureGreaterThan` 下界）、全量快照移除、战斗视图（怪物/子弹/受击/死亡）、**装备显示表解析（生成格式的 CSV 去引号、描述内逗号、转义引号、旧式无引号行）**、奖励（选项/选择/拒绝/超时/CSV/权威收口）、**恢复状态机（退避/拒绝/耗尽/握手超时终止/二次闪断可恢复）**、**tick 驱动预测（每 tick 一步、300Hz 发包不加速、服务器移速、静止、死亡、切关瞬移、异常 tick 限幅、`ClearIntent`）**、步进规则、插值、**会话门控（StageState 取值与命名、可否发输入与拦截原因、可否报 Ready、InputSeq 下界）** |
 | `odyssey_protocol_tests` | 载荷往返：Ping/Pong、Login、Match、PlayerInput(含 aim)、WorldSnapshot(玩家/怪物/Stage/属性)、战斗事件（Spawn/Destroy/Damage/Death/Stage）、奖励（Options/Choice/Applied）、Resume |
 | 端点配置解析（C-g） | `client/tests/config_tests.cpp` 独立编译运行（MSVC 14.44 `/W4`，无警告）：**129 checks / 0 failures**；`main()` 序言代理程序实测 default/cli/env 三种来源、非法端口 exit 2、`--help` exit 0 |
-| 逻辑套件（独立编译复现） | `client/tests/gameview_tests.cpp` 用 MSVC 14.44 `/std:c++20 /W4` 单独编译运行，无警告；各提交时点：158（D4–D9）→ 233（C-a/C-e）→ 272（C-d）→ 297（C-b，与 `ctest` 实测一致）→ **338（C-f）** |
+| 逻辑套件（独立编译复现） | `client/tests/gameview_tests.cpp` 用 MSVC 14.44 `/std:c++20 /W4` 单独编译运行，无警告；各提交时点：158（D4–D9）→ 233（C-a/C-e）→ 272（C-d）→ 297（C-b，与 `ctest` 实测一致）→ 338（C-f）→ **352（装备表）** |
 | 单帧窗口探针 | `odyssey_window_probe.exe`（红块/蓝圆/文字）用于渲染与事件泵诊断 |
 
 ## 覆盖范围（对照 WEEK2 计划）
@@ -52,7 +52,7 @@ ctest --test-dir build\client-windows -C Debug -R odyssey_config_tests --output-
 | **Ready 屏障的端到端验收**：`MSG_NEXT_STAGE_REQUEST` 全仓只在 `server/internal/session/session.go` 的合法性表中出现，**没有 handler 消费**；`PreparingNextStage` 由服务器在奖励轮次 `Complete()` 后自行推进 | 需 A 接线；C 侧发送时机（C-a）已按 A5 收敛 |
 | 双客户端同房战斗、清场/团灭、奖励与三关循环的**真实端到端**验收（W01/W03/W05–W09） | 需服务器 D4–D9 路由（A）与平台（D）；C 配合联调 |
 | 难度/全局 Modifier/Director 决策摘要显示 | 需协议先补字段（A/B） |
-| 正式装备静态配置（当前 `client/assets/data/equipment.csv` 为**显示占位**，不参与战斗计算） | B 提供版本化配置后替换 |
+| 装备显示表同源（D1/D7） | ✅ 已完成：`scripts/generate-equipment/generate.ps1` 从 `data/equipment/catalog.json` 生成 `client/assets/data/equipment.csv`（6 项，catalog version 1）。实测：`-Check` 一致时退出 0、被改动的副本退出 1 并打印行级差异；占位 ID/重复 ID/缺字段/缺目录分别退出 2；真实表用客户端解析器读出 6 条（1001/1002/2001/2002/3001/3002，名称/槽位/描述无 CSV 引号残留、无 <1000 的占位 ID） |
 | 100 Bot / Grafana / MySQL 等 | D |
 | 干净 clone 发布演练（W15）中客户端部分的记录归档 | C（D10 执行时补） |
 

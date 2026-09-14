@@ -20,6 +20,13 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 产物：`build/client-windows/client/odyssey_client.exe`（另有 `odyssey_window_probe.exe` 纯窗口诊断程序）。
 
+装备显示表由 B 的目录**生成**（客户端不解析 JSON）：
+
+```powershell
+pwsh -File scripts/generate-equipment/generate.ps1          # 目录变更后重新生成
+pwsh -File scripts/generate-equipment/generate.ps1 -Check   # CI 门禁：表是否已过期（不一致退出码 1）
+```
+
 ## 测试
 
 ```powershell
@@ -105,8 +112,10 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 
 ## 已知限制 / 依赖
 
-- 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：当前 ID 1–6 与 B 的版本化目录不一致，D 需从 `data/equipment/catalog.json` 生成同源显示数据；
-  客户端不从此表推导任何战斗效果。
+- 装备显示表 `client/assets/data/equipment.csv` **由 `data/equipment/catalog.json` 生成**（`scripts/generate-equipment/generate.ps1`），运行期不解析 JSON、也不手改 CSV：
+  - 行格式 `id,"name","slot","stats"`，`stats` 直接取目录里的 `description` 原文（客户端**不**从 `modifiers` 反推数值），解析器会剥掉 CSV 引号
+  - ID 为 B 的版本化编号（当前 1001/1002 武器、2001/2002 遗物、3001/3002 药水）；脚本拒绝 <1000 的旧占位 ID、重复 ID 与缺字段
+  - `-Check` 模式供 CI 判"表是否与目录脱节"；目录改了就重新生成，否则奖励面板会退化成 `equipment#<id> (config pending)`
 - **`NextStageRequest` 服务器侧尚无处理逻辑**：全仓只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**。
 - 药水（C-c）尚未收口。**Token 轮换待 A4**：`LoginResponse` 只发一次 `resume_token`，`ResumeResponse` 没有新 token 字段，所以客户端在二次闪断时仍会用旧 token 尝试 resume，被拒后回落全新登录（不会重放旧输入）；若 A 决定 resume 后令牌单次消费并轮换，请给出新 token 的下发字段。
 - **输入只在权威 `stage.state == playing` 时发送**（C-b）：如果服务器尚未启动首关（状态停在 `waiting`），客户端会如实保持静默并在 HUD 显示 `input=muted:stage is not being played` —— 这是 A1（Match 后提交 `StartStage`）未接线的可见表现，而不是客户端卡死。

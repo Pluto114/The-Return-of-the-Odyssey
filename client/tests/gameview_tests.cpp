@@ -64,6 +64,7 @@ using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StageState;
 using odyssey::client::sync::StageStateName;
 using odyssey::client::sync::StepMovement;
+using odyssey::client::sync::UnquoteField;
 
 constexpr float kEps = 1e-5f;
 
@@ -291,28 +292,62 @@ void TestCombatViewFeedback() {
 
 void TestParseEquipmentTable() {
     EquipmentTable table;
+    // Generated-table shape: quoted fields, comment header, blank lines.
     const std::string text =
-        "# client display table\n"
-        "1,Blade of the Odyssey,Weapon,\"+10 Attack\"\n"
+        "# Client-side DISPLAY table for equipment\n"
+        "# Generated from data/equipment/catalog.json (version 1)\n"
+        "1001,\"Iron Sidearm\",\"weapon\",\"Attack +5\"\n"
         "\n"
-        "2,Glass Cannon,Relic,\"+20 Attack, -10 Defense\"\n"
-        "bogus line without id,name\n";
+        "2002,\"Wind Relic\",\"relic\",\"Move speed x1.1, stacks with relics\"\n"
+        "3001,\"Healing \"\"Potion\"\"\",\"potion\",\"Restore 30 health\"\n"
+        "bogus line without id,name\n"
+        // Legacy unquoted rows must keep working (hand-written tables, B exports).
+        "4001,Plain Blade,weapon,+7 Attack\n";
     const std::size_t loaded = ParseEquipmentTable(text, table);
-    CHECK(loaded == 2);
-    CHECK(table.size() == 2);
-    const auto it = table.find(1);
-    CHECK(it != table.end());
-    if (it != table.end()) {
-        CHECK(it->second.name == "Blade of the Odyssey");
-        CHECK(it->second.slot == "Weapon");
-        CHECK(it->second.stats == "\"+10 Attack\"");
+    CHECK(loaded == 4);
+    CHECK(table.size() == 4);
+
+    const auto first = table.find(1001);
+    CHECK(first != table.end());
+    if (first != table.end()) {
+        // Quoting is CSV syntax, not display text: the panel must not show it.
+        CHECK(first->second.name == "Iron Sidearm");
+        CHECK(first->second.slot == "weapon");
+        CHECK(first->second.stats == "Attack +5");
     }
-    const auto second = table.find(2);
-    CHECK(second != table.end());
-    if (second != table.end()) {
-        // The stats column may itself contain commas.
-        CHECK(second->second.stats == "\"+20 Attack, -10 Defense\"");
+
+    const auto with_comma = table.find(2002);
+    CHECK(with_comma != table.end());
+    if (with_comma != table.end()) {
+        // The stats column is the rest of the line, so commas inside it survive.
+        CHECK(with_comma->second.stats == "Move speed x1.1, stacks with relics");
     }
+
+    const auto escaped = table.find(3001);
+    CHECK(escaped != table.end());
+    if (escaped != table.end()) {
+        CHECK(escaped->second.name == "Healing \"Potion\"");
+    }
+
+    const auto legacy = table.find(4001);
+    CHECK(legacy != table.end());
+    if (legacy != table.end()) {
+        CHECK(legacy->second.name == "Plain Blade");
+        CHECK(legacy->second.slot == "weapon");
+        CHECK(legacy->second.stats == "+7 Attack");
+    }
+}
+
+void TestUnquoteField() {
+    CHECK(UnquoteField("\"Attack +5\"") == "Attack +5");
+    CHECK(UnquoteField("plain") == "plain");
+    CHECK(UnquoteField("") == "");
+    CHECK(UnquoteField("\"") == "\"");
+    CHECK(UnquoteField("\"\"") == "");
+    CHECK(UnquoteField("\"a\"\"b\"") == "a\"b");
+    // Only one layer is removed, and only when both ends are quoted.
+    CHECK(UnquoteField("\"\"\"x\"\"\"") == "\"x\"");
+    CHECK(UnquoteField("\"unbalanced") == "\"unbalanced");
 }
 
 void TestRewardViewFlow() {
@@ -1010,6 +1045,7 @@ int main() {
     TestGameViewCombatFields();
     TestCombatViewFeedback();
     TestParseEquipmentTable();
+    TestUnquoteField();
     TestRewardViewFlow();
     TestRecoveryStateFlow();
     TestRecoveryHandshakeTimeout();
