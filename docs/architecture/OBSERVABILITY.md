@@ -19,6 +19,6 @@ D4 预留的战斗指标为 `odyssey_active_monsters`、`odyssey_active_projecti
 
 成员 A/B 的集成层负责把 Session、Room 和 Matchmaker 状态汇总为 `Snapshot`，并在匹配、重连完成后调用对应观察操作。指标记录错误不能回滚或改变游戏结果。
 
-未来 gameserver 在 `ODYSSEY_METRICS_ADDR` 上将 `Metrics.Handler()` 挂载到 `/metrics`。当前入口尚未实现，因此 Prometheus 的 gameserver target 显示 DOWN 是正常状态。
+gameserver 已在 `ODYSSEY_METRICS_ADDR` 暴露 `Metrics.Handler()`，默认监听 `0.0.0.0:19091`，Prometheus 可抓取 `/metrics`。生产已接在线、房间、匹配与 Tick work；新增战斗收集器仍待权威数据适配，不能将这些空值解释为已完成玩法观测。
 
-Grafana 的 `Odyssey Overview` 面板已按这些真实指标预配置。在 gameserver 暴露指标以前，应用面板显示 No data，不代表 Prometheus 或 Grafana 故障。
+Grafana 的 `Odyssey Overview` 面板已有基础指标配置。启动后 target 应为 UP；若 DOWN，检查服务进程、监听端口和 Prometheus target。战斗/奖励/Director 面板及真实数据接入要求见 [A / D 收尾清单](../plans/WEEK2-AD-FINALIZATION.md)。

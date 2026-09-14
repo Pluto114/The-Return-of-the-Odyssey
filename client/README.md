@@ -33,12 +33,15 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 
 ```powershell
 # 终端 1：服务器（默认 127.0.0.1:7777）
-pwsh -NoProfile -File scripts/...  # 或 go run ./server/cmd/gameserver
+. ./scripts/env.ps1
+go run ./server/cmd/gameserver
 # 终端 2：客户端
 build\client-windows\client\odyssey_client.exe
 ```
 
-客户端默认连接 `127.0.0.1:7777`（`client/src/main.cpp` 顶部常量，后续接入配置读取）。
+当前客户端在 `client/src/main.cpp` 顶部将 `kServerHost` 写为 `10.22.31.251`、`kServerPort` 写为 `7777`。本机体验先将 Host 改为 `127.0.0.1` 并重新构建；跨主机体验填写服务端局域网地址，同时配置服务端监听和端口放行。可配置端点属于本轮待收口项，不能假设当前已有命令行参数。
+
+当前主分支正式入口支持匹配和移动，但尚未启动首关；下列战斗/奖励/恢复操作需 A/D 接通入口后联调。完整剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
 
 ## 操作
 
@@ -56,7 +59,7 @@ build\client-windows\client\odyssey_client.exe
 
 - **Network Thread** 只做 Socket / 组帧 / 解码，向有界队列投递 `NetEvent`；**绝不**修改客户端世界或渲染状态。
 - **Main Thread** 每帧 Drain 队列、应用快照、绘制；所有权威状态来自服务器。
-- 客户端不发送坐标、命中或伤害结果；只发送 `PlayerInput{input_seq, move, aim, shoot, use_potion}`。
+- 客户端不发送坐标、命中或伤害结果；当前发送输入序号、时间、移动、瞄准与射击。协议已有 `use_potion`，但客户端键位/编码尚待补齐。
 
 ## 已实现（第二周 D4–D9 客户端侧）
 
@@ -69,8 +72,9 @@ build\client-windows\client\odyssey_client.exe
 
 ## 已知限制 / 依赖
 
-- 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：ID 与服务器一致，正式配置由 B 的版本化数据源提供；
+- 装备显示使用 `client/assets/data/equipment.csv`（**占位表**）：当前 ID 1–6 与 B 的版本化目录不一致，D 需从 `data/equipment/catalog.json` 生成同源显示数据；
   客户端不从此表推导任何战斗效果。
+- Ready 当前只在 Reward=3 发送，与 B 奖励完成后的 PreparingNextStage=4 不匹配；阶段输入门控、恢复后匹配门控/续号、药水与装备移速预测均按收尾清单修正，尚未宣称真实三关/恢复通过。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：
   `EndDrawing()` 只提交绘制，需要显式 `SwapScreenBuffer()`（已在 main/probe 中调用）。
