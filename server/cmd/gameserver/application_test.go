@@ -220,7 +220,8 @@ func appRead(t *testing.T, peer appPeer, want pb.MessageType, message proto.Mess
 			t.Fatalf("read %s: %v", want, err)
 		}
 		if pb.MessageType(header.MessageType) != want {
-			if pb.MessageType(header.MessageType) == pb.MessageType_MSG_WORLD_SNAPSHOT {
+			if pb.MessageType(header.MessageType) == pb.MessageType_MSG_WORLD_SNAPSHOT ||
+				(header.MessageType >= 320 && header.MessageType <= 327) {
 				continue
 			}
 			t.Fatalf("message type = %d, want %s", header.MessageType, want)

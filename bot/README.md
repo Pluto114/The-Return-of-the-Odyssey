@@ -33,4 +33,4 @@ go run ./bot/cmd/loadbot -mode functional -clients 2 -stages 3 -reward-scenario 
 
 命令输出 JSON，包含各阶段成功/失败数、完成对局/关数、奖励/Ready/药水、最后 Room/Stage/Tick、断线原因和恢复次数；任何非预期协议或连接失败都会以非零状态退出。`-use-potion` 和 `-resume` 默认启用，可按场景关闭。
 
-Bot 侧状态机与 fake TCP 回归已完成；正式 gameserver 的 A2/A3 奖励、Ready、三关路由以及 A4 Token 签发尚未进入当前主线，所以以上真实 E2E 目前仍是阻塞项，不能用单元测试结果代替。具体门槛见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
+Bot 侧状态机与 fake TCP 回归已完成；当前功能分支的 gameserver 已启动首个权威关卡，并通过 2 Bot 与 10 Bot 单关真实 TCP 验收。A2/A3 奖励、Ready、三关路由以及 A4 Token 签发尚未进入当前主线，因此多关、奖励和恢复 E2E 仍是阻塞项，不能用单关结果或单元测试代替。具体门槛见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。

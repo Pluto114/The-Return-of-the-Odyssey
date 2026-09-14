@@ -321,6 +321,27 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 			p.conn.Close()
 		}
 	}
+
+	// A's transport boundary starts the first authoritative encounter only
+	// after every participant has joined and received MatchFound. Production
+	// uses D's validated seed base; legacy focused tests retain the room seed.
+	seed := int64(roomID)
+	if a.gameplay.Valid() {
+		seed = a.gameplay.FirstStageSeed(uint64(roomID))
+	}
+	firstStage, err := game.NewFirstStagePlan(a.roomConfig.World, seed)
+	if err != nil {
+		a.logger.Error("first-stage plan failed", "room_id", roomID, "err", err)
+		a.failMatch(players, err)
+		rm.Close()
+		return
+	}
+	if _, err := rm.StartStage(firstStage); err != nil {
+		a.logger.Error("start stage failed", "room_id", roomID, "err", err)
+		a.failMatch(players, err)
+		rm.Close()
+		return
+	}
 	oldest := time.Now()
 	for _, p := range players {
 		if p.queuedAt.Before(oldest) {

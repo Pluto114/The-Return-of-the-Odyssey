@@ -22,6 +22,8 @@
 | MySQL 结果 | integration-tag 测试 | 胜利、团灭、离弃均插入；重复内容返回幂等；同 ID 异内容冲突；结果与玩家行可读回 |
 | MySQL 故障 | 关闭已连接的测试连接池后异步提交 | `Submit` 未等待数据库；后台重试后进入可恢复失败记录 |
 | production 装配 | 隐藏启动本地 gameserver，启用 Resume 与 Results | `/healthz` 返回 `ok`；`/metrics` 含 `odyssey_result_queue_depth` |
+| 真实首关 Bot | `a1-loadbot -mode functional -clients 2 -stages 1 -duration 90s -ramp 0s -resume=false -use-potion=false` | 2/2 成功；权威 StageCleared；最后 Tick 32；原始输出见 `d2-two-bot-one-stage.json` |
+| 真实战斗指标 | 10 Bot / 5 房间单关，同时轮询 `/metrics` | 10/10 成功；峰值在线/房间/怪物/投射物为 10/5/15/28；伤害 600；清场 5；见 `d3-ten-bot-live-metrics.json` |
 | 代码格式 | `git diff --check` | 通过 |
 
 统一 `scripts/test/check.ps1` 的 `go mod download all` 在沙箱内被网络策略拒绝，在获准联网后又因 `proxy.golang.org` 连接超时失败。其后的实际 Server/Bot 全包 test 与 vet 已使用本地已校验依赖逐模块通过；不得把依赖下载失败记为测试失败，也不得把本次记录记为干净 clone 验收。
@@ -29,7 +31,7 @@
 ## 明确未执行
 
 - Race：按项目负责人当前决定，开发完成并合并后统一执行。
-- 两个真实 C++ 客户端、三关、奖励、Director、断线恢复、100 Bot/50 房间/10 分钟：A1–A4 正式入口尚未完整接线，不能用 fake server 或模块测试冒充通过。
+- 两个真实 C++ 客户端、三关、奖励、Director、断线恢复、100 Bot/50 房间/10 分钟：A2–A4 正式入口尚未完整接线，不能用已通过的真实单关 Bot 或模块测试冒充通过。
 - `PlayerProgress`、`EquipmentOwnership` 长期成长表：账号身份与成长规则尚未冻结，本周只保存 MatchHistory/GameResult 与终局玩家属性/装备快照。
 - 干净 clone、两台主机和非开发者发布演练：留到候选合并提交。
 
