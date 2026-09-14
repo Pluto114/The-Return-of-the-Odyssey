@@ -3,6 +3,8 @@ package router
 import (
 	"bufio"
 	"bytes"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -184,5 +186,53 @@ func TestEventDispatcherSaturationDoesNotAffectOthers(t *testing.T) {
 	slow.mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("saturated sink Send calls = %d, want 1 (rejection must be surfaced, not silently skipped)", calls)
+	}
+}
+
+// TestEventDispatcherBadEventLogsCorrelation verifies D5 observability: a bad
+// (unknown-kind) event is dropped without wedging the stream, but is logged
+// with room/stage/tick/entity correlation so it is traceable.
+func TestEventDispatcherBadEventLogsCorrelation(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	d := NewEventDispatcher()
+	d.SetLogger(logger)
+	d.mu.Lock()
+	d.roomID = 42
+	d.mu.Unlock()
+
+	d.Dispatch(game.EventBatch{Events: []game.Event{
+		{Kind: game.EventKind(255), StageIndex: 3, ServerTick: 99, EntityID: 1<<63 | 7, SourceID: 5},
+	}})
+
+	out := buf.String()
+	for _, want := range []string{"dropped invalid event", "room_id=42", "stage_index=3", "server_tick=99", "kind=255"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log output missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestEventDispatcherSaturationLogsCorrelation verifies that a saturated sink
+// is logged with the owning room and the affected player, so a slow connection
+// can be traced (D5: slow connection affects only itself).
+func TestEventDispatcherSaturationLogsCorrelation(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	d := NewEventDispatcher()
+	d.SetLogger(logger)
+	d.mu.Lock()
+	d.roomID = 7
+	d.mu.Unlock()
+
+	d.Subscribe(1, &eventRecordingSink{})
+	d.Subscribe(2, &rejectingSink{})
+	d.Dispatch(game.EventBatch{Events: []game.Event{{Kind: game.TeamDefeated, StageIndex: 1, ServerTick: 7}}})
+
+	out := buf.String()
+	for _, want := range []string{"reliable queue saturated", "room_id=7", "player_id=2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log output missing %q; got:\n%s", want, out)
+		}
 	}
 }

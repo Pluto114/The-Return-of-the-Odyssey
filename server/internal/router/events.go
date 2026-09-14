@@ -33,6 +33,7 @@ type EventDispatcher struct {
 	mu     sync.RWMutex
 	sinks  map[entity.ID]EventSink
 	logger *slog.Logger
+	roomID room.ID
 }
 
 // NewEventDispatcher returns a dispatcher with no subscribers.
@@ -78,7 +79,12 @@ func (d *EventDispatcher) Subscribers() int {
 // Run drains rm.Events() until the channel closes (room closed). It blocks;
 // run it in its own goroutine. Stage-scoped events carry their authoritative
 // stage index, so dispatch does not depend on a potentially older snapshot.
+// It records the room identity once so dispatch and saturation logs can be
+// correlated to the owning room (D5 observability).
 func (d *EventDispatcher) Run(rm *room.Room) {
+	d.mu.Lock()
+	d.roomID = rm.Stats().RoomID
+	d.mu.Unlock()
 	for batch := range rm.Events() {
 		d.Dispatch(batch)
 	}
@@ -90,12 +96,16 @@ func (d *EventDispatcher) Dispatch(batch game.EventBatch) {
 	for _, e := range batch.Events {
 		mt, msg, err := convert.Event(e)
 		if err != nil {
-			// Unknown kind is a programming error, not a recoverable network
-			// condition; skip it but keep draining (do not wedge the stream).
+			// An unknown kind is a programming error, not a recoverable network
+			// condition. Skip it but keep draining (do not wedge the stream),
+			// and surface it with full correlation fields so a bad event is
+			// traceable to its room/stage/tick/entity (D5 observability).
+			d.logBadEvent(e, err)
 			continue
 		}
 		body, err := proto.Marshal(msg)
 		if err != nil {
+			d.logBadEvent(e, err)
 			continue
 		}
 		frame, err := network.EncodeFrame(network.Header{
@@ -104,10 +114,33 @@ func (d *EventDispatcher) Dispatch(batch game.EventBatch) {
 			MessageType: mt,
 		}, body)
 		if err != nil {
+			d.logBadEvent(e, err)
 			continue
 		}
 		d.broadcast(frame)
 	}
+}
+
+// logBadEvent reports a dropped event (unknown kind, marshal, or encode
+// failure) with room/stage/tick/entity correlation. These are never network
+// conditions — they indicate a server-side contract violation.
+func (d *EventDispatcher) logBadEvent(e game.Event, err error) {
+	d.mu.RLock()
+	roomID := d.roomID
+	logger := d.logger
+	d.mu.RUnlock()
+	if logger == nil {
+		return
+	}
+	logger.Error("dropped invalid event",
+		"room_id", roomID,
+		"kind", int(e.Kind),
+		"stage_index", e.StageIndex,
+		"server_tick", e.ServerTick,
+		"entity_id", e.EntityID,
+		"source_id", e.SourceID,
+		"err", err,
+	)
 }
 
 // broadcast delivers one already-encoded frame to every subscriber. It takes
@@ -122,10 +155,11 @@ func (d *EventDispatcher) Dispatch(batch game.EventBatch) {
 func (d *EventDispatcher) broadcast(frame []byte) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	for _, sink := range d.sinks {
+	for playerID, sink := range d.sinks {
 		if !sink.Send(frame) {
 			if d.logger != nil {
-				d.logger.Warn("reliable queue saturated, event delivery rejected")
+				d.logger.Warn("reliable queue saturated, event delivery rejected",
+					"room_id", d.roomID, "player_id", playerID)
 			}
 		}
 	}
