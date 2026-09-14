@@ -1,6 +1,7 @@
 package router
 
 import (
+	"log/slog"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -58,11 +59,21 @@ type CloseWatcher struct {
 	mu      sync.RWMutex
 	sinks   map[entity.ID]EventSink
 	onClose func(roomID room.ID, reason string)
+	logger  *slog.Logger
 }
 
 // NewCloseWatcher returns a watcher with no subscribers and no callback.
 func NewCloseWatcher() *CloseWatcher {
-	return &CloseWatcher{sinks: make(map[entity.ID]EventSink)}
+	return &CloseWatcher{sinks: make(map[entity.ID]EventSink), logger: slog.Default()}
+}
+
+// SetLogger installs the logger used to report reliable-queue saturation
+// (Send returning false) while fanning out the Disconnect frame. A nil logger
+// silences saturation reporting.
+func (w *CloseWatcher) SetLogger(logger *slog.Logger) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.logger = logger
 }
 
 // OnClose registers (or replaces) the room-closed callback. It is invoked once
@@ -110,12 +121,19 @@ func (w *CloseWatcher) Run(rm *room.Room) {
 	w.fireCallback(stats.RoomID, stats.CloseReason)
 }
 
-// broadcast delivers the Disconnect frame to every subscriber.
+// broadcast delivers the Disconnect frame to every subscriber. A sink
+// returning false means its reliable queue is already saturated; the sink owns
+// the disconnect, and the watcher surfaces the event rather than silently
+// dropping the terminal notification.
 func (w *CloseWatcher) broadcast(frame []byte) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	for _, sink := range w.sinks {
-		sink.Send(frame)
+		if !sink.Send(frame) {
+			if w.logger != nil {
+				w.logger.Warn("reliable queue saturated, disconnect delivery rejected")
+			}
+		}
 	}
 }
 

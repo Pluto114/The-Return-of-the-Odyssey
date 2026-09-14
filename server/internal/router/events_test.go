@@ -30,6 +30,20 @@ func (s *eventRecordingSink) Send(frame []byte) bool {
 	return true
 }
 
+// rejectingSink always reports a saturated reliable queue (Send=false),
+// simulating a slow connection whose outbound queue is full.
+type rejectingSink struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *rejectingSink) Send(frame []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return false
+}
+
 // decodeEvent reads a single frame and returns its MessageType + the raw body.
 func decodeEvent(t *testing.T, frame []byte) (uint16, []byte) {
 	t.Helper()
@@ -135,5 +149,40 @@ func TestEventDispatcherUnsubscribeStopsDelivery(t *testing.T) {
 	}
 	if d.Subscribers() != 0 {
 		t.Errorf("Subscribers = %d, want 0", d.Subscribers())
+	}
+}
+
+// TestEventDispatcherSaturationDoesNotAffectOthers verifies the T10 contract:
+// when one subscriber's reliable queue is saturated (Send=false), the event is
+// rejected for that sink but still delivered to every other subscriber — a slow
+// connection must not cause silent loss for healthy peers, and the dispatcher
+// must still fan the event out to them.
+func TestEventDispatcherSaturationDoesNotAffectOthers(t *testing.T) {
+	d := NewEventDispatcher()
+	healthy := &eventRecordingSink{}
+	slow := &rejectingSink{}
+	d.Subscribe(1, healthy)
+	d.Subscribe(2, slow)
+
+	d.Dispatch(game.EventBatch{Events: []game.Event{
+		{Kind: game.TeamDefeated, StageIndex: 1, ServerTick: 7},
+	}})
+
+	// The healthy sink receives the event exactly once.
+	if len(healthy.frames) != 1 {
+		t.Fatalf("healthy frames = %d, want 1 (saturation of a peer must not drop delivery)", len(healthy.frames))
+	}
+	mt, _ := decodeEvent(t, healthy.frames[0])
+	if mt != uint16(protocol.MessageType_MSG_TEAM_DEFEATED_EVENT) {
+		t.Errorf("healthy type = %d, want MSG_TEAM_DEFEATED_EVENT", mt)
+	}
+
+	// The saturated sink was still offered the frame (its Send was invoked and
+	// returned false), which is the surface that drives its disconnect.
+	slow.mu.Lock()
+	calls := slow.calls
+	slow.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("saturated sink Send calls = %d, want 1 (rejection must be surfaced, not silently skipped)", calls)
 	}
 }
