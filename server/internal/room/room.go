@@ -101,6 +101,8 @@ type control struct {
 	resumeState  chan ResumeStateReceipt
 	gameOutcome  game.GameOutcome
 	gameResult   chan GameResultReceipt
+	ready        bool
+	readiness    chan ReadinessReceipt
 }
 
 type rewardStart struct {
@@ -138,6 +140,14 @@ type GameResultReceipt struct {
 	Err    error
 }
 
+// ReadinessReceipt reports the next-stage barrier state on the owner
+// goroutine. Online counts the currently bound sessions; Ready counts how many
+// of them have signalled readiness for the next stage.
+type ReadinessReceipt struct {
+	Online int
+	Ready  int
+}
+
 type movement struct {
 	sessionID  SessionID
 	generation uint64
@@ -172,6 +182,7 @@ type Room struct {
 
 	world      *game.World
 	members    map[SessionID]binding
+	ready      map[SessionID]struct{}
 	generation uint64
 	emptyTimer *time.Timer
 	stats      Stats
@@ -199,7 +210,7 @@ func Start(ctx context.Context, id ID, config Config) (*Room, error) {
 		updates: make(chan Snapshot, 1), samples: make(chan TickSample, config.TickSampleCapacity),
 		events:  make(chan game.EventBatch, config.EventCapacity),
 		rewards: make(chan game.RewardUpdateBatch, config.EventCapacity),
-		world:   w, members: make(map[SessionID]binding), emptyTimer: time.NewTimer(config.EmptyTimeout), stats: Stats{RoomID: id}}
+		world:   w, members: make(map[SessionID]binding), ready: make(map[SessionID]struct{}), emptyTimer: time.NewTimer(config.EmptyTimeout), stats: Stats{RoomID: id}}
 	s := Snapshot{RoomID: id, Snapshot: w.Snapshot()}
 	r.latest.Store(&s)
 	r.storeStats()
@@ -257,6 +268,36 @@ func (r *Room) ChooseReward(sessionID SessionID, equipmentID equipment.ID) (<-ch
 		return nil, equipment.ErrUnknownEquipment
 	}
 	return r.submit(control{sessionID: sessionID, rewardChoice: equipmentID})
+}
+
+// Ready marks a session as ready for the next stage. It is idempotent: a
+// duplicate Ready from the same session is a no-op. The server advances only
+// when every bound session is ready and the reward round is complete; the
+// barrier is reset whenever a new stage starts.
+func (r *Room) Ready(sessionID SessionID) (<-chan error, error) {
+	if sessionID == 0 {
+		return nil, ErrInvalidSession
+	}
+	return r.submit(control{sessionID: sessionID, ready: true})
+}
+
+// Readiness snapshots the next-stage barrier on the owner goroutine: how many
+// sessions are bound and how many of them have signalled readiness. It is a
+// non-mutating receipt query for the stage orchestration layer.
+func (r *Room) Readiness() (<-chan ReadinessReceipt, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	receipt := make(chan ReadinessReceipt, 1)
+	select {
+	case r.controls <- control{readiness: receipt}:
+		return receipt, nil
+	default:
+		r.rejected.Add(1)
+		return nil, ErrQueueFull
+	}
 }
 
 // CompletedStage reads the immutable plan and frozen metrics through the Room
@@ -447,6 +488,9 @@ func (r *Room) tick(now time.Time) {
 				result, err := r.world.GameResult(c.gameOutcome)
 				c.gameResult <- GameResultReceipt{Result: result.Clone(), Err: err}
 				close(c.gameResult)
+			case c.readiness != nil:
+				c.readiness <- ReadinessReceipt{Online: len(r.members), Ready: len(r.ready)}
+				close(c.readiness)
 			default:
 				err := r.applyControl(c)
 				c.result <- err
@@ -512,6 +556,9 @@ simulate:
 
 func (r *Room) applyControl(c control) error {
 	if c.stagePlan != nil {
+		// A new stage begins: reset the next-stage ready barrier so players
+		// must signal readiness afresh for the following stage.
+		clear(r.ready)
 		return r.world.StartStage(*c.stagePlan)
 	}
 	if c.rewardStart != nil {
@@ -528,6 +575,13 @@ func (r *Room) applyControl(c control) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if c.ready {
+		if _, joined := r.members[c.sessionID]; !joined {
+			return ErrNotJoined
+		}
+		r.ready[c.sessionID] = struct{}{}
+		return nil
+	}
 	if c.join {
 		if member, exists := r.members[c.sessionID]; exists {
 			if member.playerID == c.playerID {
@@ -546,6 +600,7 @@ func (r *Room) applyControl(c control) error {
 	if member, exists := r.members[c.sessionID]; exists {
 		r.world.RemovePlayer(member.playerID)
 		delete(r.members, c.sessionID)
+		delete(r.ready, c.sessionID)
 		if r.world.PlayerCount() == 0 {
 			r.emptyTimer.Reset(r.config.EmptyTimeout)
 		}
@@ -588,13 +643,16 @@ func (r *Room) finish() {
 			case c.resumeState != nil:
 				c.resumeState <- ResumeStateReceipt{Err: ErrClosed}
 				close(c.resumeState)
-			case c.gameResult != nil:
-				c.gameResult <- GameResultReceipt{Err: ErrClosed}
-				close(c.gameResult)
-			default:
-				c.result <- ErrClosed
-				close(c.result)
-			}
+		case c.gameResult != nil:
+			c.gameResult <- GameResultReceipt{Err: ErrClosed}
+			close(c.gameResult)
+		case c.readiness != nil:
+			c.readiness <- ReadinessReceipt{}
+			close(c.readiness)
+		default:
+			c.result <- ErrClosed
+			close(c.result)
+		}
 		default:
 			goto drainInputs
 		}

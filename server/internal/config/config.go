@@ -34,6 +34,13 @@ type Config struct {
 	// LoginTimeoutSec is how long a connected socket may wait before sending
 	// LoginRequest (default 5s). Not in .env.example yet; exposed as a knob.
 	LoginTimeoutSec int
+
+	// ResumeGraceSec is the reconnect grace window in seconds: how long a
+	// disconnected session may present its resume token and rebind to a new
+	// connection before the server removes it from the room. Default 60s,
+	// matching the LoginResponse::resume_token lifetime documented in
+	// session.proto.
+	ResumeGraceSec int
 }
 
 // Default returns the built-in defaults. These match configs/.env.example so
@@ -54,6 +61,7 @@ func Default() *Config {
 		RedisPass:       "odyssey_redis_local_only",
 		RedisDB:         0,
 		LoginTimeoutSec: 5,
+		ResumeGraceSec:  60,
 	}
 }
 
@@ -105,6 +113,9 @@ func (c *Config) Validate() error {
 	if c.TCPAddr == "" {
 		return fmt.Errorf("config: ODYSSEY_TCP_ADDR must not be empty")
 	}
+	if c.ResumeGraceSec <= 0 {
+		return fmt.Errorf("config: ODYSSEY_RESUME_GRACE_SEC must be positive, got %d", c.ResumeGraceSec)
+	}
 	return nil
 }
 
@@ -149,6 +160,10 @@ func applyKey(cfg *Config, key, val string) {
 	case "ODYSSEY_LOGIN_TIMEOUT_SEC":
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.LoginTimeoutSec = n
+		}
+	case "ODYSSEY_RESUME_GRACE_SEC":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.ResumeGraceSec = n
 		}
 	}
 }

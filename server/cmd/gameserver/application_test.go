@@ -28,7 +28,7 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 	// The application loads the versioned equipment catalog from the repo root
 	// (data/equipment/catalog.json) relative to the process working directory.
 	t.Chdir("../../..")
-	app, err := newGameApplication(ctx, logger, metrics.New())
+	app, err := newGameApplication(ctx, logger, metrics.New(), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,8 @@ package network
 import (
 	"bufio"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -25,6 +27,39 @@ type Handler func(c *Connection, h Header, payload []byte) error
 // separate goroutine.
 type DisconnectHandler func(c *Connection)
 
+// Observer receives transport-level events so the application can surface
+// network throughput, queue depth, and rejection metrics (D9 observability)
+// without the network package depending on the metrics package. Every method
+// must return quickly and never block the Reader/Writer goroutines.
+type Observer interface {
+	// OnConnectionAccepted is called once when a TCP connection is accepted.
+	OnConnectionAccepted()
+	// OnConnectionClosed is called once after a connection fully tears down.
+	OnConnectionClosed()
+	// OnBytesReceived is called with each inbound read size.
+	OnBytesReceived(n int)
+	// OnBytesSent is called with each outbound write size.
+	OnBytesSent(n int)
+	// OnFrameReceived is called after a frame is successfully decoded.
+	OnFrameReceived()
+	// OnFrameSent is called after a frame is successfully written.
+	OnFrameSent()
+	// OnSnapshotSent is called after a latest-wins snapshot frame is written,
+	// with its full byte size. This separates the 10Hz snapshot bandwidth from
+	// reliable traffic (D9).
+	OnSnapshotSent(bytes int)
+	// OnInvalidFrame is called when ReadFrame rejects a frame. reason is a
+	// bounded string (see metrics.FrameResult); it must never be client text.
+	OnInvalidFrame(reason string)
+	// OnReliableRejection is called when a reliable Send is rejected because
+	// the queue is full (backpressure).
+	OnReliableRejection()
+	// OnSnapshotDrop is called when a stale snapshot is evicted (latest-wins).
+	OnSnapshotDrop()
+	// OnReliableDepth is called whenever the reliable queue length changes.
+	OnReliableDepth(depth int)
+}
+
 // Server accepts TCP connections and dispatches each to its own Connection.
 type Server struct {
 	handler Handler
@@ -33,6 +68,7 @@ type Server struct {
 	mu           sync.Mutex
 	conns        map[*Connection]struct{}
 	onDisconnect DisconnectHandler
+	observer     Observer
 }
 
 // OnDisconnect installs the application lifecycle callback. Configure it
@@ -41,6 +77,14 @@ func (s *Server) OnDisconnect(handler DisconnectHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDisconnect = handler
+}
+
+// SetObserver installs the transport observer. Configure it before Serve
+// starts; it is read by each new connection at accept time.
+func (s *Server) SetObserver(o Observer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observer = o
 }
 
 // NewServer creates a server that will route every connection's decoded
@@ -79,6 +123,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 		c := s.newConnection(conn)
 		s.track(c)
+		if s.observer != nil {
+			s.observer.OnConnectionAccepted()
+		}
 		go c.run()
 	}
 }
@@ -91,9 +138,13 @@ func (s *Server) newConnection(conn net.Conn) *Connection {
 		out:      make(chan []byte, 256),
 		snapshot: make(chan []byte, 1),
 		closed:   make(chan struct{}),
+		observer: s.observer,
 	}
 	c.onClose = func() {
 		s.untrack(c)
+		if s.observer != nil {
+			s.observer.OnConnectionClosed()
+		}
 		s.mu.Lock()
 		handler := s.onDisconnect
 		s.mu.Unlock()
@@ -168,6 +219,8 @@ type Connection struct {
 	closed    chan struct{}
 	onClose   func()
 
+	observer Observer
+
 	// ctx is opaque per-connection context owned by the caller (the session
 	// router). The network layer stores it without interpreting it, keeping
 	// network and session concerns separate.
@@ -217,8 +270,14 @@ func (c *Connection) Send(frame []byte) bool {
 	}
 	select {
 	case c.out <- frame:
+		if c.observer != nil {
+			c.observer.OnReliableDepth(len(c.out))
+		}
 		return true
 	default:
+		if c.observer != nil {
+			c.observer.OnReliableRejection()
+		}
 		return false
 	}
 }
@@ -245,6 +304,9 @@ func (c *Connection) SendSnapshot(frame []byte) bool {
 			// eviction loop is bounded by capacity 1, so this never spins.
 			select {
 			case <-c.snapshot:
+				if c.observer != nil {
+					c.observer.OnSnapshotDrop()
+				}
 			default:
 			}
 		}
@@ -310,7 +372,12 @@ func (c *Connection) readLoop(done chan<- struct{}) {
 		h, payload, err := ReadFrame(r)
 		if err != nil {
 			c.logger.Debug("connection read ended", "err", err)
+			c.observeReadError(err)
 			return
+		}
+		if c.observer != nil {
+			c.observer.OnFrameReceived()
+			c.observer.OnBytesReceived(HeaderLen + len(payload))
 		}
 		if err := c.handler(c, h, payload); err != nil {
 			c.logger.Debug("handler rejected message, closing", "err", err)
@@ -327,7 +394,7 @@ func (c *Connection) writeLoop(done chan<- struct{}) {
 		// lingers behind the reliable queue.
 		select {
 		case frame := <-c.snapshot:
-			if !c.writeFrame(w, frame) {
+			if !c.writeSnapshotFrame(w, frame) {
 				return
 			}
 			continue
@@ -341,7 +408,7 @@ func (c *Connection) writeLoop(done chan<- struct{}) {
 				for {
 					select {
 					case f := <-c.snapshot:
-						if !c.writeFrame(w, f) {
+						if !c.writeSnapshotFrame(w, f) {
 							return
 						}
 					default:
@@ -349,20 +416,23 @@ func (c *Connection) writeLoop(done chan<- struct{}) {
 					}
 				}
 			}
+			if c.observer != nil {
+				c.observer.OnReliableDepth(len(c.out))
+			}
 			if !c.writeFrame(w, frame) {
 				return
 			}
 		case frame := <-c.snapshot:
-			if !c.writeFrame(w, frame) {
+			if !c.writeSnapshotFrame(w, frame) {
 				return
 			}
 		}
 	}
 }
 
-// writeFrame writes a single frame and flushes it so a partial frame is never
-// observed by the peer. It reports false on any error, signalling the writer
-// to unwind.
+// writeFrame writes a single reliable frame and flushes it so a partial frame
+// is never observed by the peer. It reports false on any error, signalling the
+// writer to unwind.
 func (c *Connection) writeFrame(w *bufio.Writer, frame []byte) bool {
 	if _, err := w.Write(frame); err != nil {
 		c.logger.Debug("connection write failed", "err", err)
@@ -372,5 +442,47 @@ func (c *Connection) writeFrame(w *bufio.Writer, frame []byte) bool {
 		c.logger.Debug("connection flush failed", "err", err)
 		return false
 	}
+	if c.observer != nil {
+		c.observer.OnFrameSent()
+		c.observer.OnBytesSent(len(frame))
+	}
 	return true
+}
+
+// writeSnapshotFrame writes a latest-wins snapshot frame and reports it to the
+// observer as snapshot bandwidth (separate from reliable traffic) in addition
+// to the generic sent counters.
+func (c *Connection) writeSnapshotFrame(w *bufio.Writer, frame []byte) bool {
+	if !c.writeFrame(w, frame) {
+		return false
+	}
+	if c.observer != nil {
+		c.observer.OnSnapshotSent(len(frame))
+	}
+	return true
+}
+
+// observeReadError maps a ReadFrame error to a bounded reason for the observer.
+// It deliberately swallows the raw error text so no client-controlled string
+// ever becomes a metric label value.
+func (c *Connection) observeReadError(err error) {
+	if c.observer == nil || err == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, ErrInvalidMagic):
+		c.observer.OnInvalidFrame("invalid_magic")
+	case errors.Is(err, ErrInvalidVersion):
+		c.observer.OnInvalidFrame("invalid_version")
+	case errors.Is(err, ErrFrameTooLarge):
+		c.observer.OnInvalidFrame("too_large")
+	case errors.Is(err, ErrMessageTypeZero):
+		c.observer.OnInvalidFrame("message_type_zero")
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		// Clean close or truncated final frame: not a malformed frame, so no
+		// invalid-frame count; a clean EOF is normal teardown.
+	default:
+		// Transport error or partial header read (half-packet disconnect).
+		c.observer.OnInvalidFrame("short_read")
+	}
 }

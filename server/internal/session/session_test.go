@@ -147,3 +147,49 @@ func TestIdentityAssignment(t *testing.T) {
 		t.Fatalf("identity = (%d,%d), want (42,7)", sid, pid)
 	}
 }
+
+// TestInRoomRewardLifecycle locks in the D7 session phase transitions: a player
+// enters InRoom after matching, moves to Reward when the stage clears, and
+// returns to InRoom when the next stage begins. The legality matrix must admit
+// REWARD_CHOICE only during Reward and PLAYER_INPUT only during InRoom.
+func TestInRoomRewardLifecycle(t *testing.T) {
+	s := New()
+	s.Transition(StateLobby)
+	s.Transition(StateMatching)
+	if !s.Transition(StateInRoom) {
+		t.Fatal("matching->in_room should be legal")
+	}
+
+	// In-room: input legal, reward choice illegal.
+	if ok, _ := s.Accept(protocol.MessageType_MSG_PLAYER_INPUT); !ok {
+		t.Fatal("PlayerInput should be accepted in in_room")
+	}
+	if ok, _ := s.Accept(protocol.MessageType_MSG_REWARD_CHOICE); ok {
+		t.Fatal("RewardChoice should be rejected in in_room")
+	}
+	if ok, _ := s.Accept(protocol.MessageType_MSG_NEXT_STAGE_REQUEST); !ok {
+		t.Fatal("NextStageRequest should be accepted in in_room")
+	}
+
+	// Stage cleared -> reward.
+	if !s.Transition(StateReward) {
+		t.Fatal("in_room->reward should be legal")
+	}
+	if ok, _ := s.Accept(protocol.MessageType_MSG_REWARD_CHOICE); !ok {
+		t.Fatal("RewardChoice should be accepted in reward")
+	}
+	if ok, _ := s.Accept(protocol.MessageType_MSG_PLAYER_INPUT); ok {
+		t.Fatal("PlayerInput should be rejected in reward")
+	}
+	if ok, _ := s.Accept(protocol.MessageType_MSG_NEXT_STAGE_REQUEST); !ok {
+		t.Fatal("NextStageRequest should be accepted in reward")
+	}
+
+	// Next stage begins -> back in room.
+	if !s.Transition(StateInRoom) {
+		t.Fatal("reward->in_room should be legal")
+	}
+	if ok, _ := s.Accept(protocol.MessageType_MSG_PLAYER_INPUT); !ok {
+		t.Fatal("PlayerInput should be accepted again after next stage")
+	}
+}

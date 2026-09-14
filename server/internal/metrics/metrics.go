@@ -14,6 +14,7 @@ var (
 	ErrInvalidSnapshot        = errors.New("metric snapshot values must not be negative")
 	ErrInvalidMatchDuration   = errors.New("match duration must not be negative")
 	ErrInvalidReconnectResult = errors.New("invalid reconnect result")
+	ErrInvalidFrameResult     = errors.New("invalid frame result")
 )
 
 // ReconnectResult is a bounded label value. Keeping this set closed prevents
@@ -34,6 +35,19 @@ type Snapshot struct {
 	MatchQueuePlayers int
 }
 
+// FrameResult is a bounded label value for inbound frame parsing outcomes.
+// Keeping this set closed prevents client-controlled strings (or error text)
+// from creating unbounded Prometheus series.
+type FrameResult string
+
+const (
+	FrameInvalidMagic     FrameResult = "invalid_magic"
+	FrameInvalidVersion   FrameResult = "invalid_version"
+	FrameTooLarge         FrameResult = "too_large"
+	FrameMessageTypeZero  FrameResult = "message_type_zero"
+	FrameShortRead        FrameResult = "short_read"
+)
+
 // Metrics centralizes the project's collector definitions and registry. Its
 // methods are safe for concurrent use through the Prometheus collectors.
 type Metrics struct {
@@ -46,6 +60,23 @@ type Metrics struct {
 	matchDuration     prometheus.Histogram
 	tickWorkDuration  prometheus.Histogram
 	reconnectAttempts *prometheus.CounterVec
+
+	// Network transport metrics (D9). Bytes and frames are counters; queue
+	// depth is a gauge; rejections/drops are counters surfaced to prove
+	// backpressure is observable and that a bad client cannot silently drop
+	// another room's traffic.
+	connectionsAccepted prometheus.Counter
+	connectionsClosed   prometheus.Counter
+	bytesReceived       prometheus.Counter
+	bytesSent           prometheus.Counter
+	framesReceived      prometheus.Counter
+	framesSent          prometheus.Counter
+	snapshotFramesSent  prometheus.Counter
+	snapshotBytesSent   prometheus.Counter
+	reliableQueueDepth  prometheus.Gauge
+	reliableRejections  prometheus.Counter
+	snapshotDrops       prometheus.Counter
+	invalidFrames       *prometheus.CounterVec
 }
 
 // New creates an isolated registry containing Go/process collectors and the
@@ -92,6 +123,66 @@ func New() *Metrics {
 			Name:      "reconnect_attempts_total",
 			Help:      "Total number of reconnect attempts by bounded result.",
 		}, []string{"result"}),
+		connectionsAccepted: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "connections_accepted_total",
+			Help:      "Total number of TCP connections accepted.",
+		}),
+		connectionsClosed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "connections_closed_total",
+			Help:      "Total number of TCP connections fully torn down.",
+		}),
+		bytesReceived: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "network_bytes_received_total",
+			Help:      "Total inbound bytes read from client sockets.",
+		}),
+		bytesSent: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "network_bytes_sent_total",
+			Help:      "Total outbound bytes written to client sockets.",
+		}),
+		framesReceived: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "network_frames_received_total",
+			Help:      "Total inbound frames decoded successfully.",
+		}),
+		framesSent: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "network_frames_sent_total",
+			Help:      "Total outbound frames written.",
+		}),
+		snapshotFramesSent: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "snapshot_frames_sent_total",
+			Help:      "Total world-snapshot frames delivered to sinks.",
+		}),
+		snapshotBytesSent: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "snapshot_bytes_sent_total",
+			Help:      "Total world-snapshot frame bytes delivered to sinks.",
+		}),
+		reliableQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "odyssey",
+			Name:      "reliable_queue_depth",
+			Help:      "Current number of frames queued on reliable outbound queues (sum across connections).",
+		}),
+		reliableRejections: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "reliable_queue_rejections_total",
+			Help:      "Total reliable-queue sends rejected because the queue was full.",
+		}),
+		snapshotDrops: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "snapshot_drops_total",
+			Help:      "Total stale world snapshots evicted by latest-wins delivery.",
+		}),
+		invalidFrames: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "odyssey",
+			Name:      "invalid_frames_total",
+			Help:      "Total inbound frames rejected at parse time, by bounded reason.",
+		}, []string{"reason"}),
 	}
 
 	registry.MustRegister(
@@ -104,6 +195,18 @@ func New() *Metrics {
 		result.matchDuration,
 		result.tickWorkDuration,
 		result.reconnectAttempts,
+		result.connectionsAccepted,
+		result.connectionsClosed,
+		result.bytesReceived,
+		result.bytesSent,
+		result.framesReceived,
+		result.framesSent,
+		result.snapshotFramesSent,
+		result.snapshotBytesSent,
+		result.reliableQueueDepth,
+		result.reliableRejections,
+		result.snapshotDrops,
+		result.invalidFrames,
 	)
 	return result
 }
@@ -156,6 +259,91 @@ func (m *Metrics) ObserveReconnect(result ReconnectResult) error {
 func validReconnectResult(result ReconnectResult) bool {
 	switch result {
 	case ReconnectSucceeded, ReconnectInvalidToken, ReconnectExpired, ReconnectBackendError:
+		return true
+	default:
+		return false
+	}
+}
+
+// ObserveConnectionAccepted records one accepted TCP connection.
+func (m *Metrics) ObserveConnectionAccepted() {
+	m.connectionsAccepted.Inc()
+}
+
+// ObserveConnectionClosed records one fully torn-down TCP connection.
+func (m *Metrics) ObserveConnectionClosed() {
+	m.connectionsClosed.Inc()
+}
+
+// ObserveBytesReceived records n inbound bytes read from a client socket.
+func (m *Metrics) ObserveBytesReceived(n int) {
+	if n <= 0 {
+		return
+	}
+	m.bytesReceived.Add(float64(n))
+}
+
+// ObserveBytesSent records n outbound bytes written to a client socket.
+func (m *Metrics) ObserveBytesSent(n int) {
+	if n <= 0 {
+		return
+	}
+	m.bytesSent.Add(float64(n))
+}
+
+// ObserveFrameReceived records one successfully decoded inbound frame.
+func (m *Metrics) ObserveFrameReceived() {
+	m.framesReceived.Inc()
+}
+
+// ObserveFrameSent records one outbound frame written.
+func (m *Metrics) ObserveFrameSent() {
+	m.framesSent.Inc()
+}
+
+// ObserveSnapshotSent records one world-snapshot frame (and its byte size)
+// delivered to a sink. Size is the full encoded frame length.
+func (m *Metrics) ObserveSnapshotSent(bytes int) {
+	m.snapshotFramesSent.Inc()
+	if bytes > 0 {
+		m.snapshotBytesSent.Add(float64(bytes))
+	}
+}
+
+// SetReliableQueueDepth sets the aggregate reliable-queue depth gauge. The
+// value is the total frames currently queued across all connections.
+func (m *Metrics) SetReliableQueueDepth(depth int) {
+	if depth < 0 {
+		return
+	}
+	m.reliableQueueDepth.Set(float64(depth))
+}
+
+// ObserveReliableRejection records one reliable-queue send rejected because
+// the queue was full (backpressure).
+func (m *Metrics) ObserveReliableRejection() {
+	m.reliableRejections.Inc()
+}
+
+// ObserveSnapshotDrop records one stale world snapshot evicted by latest-wins
+// delivery (a slow consumer falling behind is observable, never silent).
+func (m *Metrics) ObserveSnapshotDrop() {
+	m.snapshotDrops.Inc()
+}
+
+// ObserveInvalidFrame records one inbound frame rejected at parse time, using
+// a bounded reason label.
+func (m *Metrics) ObserveInvalidFrame(reason FrameResult) error {
+	if !validFrameResult(reason) {
+		return ErrInvalidFrameResult
+	}
+	m.invalidFrames.WithLabelValues(string(reason)).Inc()
+	return nil
+}
+
+func validFrameResult(reason FrameResult) bool {
+	switch reason {
+	case FrameInvalidMagic, FrameInvalidVersion, FrameTooLarge, FrameMessageTypeZero, FrameShortRead:
 		return true
 	default:
 		return false

@@ -26,7 +26,6 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/config"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
-	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
 
 // errClosing is a sentinel returned by the handler to signal the reader to
@@ -64,13 +63,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	metricSet := metrics.New()
-	app, err := newGameApplication(ctx, logger, metricSet)
+	app, err := newGameApplication(ctx, logger, metricSet, time.Duration(cfg.ResumeGraceSec)*time.Second)
 	if err != nil {
 		logger.Error("failed to initialize application", "err", err)
 		os.Exit(1)
 	}
 	srv := network.NewServer(app.handle, logger)
 	srv.OnDisconnect(app.disconnected)
+	srv.SetObserver(newMetricsObserver(metricSet))
 	ln, err := net.Listen("tcp", cfg.TCPAddr)
 	if err != nil {
 		logger.Error("failed to listen", "addr", cfg.TCPAddr, "err", err)
@@ -107,40 +107,16 @@ func serveHTTP(server *http.Server, name string, logger *slog.Logger, stop conte
 	}
 }
 
-// routeMessage decodes the payload by MessageType, validates it against the
-// connection's session state machine, and produces the appropriate reply.
-func routeMessage(c *network.Connection, h network.Header, payload []byte, ids *idAllocator, logger *slog.Logger) error {
+// routeMessage handles the stateless protocol messages that need no session
+// or registry context (Ping). Login and resume are handled by the
+// gameApplication, which owns the session registry and room bindings.
+func routeMessage(c *network.Connection, h network.Header, payload []byte) error {
 	mt := protocol.MessageType(h.MessageType)
-
-	// Session state is stored per-connection. In Phase 1 the connection IS the
-	// session context; a real session registry (resume/redis) lands with D.
-	var sess *session.Session
-	if v := c.Context(); v != nil {
-		sess = v.(*session.Session)
-	} else {
-		sess = session.New()
-		c.SetContext(sess)
-	}
-
-	// State machine validation (message-routing.md). Ping/Pong and login are
-	// the only accepted messages before login; everything else is rejected.
-	if ok, reason := sess.Accept(mt); !ok {
-		logger.Debug("message rejected by state machine", "state", sess.State(), "mt", mt, "reason", reason)
-		return sendDisconnect(c, h, reason, "invalid message for session state")
-	}
 
 	switch mt {
 	case protocol.MessageType_MSG_PING:
 		return handlePing(c, h, payload)
-	case protocol.MessageType_MSG_LOGIN_REQUEST:
-		return handleLogin(c, h, payload, ids, sess)
-	case protocol.MessageType_MSG_PLAYER_INPUT:
-		// Accepted by the state machine only when IN_ROOM. Room is not wired
-		// in Phase 1; acknowledge nothing and drop for now (B will consume).
-		return nil
 	default:
-		// Legally accepted but not yet implemented (match, reward, etc.).
-		logger.Debug("message accepted but unhandled", "mt", mt)
 		return nil
 	}
 }
@@ -156,37 +132,6 @@ func handlePing(c *network.Connection, h network.Header, payload []byte) error {
 		Nonce:        ping.Nonce,
 	}
 	return sendMessage(c, h, protocol.MessageType_MSG_PONG, pong)
-}
-
-func handleLogin(c *network.Connection, h network.Header, payload []byte, ids *idAllocator, sess *session.Session) error {
-	var req protocol.LoginRequest
-	if err := proto.Unmarshal(payload, &req); err != nil {
-		return err
-	}
-
-	// Protocol version check: must match the header Version (both = 1).
-	if req.ProtocolVersion != 0 && req.ProtocolVersion != uint32(network.VersionV1) {
-		resp := &protocol.LoginResponse{
-			ProtocolVersion: uint32(network.VersionV1),
-			Reason:          protocol.ReasonCode_REASON_INVALID_VERSION,
-			Message:         "unsupported protocol version",
-		}
-		return sendMessage(c, h, protocol.MessageType_MSG_LOGIN_RESPONSE, resp)
-	}
-
-	sessionID, playerID := ids.next()
-	sess.AssignIdentity(sessionID, playerID)
-	sess.Transition(session.StateLobby)
-
-	resp := &protocol.LoginResponse{
-		ProtocolVersion: uint32(network.VersionV1),
-		Reason:          protocol.ReasonCode_REASON_OK,
-		Message:         "ok",
-		SessionId:       sessionID,
-		PlayerId:        playerID,
-		ResumeToken:     nil, // Phase 1: reconnect treated as a new session
-	}
-	return sendMessage(c, h, protocol.MessageType_MSG_LOGIN_RESPONSE, resp)
 }
 
 // sendDisconnect writes a Disconnect message (ReasonCode), flushes it, and

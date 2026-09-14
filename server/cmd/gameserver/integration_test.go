@@ -40,11 +40,30 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 		conns.Store(c, true)
 		mt := pb.MessageType(h.MessageType)
 		if mt != pb.MessageType_MSG_MATCH_REQUEST && mt != pb.MessageType_MSG_PLAYER_INPUT {
-			return routeMessage(c, h, b, ids, logger)
+			if mt == pb.MessageType_MSG_PING {
+				return routeMessage(c, h, b)
+			}
+			// Inline login: this test-only assembly has no session registry;
+			// it allocates an identity and moves to Lobby directly.
+			var req pb.LoginRequest
+			if err := proto.Unmarshal(b, &req); err != nil {
+				return err
+			}
+			sess := session.New()
+			sid, pid := ids.next()
+			sess.AssignIdentity(sid, pid)
+			sess.Transition(session.StateLobby)
+			c.SetContext(sess)
+			return sendMessage(c, h, pb.MessageType_MSG_LOGIN_RESPONSE, &pb.LoginResponse{
+				ProtocolVersion: uint32(network.VersionV1),
+				Reason:          pb.ReasonCode_REASON_OK,
+				SessionId:       sid,
+				PlayerId:        pid,
+			})
 		}
 		sess, ok := c.Context().(*session.Session)
 		if !ok {
-			return routeMessage(c, h, b, ids, logger)
+			return sendDisconnect(c, h, pb.ReasonCode_REASON_INVALID_STATE, "login required")
 		}
 		if accepted, reason := sess.Accept(mt); !accepted {
 			return sendDisconnect(c, h, reason, "integration state rejection")

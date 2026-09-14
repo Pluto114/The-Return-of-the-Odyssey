@@ -217,7 +217,7 @@ func (s *Session) canTransition(from, to State) bool {
 	case StateInRoom:
 		return from == StateMatching || from == StateReward || from == StateDisconnected
 	case StateReward:
-		return from == StateInRoom
+		return from == StateInRoom || from == StateDisconnected
 	case StateConnected:
 		return from == StateDisconnected // rebind before resume completes
 	}

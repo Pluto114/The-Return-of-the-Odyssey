@@ -123,6 +123,59 @@ func TestMetricsAllowConcurrentUpdatesAndScrapes(t *testing.T) {
 	}
 }
 
+func TestMetricsExposeNetworkTransport(t *testing.T) {
+	t.Parallel()
+
+	m := New()
+	m.ObserveConnectionAccepted()
+	m.ObserveConnectionAccepted()
+	m.ObserveConnectionClosed()
+	m.ObserveBytesReceived(16 + 4)
+	m.ObserveBytesSent(16 + 8)
+	m.ObserveFrameReceived()
+	m.ObserveFrameSent()
+	m.ObserveSnapshotSent(16 + 128)
+	m.SetReliableQueueDepth(7)
+	m.ObserveReliableRejection()
+	m.ObserveSnapshotDrop()
+	if err := m.ObserveInvalidFrame(FrameInvalidMagic); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ObserveInvalidFrame(FrameTooLarge); err != nil {
+		t.Fatal(err)
+	}
+
+	body := scrape(t, m)
+	for _, sample := range []string{
+		"odyssey_connections_accepted_total 2",
+		"odyssey_connections_closed_total 1",
+		"odyssey_network_bytes_received_total 20",
+		"odyssey_network_bytes_sent_total 24",
+		"odyssey_network_frames_received_total 1",
+		"odyssey_network_frames_sent_total 1",
+		"odyssey_snapshot_frames_sent_total 1",
+		"odyssey_snapshot_bytes_sent_total 144",
+		"odyssey_reliable_queue_depth 7",
+		"odyssey_reliable_queue_rejections_total 1",
+		"odyssey_snapshot_drops_total 1",
+		`odyssey_invalid_frames_total{reason="invalid_magic"} 1`,
+		`odyssey_invalid_frames_total{reason="too_large"} 1`,
+	} {
+		if !strings.Contains(body, sample) {
+			t.Errorf("scrape does not contain %q", sample)
+		}
+	}
+}
+
+func TestMetricsRejectInvalidFrameResult(t *testing.T) {
+	t.Parallel()
+
+	m := New()
+	if err := m.ObserveInvalidFrame("client-controlled-string"); !errors.Is(err, ErrInvalidFrameResult) {
+		t.Errorf("unbounded frame result error = %v, want %v", err, ErrInvalidFrameResult)
+	}
+}
+
 func scrape(t *testing.T, metrics *Metrics) string {
 	t.Helper()
 	body, err := scrapeMetrics(metrics)
