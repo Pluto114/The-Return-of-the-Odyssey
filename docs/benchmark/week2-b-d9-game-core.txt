@@ -1,0 +1,67 @@
+timestamp=2026-09-12T17:32:51.5958307+08:00
+go version go1.26.8 windows/amd64
+windows
+amd64
+=== RUN   TestRealtimeTickCadenceUnder50RoomCombat
+    realtime_performance_test.go:143: runtime=go1.26.8 windows/amd64 rooms=50 samples=15088 min_hz=29.986 max_hz=29.995 tick_work_p99=1.0122ms
+--- PASS: TestRealtimeTickCadenceUnder50RoomCombat (10.07s)
+PASS
+ok  	github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room	11.351s
+ok  	github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room	1.274s
+goos: windows
+goarch: amd64
+pkg: github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game
+cpu: 13th Gen Intel(R) Core(TM) i9-13900HX
+BenchmarkGameCore/AI64-32         	  182505	      6235 ns/op	     528 B/op	       2 allocs/op
+BenchmarkGameCore/AI64-32         	  185862	      6229 ns/op	     528 B/op	       2 allocs/op
+BenchmarkGameCore/AI64-32         	  197826	     10500 ns/op	     528 B/op	       2 allocs/op
+BenchmarkGameCore/AI64-32         	   82821	     14932 ns/op	     528 B/op	       2 allocs/op
+BenchmarkGameCore/AI64-32         	   81397	     14904 ns/op	     528 B/op	       2 allocs/op
+BenchmarkGameCore/Collision64x256-32         	    1640	    759970 ns/op	    2576 B/op	       3 allocs/op
+BenchmarkGameCore/Collision64x256-32         	    1647	    765816 ns/op	    2576 B/op	       3 allocs/op
+BenchmarkGameCore/Collision64x256-32         	    1689	    759754 ns/op	    2576 B/op	       3 allocs/op
+BenchmarkGameCore/Collision64x256-32         	    1608	    806912 ns/op	    2576 B/op	       3 allocs/op
+BenchmarkGameCore/Collision64x256-32         	    1491	    772708 ns/op	    2576 B/op	       3 allocs/op
+BenchmarkGameCore/Snapshot2x64-32            	   52491	     21129 ns/op	    8992 B/op	       9 allocs/op
+BenchmarkGameCore/Snapshot2x64-32            	   70042	     20529 ns/op	    8992 B/op	       9 allocs/op
+BenchmarkGameCore/Snapshot2x64-32            	   46473	     22981 ns/op	    8992 B/op	       9 allocs/op
+BenchmarkGameCore/Snapshot2x64-32            	   62822	     22213 ns/op	    8992 B/op	       9 allocs/op
+BenchmarkGameCore/Snapshot2x64-32            	   63448	     21883 ns/op	    8992 B/op	       9 allocs/op
+BenchmarkGameCore/Director64-32              	   28309	     41917 ns/op	    9144 B/op	       6 allocs/op
+BenchmarkGameCore/Director64-32              	   28130	     41221 ns/op	    9144 B/op	       6 allocs/op
+BenchmarkGameCore/Director64-32              	   28618	     42913 ns/op	    9144 B/op	       6 allocs/op
+BenchmarkGameCore/Director64-32              	   30682	     41891 ns/op	    9144 B/op	       6 allocs/op
+BenchmarkGameCore/Director64-32              	   30906	     40645 ns/op	    9144 B/op	       6 allocs/op
+PASS
+ok  	github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game	27.116s
+goos: windows
+goarch: amd64
+pkg: github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game
+cpu: 13th Gen Intel(R) Core(TM) i9-13900HX
+BenchmarkGameCore/Collision64x256-32         	    9744	    370712 ns/op	    2578 B/op	       3 allocs/op
+PASS
+ok  	github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game	3.878s
+File: game.test.exe
+Build ID: E:\The-Return-of-the-Odyssey-week2-b\game.test.exe2026-09-12 17:29:46.352736 +0800 CST
+Type: cpu
+Time: 2026-09-12 17:33:39 CST
+Duration: 3.64s, Total samples = 3.54s (97.16%)
+Showing nodes accounting for 3.44s, 97.18% of 3.54s total
+Dropped 15 nodes (cum <= 0.02s)
+Showing top 15 nodes out of 52
+      flat  flat%   sum%        cum   cum%
+     1.22s 34.46% 34.46%      1.23s 34.75%  github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/systems.SegmentCircle
+     0.97s 27.40% 61.86%      3.43s 96.89%  github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game.(*World).stepCombat
+     0.56s 15.82% 77.68%      1.01s 28.53%  runtime.mapaccess1_fast64
+     0.15s  4.24% 81.92%      0.15s  4.24%  internal/runtime/maps.(*Map).directoryIndex (inline)
+     0.13s  3.67% 85.59%      0.13s  3.67%  runtime.memhash64
+     0.08s  2.26% 87.85%      0.08s  2.26%  runtime.semawakeup
+     0.07s  1.98% 89.83%      0.07s  1.98%  internal/runtime/maps.ctrlGroup.matchH2 (inline)
+     0.07s  1.98% 91.81%      0.09s  2.54%  slices.partitionOrdered[go.shape.uint64]
+     0.05s  1.41% 93.22%      0.05s  1.41%  internal/runtime/maps.(*groupsReference).group (inline)
+     0.04s  1.13% 94.35%      0.04s  1.13%  slices.insertionSortOrdered[go.shape.uint64]
+     0.02s  0.56% 94.92%      0.02s  0.56%  cmp.Less[go.shape.uint64] (inline)
+     0.02s  0.56% 95.48%      0.06s  1.69%  github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game.orderedIDs[go.shape.*uint8]
+     0.02s  0.56% 96.05%      0.02s  0.56%  internal/runtime/maps.(*groupReference).key (inline)
+     0.02s  0.56% 96.61%      0.02s  0.56%  runtime.cgocall
+     0.02s  0.56% 97.18%      0.15s  4.24%  slices.pdqsortOrdered[go.shape.uint64]

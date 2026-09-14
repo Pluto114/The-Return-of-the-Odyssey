@@ -1,7 +1,12 @@
 // Headless tests for the D2-direction logic slice: input normalization &
 // sequencing, and full-snapshot application semantics. No window, no sockets.
 #include "input/InputSample.h"
+#include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/Interpolation.h"
+#include "sync/Prediction.h"
+#include "sync/RecoveryState.h"
+#include "sync/RewardView.h"
 
 #include <cmath>
 #include <cstdint>
@@ -26,9 +31,25 @@ using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
+using odyssey::client::sync::CombatView;
+using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::kArenaMax;
+using odyssey::client::sync::kSimulationStepSeconds;
+using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::MovementPredictor;
+using odyssey::client::sync::ParseEquipmentTable;
 using odyssey::client::sync::PlayerView;
+using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::RecoveryPhase;
+using odyssey::client::sync::RecoveryState;
+using odyssey::client::sync::RewardState;
+using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotView;
+using odyssey::client::sync::SnapshotInterpolator;
+using odyssey::client::sync::StageInfo;
+using odyssey::client::sync::StepMovement;
 
 constexpr float kEps = 1e-5f;
 
@@ -154,6 +175,324 @@ void TestGameViewDefensiveSort() {
     CHECK(view.PlayerCount() == 1);
 }
 
+void TestCombatViewMonstersFullSet() {
+    CombatView view;
+    std::vector<MonsterEntity> first(2);
+    first[0].id = 900;
+    first[0].x = 1.0f;
+    first[0].hp = 50.0f;
+    first[1].id = 901;
+    first[1].x = 2.0f;
+    CHECK(view.ApplyMonsters(first).empty());
+    CHECK(view.MonsterCount() == 2);
+    const MonsterEntity* monster = view.FindMonster(900);
+    CHECK(monster != nullptr);
+    if (monster) {
+        CHECK(monster->x == 1.0f);
+        CHECK(monster->hp == 50.0f);
+    }
+
+    // Newest snapshot is a FULL set: 900 disappears, 902 appears.
+    std::vector<MonsterEntity> second(2);
+    second[0].id = 901;
+    second[1].id = 902;
+    const auto removed = view.ApplyMonsters(second);
+    CHECK(removed.size() == 1);
+    CHECK(removed[0] == 900);
+    CHECK(view.MonsterCount() == 2);
+    CHECK(view.FindMonster(900) == nullptr);
+    CHECK(view.FindMonster(902) != nullptr);
+
+    view.Clear();
+    CHECK(view.MonsterCount() == 0);
+}
+
+void TestCombatViewProjectilesAndStage() {
+    CombatView view;
+    ProjectileVisual projectile;
+    projectile.id = 42;
+    projectile.owner_id = 10;
+    projectile.x = 3.0f;
+    projectile.z = 4.0f;
+    projectile.expires_at_tick = 500;
+    view.SpawnProjectile(projectile);
+    CHECK(view.ProjectileCount() == 1);
+    CHECK(view.Projectiles().at(42).x == 3.0f);
+
+    // Duplicate spawn (should not happen with one dispatcher) overwrites, and
+    // destroy of an unknown id is a no-op.
+    CHECK(!view.DestroyProjectile(99));
+    CHECK(view.DestroyProjectile(42));
+    CHECK(view.ProjectileCount() == 0);
+
+    StageInfo stage;
+    stage.index = 2;
+    stage.state = 1;
+    stage.monsters_remaining = 3;
+    view.SetStage(stage);
+    CHECK(view.Stage().index == 2);
+    CHECK(view.Stage().monsters_remaining == 3);
+}
+
+void TestGameViewCombatFields() {
+    GameView view;
+    SnapshotView snap;
+    snap.room_id = 1;
+    snap.server_tick = 10;
+    PlayerView player;
+    player.id = 7;
+    player.hp = 40.0f;
+    player.max_hp = 100.0f;
+    player.alive = false;
+    snap.players = {player};
+    view.Apply(snap);
+    const PlayerView* stored = view.Find(7);
+    CHECK(stored != nullptr);
+    if (stored) {
+        CHECK(stored->hp == 40.0f);
+        CHECK(stored->max_hp == 100.0f);
+        CHECK(!stored->alive);
+    }
+}
+
+void TestCombatViewFeedback() {
+    CombatView view;
+    // Damage feedback is transient: it decays away after the flash window.
+    view.ApplyDamageFx(900);
+    CHECK(view.IsHitFlashing(900));
+    CHECK(view.HitFlashCount() == 1);
+    view.Tick(0.1f);
+    CHECK(view.IsHitFlashing(900));
+    view.Tick(0.5f);
+    CHECK(!view.IsHitFlashing(900));
+    CHECK(view.HitFlashCount() == 0);
+
+    // Death marks persist until Clear (snapshot is authoritative for removal).
+    view.ApplyDeath(900);
+    CHECK(view.IsDead(900));
+    CHECK(!view.IsDead(901));
+    view.Clear();
+    CHECK(!view.IsDead(900));
+}
+
+void TestParseEquipmentTable() {
+    EquipmentTable table;
+    const std::string text =
+        "# client display table\n"
+        "1,Blade of the Odyssey,Weapon,\"+10 Attack\"\n"
+        "\n"
+        "2,Glass Cannon,Relic,\"+20 Attack, -10 Defense\"\n"
+        "bogus line without id,name\n";
+    const std::size_t loaded = ParseEquipmentTable(text, table);
+    CHECK(loaded == 2);
+    CHECK(table.size() == 2);
+    const auto it = table.find(1);
+    CHECK(it != table.end());
+    if (it != table.end()) {
+        CHECK(it->second.name == "Blade of the Odyssey");
+        CHECK(it->second.slot == "Weapon");
+        CHECK(it->second.stats == "\"+10 Attack\"");
+    }
+    const auto second = table.find(2);
+    CHECK(second != table.end());
+    if (second != table.end()) {
+        // The stats column may itself contain commas.
+        CHECK(second->second.stats == "\"+20 Attack, -10 Defense\"");
+    }
+}
+
+void TestRewardViewFlow() {
+    EquipmentTable table;
+    ParseEquipmentTable("5,Vitality Relic,Relic,\"+25 Max HP\"\n", table);
+
+    RewardView view;
+    view.SetOptions({5, 99}, 4000, table);
+    CHECK(view.State() == RewardState::kOffered);
+    CHECK(view.Active());
+    CHECK(view.Options().size() == 2);
+    CHECK(view.Options()[0].display.name == "Vitality Relic");
+    // Unknown id degrades to a placeholder instead of inventing stats.
+    CHECK(view.Options()[1].display.name == "equipment#99");
+    CHECK(view.Options()[1].display.slot == "(config pending)");
+    CHECK(view.DeadlineTick() == 4000);
+
+    std::uint32_t chosen = 0;
+    CHECK(!view.ChooseByIndex(2, chosen));  // out of range: still offered
+    CHECK(view.State() == RewardState::kOffered);
+    CHECK(view.ChooseByIndex(0, chosen));
+    CHECK(chosen == 5);
+    CHECK(view.State() == RewardState::kChosen);
+    // A second choice is refused locally (single-shot).
+    CHECK(!view.ChooseByIndex(1, chosen));
+
+    // Refusal is reported honestly.
+    view.ApplyResult(false, 5, 200);
+    CHECK(view.State() == RewardState::kRejected);
+    CHECK(view.Note().find("refused") != std::string::npos);
+
+    // Deadline expiry only affects an unanswered offer.
+    RewardView timed;
+    timed.SetOptions({5}, 100, table);
+    timed.Timeout();
+    CHECK(timed.State() == RewardState::kTimedOut);
+    CHECK(!timed.Active());
+    timed.ApplyResult(true, 5, 1);
+    CHECK(timed.State() == RewardState::kApplied);
+
+    // Clearing resets everything (stage change / disconnect).
+    view.Clear();
+    CHECK(view.State() == RewardState::kNone);
+    CHECK(view.Options().empty());
+    CHECK(!view.Active());
+}
+
+void TestRecoveryStateFlow() {
+    RecoveryState recovery;
+    recovery.SetToken({1, 2, 3});
+    CHECK(recovery.HasToken());
+
+    recovery.OnDisconnect(0.0);
+    CHECK(recovery.Phase() == RecoveryPhase::kWaitingToRetry);
+    CHECK(recovery.ShouldRetry(0.0));         // first retry immediately
+    recovery.MarkRetryStarted(0.0);
+    CHECK(recovery.Attempts() == 1);
+    CHECK(recovery.Phase() == RecoveryPhase::kConnecting);
+
+    // The attempt failed: the next retry honours the backoff (2s -> 4s ...)
+    // instead of resetting it, so repeated failures do not hammer the server.
+    recovery.OnDisconnect(1.0);
+    CHECK(!recovery.ShouldRetry(4.0));        // next attempt at 1.0 + 4.0
+    CHECK(recovery.ShouldRetry(5.0));
+
+    recovery.OnConnected();
+    CHECK(recovery.Phase() == RecoveryPhase::kResuming);
+    CHECK(recovery.WantsResumeRequest());
+    recovery.MarkResumeSent();
+    CHECK(!recovery.WantsResumeRequest());    // exactly one per connection
+
+    recovery.OnResumeResult(true);
+    CHECK(recovery.Phase() == RecoveryPhase::kRestored);
+    CHECK(!recovery.Active());
+    CHECK(recovery.Attempts() == 0);
+
+    // Refused token: cleared so the caller performs a fresh login and never
+    // replays the old session's inputs.
+    RecoveryState refused;
+    refused.SetToken({9});
+    refused.OnDisconnect(0.0);
+    refused.MarkRetryStarted(0.0);
+    refused.OnConnected();
+    refused.OnResumeResult(false);
+    CHECK(refused.Phase() == RecoveryPhase::kFailed);
+    CHECK(!refused.HasToken());
+
+    // Retries are bounded: after kMaxAttempts the loop must stop and ask the
+    // user (R) instead of hammering the server.
+    RecoveryState exhausted;
+    exhausted.OnDisconnect(0.0);
+    double now = 0.0;
+    for (int i = 0; i < RecoveryState::kMaxAttempts; ++i) {
+        CHECK(exhausted.ShouldRetry(now));
+        exhausted.MarkRetryStarted(now);
+        now += RecoveryState::kMaxBackoffSeconds;  // past this attempt's slot
+        if (i + 1 < RecoveryState::kMaxAttempts) {
+            exhausted.OnDisconnect(now);           // attempt failed
+            now += RecoveryState::kMaxBackoffSeconds;  // wait out the backoff
+        }
+    }
+    CHECK(exhausted.Exhausted());
+    CHECK(!exhausted.ShouldRetry(now + 1000.0));
+
+    recovery.Reset();
+    CHECK(recovery.Phase() == RecoveryPhase::kIdle);
+}
+
+void TestMovementPredictorReconciliation() {
+    MovementPredictor predictor;
+    // Two unconfirmed inputs at 30Hz, 5 units/s => 5/30 per tick.
+    predictor.RecordInput(InputCommand{1, 1.0f, 0.0f});
+    predictor.RecordInput(InputCommand{2, 1.0f, 0.0f});
+    CHECK(predictor.HasPrediction());
+    CHECK(predictor.PendingCount() == 2);
+    CHECK(std::fabs(predictor.X() - (10.0f / 30.0f)) < kEps);
+
+    // Server confirms only input 1 and reports its own position: we snap there
+    // and replay the still-pending input 2.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 1);
+    CHECK(predictor.PendingCount() == 1);
+    CHECK(std::fabs(predictor.X() - (5.0f + 5.0f / 30.0f)) < kEps);
+    CHECK(std::fabs(predictor.Z() - 7.0f) < kEps);
+    CHECK(predictor.LastCorrectionDistance() > 0.0f);
+
+    // Server confirms everything: no pending inputs, exact authoritative pose.
+    predictor.ApplyAuthoritative(5.0f, 7.0f, 2);
+    CHECK(predictor.PendingCount() == 0);
+    CHECK(std::fabs(predictor.X() - 5.0f) < kEps);
+    CHECK(std::fabs(predictor.Z() - 7.0f) < kEps);
+
+    // Reset (new session / resume) drops predictions entirely.
+    predictor.Reset();
+    CHECK(!predictor.HasPrediction());
+    CHECK(predictor.PendingCount() == 0);
+}
+
+void TestStepMovementRules() {
+    // Diagonal is length-limited: 30 ticks diagonal == 30 ticks straight.
+    float dx = 0.0f;
+    float dz = 0.0f;
+    {
+        auto [x1, z1] = StepMovement(0.0f, 0.0f, 1.0f, 0.0f, 30.0f * kSimulationStepSeconds);
+        dx = x1;
+        dz = z1;
+    }
+    const auto [x2, z2] = StepMovement(0.0f, 0.0f, 1.0f, 1.0f, 30.0f * kSimulationStepSeconds);
+    const float diagonal_length = std::sqrt(x2 * x2 + z2 * z2);
+    CHECK(std::fabs(diagonal_length - 5.0f) < 1e-3f);
+    CHECK(std::fabs(dx - 5.0f) < 1e-3f);
+    CHECK(std::fabs(dz) < kEps);
+
+    // Zero intent does not move, and the arena clamps.
+    const auto [x3, z3] = StepMovement(3.0f, 4.0f, 0.0f, 0.0f, kSimulationStepSeconds);
+    CHECK(x3 == 3.0f);
+    CHECK(z3 == 4.0f);
+    const auto [x4, z4] = StepMovement(19.9f, 19.9f, 1.0f, 1.0f, kSimulationStepSeconds);
+    CHECK(x4 <= kArenaMax);
+    CHECK(z4 <= kArenaMax);
+}
+
+void TestSnapshotInterpolation() {
+    SnapshotInterpolator interpolator;
+    interpolator.SetDelayTicks(1.0);
+    CHECK(interpolator.ApplyEntities({{1, {0.0f, 0.0f}}}, 100).empty());
+    CHECK(interpolator.ApplyEntities({{1, {10.0f, 0.0f}}}, 110).empty());
+    CHECK(interpolator.LatestTick() == 110);
+    CHECK(interpolator.Count() == 1);
+    CHECK(interpolator.HasEntity(1));
+
+    // Render tick = latest - delay = 109 => one tick before the newest sample.
+    float x = 0.0f;
+    float z = 0.0f;
+    CHECK(interpolator.SampleEntity(1, x, z));
+    CHECK(std::fabs(x - 9.0f) < 1e-3f);
+    CHECK(std::fabs(z) < kEps);
+    CHECK(!interpolator.SampleEntity(42, x, z));
+
+    // Out-of-order samples are ignored instead of rewinding time.
+    CHECK(interpolator.ApplyEntities({{1, {1.0f, 0.0f}}}, 105).empty());
+    CHECK(interpolator.SampleEntity(1, x, z));
+    CHECK(std::fabs(x - 9.0f) < 1e-3f);
+
+    // Full-set semantics: an entity missing from the newest snapshot is gone.
+    const auto removed = interpolator.ApplyEntities({{2, {1.0f, 1.0f}}}, 120);
+    CHECK(removed.size() == 1);
+    CHECK(removed[0] == 1);
+    CHECK(!interpolator.HasEntity(1));
+    CHECK(interpolator.HasEntity(2));
+
+    interpolator.Clear();
+    CHECK(interpolator.Count() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -164,6 +503,16 @@ int main() {
     TestGameViewApplyAndRemoveMissing();
     TestGameViewClosedEmpties();
     TestGameViewDefensiveSort();
+    TestCombatViewMonstersFullSet();
+    TestCombatViewProjectilesAndStage();
+    TestGameViewCombatFields();
+    TestCombatViewFeedback();
+    TestParseEquipmentTable();
+    TestRewardViewFlow();
+    TestRecoveryStateFlow();
+    TestMovementPredictorReconciliation();
+    TestStepMovementRules();
+    TestSnapshotInterpolation();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

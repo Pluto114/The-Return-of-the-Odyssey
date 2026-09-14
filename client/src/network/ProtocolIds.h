@@ -28,7 +28,17 @@ inline constexpr std::uint16_t kMatchCancel = static_cast<std::uint16_t>(odyssey
 inline constexpr std::uint16_t kPlayerInput = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_PLAYER_INPUT);
 inline constexpr std::uint16_t kWorldSnapshot = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_WORLD_SNAPSHOT);
 
-// Stage / reward / metrics reserved for later phases.
+// Reliable combat events (320-327).
+inline constexpr std::uint16_t kProjectileSpawn = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_PROJECTILE_SPAWN);
+inline constexpr std::uint16_t kProjectileDestroy = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_PROJECTILE_DESTROY);
+inline constexpr std::uint16_t kDamageEvent = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_DAMAGE_EVENT);
+inline constexpr std::uint16_t kDeathEvent = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_DEATH_EVENT);
+inline constexpr std::uint16_t kEntityRemoved = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_ENTITY_REMOVED);
+inline constexpr std::uint16_t kStageStartedEvent = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_STAGE_STARTED_EVENT);
+inline constexpr std::uint16_t kStageClearedEvent = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_STAGE_CLEARED_EVENT);
+inline constexpr std::uint16_t kTeamDefeatedEvent = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_TEAM_DEFEATED_EVENT);
+
+// Stage / reward / metrics (400+ / 500+).
 inline constexpr std::uint16_t kStageStarted = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_STAGE_STARTED);
 inline constexpr std::uint16_t kStageCleared = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_STAGE_CLEARED);
 inline constexpr std::uint16_t kRewardOptions = static_cast<std::uint16_t>(odyssey::protocol::v1::MSG_REWARD_OPTIONS);

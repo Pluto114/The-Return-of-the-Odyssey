@@ -28,10 +28,20 @@ int g_checks = 0;
         }                                                                        \
     } while (0)
 
+using odyssey::client::network::payload::DecodeDamageEvent;
+using odyssey::client::network::payload::DecodeDeathEvent;
 using odyssey::client::network::payload::DecodeDisconnect;
 using odyssey::client::network::payload::DecodeLoginResponse;
 using odyssey::client::network::payload::DecodeMatchFound;
 using odyssey::client::network::payload::DecodePong;
+using odyssey::client::network::payload::DecodeProjectileDestroy;
+using odyssey::client::network::payload::DecodeProjectileSpawn;
+using odyssey::client::network::payload::DecodeRewardApplied;
+using odyssey::client::network::payload::DecodeRewardOptions;
+using odyssey::client::network::payload::EncodeRewardChoice;
+using odyssey::client::network::payload::DecodeResumeResponse;
+using odyssey::client::network::payload::EncodeResumeRequest;
+using odyssey::client::network::payload::DecodeStageEvent;
 using odyssey::client::network::payload::DecodeWorldSnapshot;
 using odyssey::client::network::payload::EncodeLoginRequest;
 using odyssey::client::network::payload::EncodeMatchRequest;
@@ -153,7 +163,9 @@ void TestPlayerInputWire() {
     data.input_seq = 77;
     data.dir_x = 0.70710678f;
     data.dir_z = -0.70710678f;
-    data.shoot = false;
+    data.aim_x = 0.0f;
+    data.aim_z = 1.0f;
+    data.shoot = true;
     data.client_tick_ms = 12345;
     const auto bytes = EncodePlayerInput(data);
 
@@ -166,7 +178,12 @@ void TestPlayerInputWire() {
         CHECK(parsed.move().x() == data.dir_x);
         CHECK(parsed.move().y() == data.dir_z);
     }
-    CHECK(!parsed.shoot());
+    CHECK(parsed.has_aim());
+    if (parsed.has_aim()) {
+        CHECK(parsed.aim().x() == data.aim_x);
+        CHECK(parsed.aim().y() == data.aim_z);
+    }
+    CHECK(parsed.shoot());
     // Zero-intent (release) encodes fine with seq and no direction magnitude.
     odyssey::client::network::payload::PlayerInputData idle;
     idle.input_seq = 78;
@@ -192,6 +209,9 @@ void TestWorldSnapshotDecode() {
     self->mutable_velocity()->set_x(0.5f);
     self->set_hp(90.0f);
     self->set_max_hp(100.0f);
+    self->set_attack(12.0f);
+    self->set_defense(4.0f);
+    self->set_move_speed(5.0f);
     self->set_alive(true);
 
     auto* other1 = proto.add_players();
@@ -203,7 +223,17 @@ void TestWorldSnapshotDecode() {
     other2->mutable_position()->set_x(-1.0f);
     other2->mutable_position()->set_y(-2.0f);
 
-    proto.add_monsters()->set_monster_id(900);
+    auto* monster = proto.add_monsters();
+    monster->set_monster_id(900);
+    monster->mutable_position()->set_x(7.0f);
+    monster->mutable_position()->set_y(8.0f);
+    monster->set_hp(30.0f);
+    monster->set_max_hp(50.0f);
+    monster->set_state(1);
+    proto.mutable_stage()->set_index(2);
+    proto.mutable_stage()->set_seed(4242);
+    proto.mutable_stage()->set_state(1);
+    proto.mutable_stage()->set_monsters_remaining(3);
     const auto bytes = Serialize(proto);
 
     odyssey::client::network::payload::WorldSnapshotView view;
@@ -218,6 +248,9 @@ void TestWorldSnapshotDecode() {
         CHECK(view.self.vel_x == 0.5f);
         CHECK(view.self.hp == 90.0f);
         CHECK(view.self.max_hp == 100.0f);
+        CHECK(view.self.attack == 12.0f);
+        CHECK(view.self.defense == 4.0f);
+        CHECK(view.self.move_speed == 5.0f);
         CHECK(view.self.alive);
     }
     CHECK(view.others.size() == 2);
@@ -229,7 +262,159 @@ void TestWorldSnapshotDecode() {
         CHECK(view.others[1].pos_x == -1.0f);
         CHECK(view.others[1].pos_z == -2.0f);
     }
-    CHECK(view.monster_count == 1);
+    CHECK(view.monsters.size() == 1);
+    if (view.monsters.size() == 1) {
+        CHECK(view.monsters[0].id == 900);
+        CHECK(view.monsters[0].pos_x == 7.0f);
+        CHECK(view.monsters[0].pos_z == 8.0f);
+        CHECK(view.monsters[0].hp == 30.0f);
+        CHECK(view.monsters[0].max_hp == 50.0f);
+        CHECK(view.monsters[0].state == 1);
+    }
+    CHECK(view.stage.index == 2);
+    CHECK(view.stage.seed == 4242);
+    CHECK(view.stage.state == 1);
+    CHECK(view.stage.monsters_remaining == 3);
+}
+
+void TestCombatEventsDecode() {
+    // ProjectileSpawnEvent
+    odyssey::protocol::v1::ProjectileSpawnEvent spawn;
+    spawn.set_projectile_id(700);
+    spawn.set_owner_id(10);
+    spawn.mutable_position()->set_x(3.0f);
+    spawn.mutable_position()->set_y(4.0f);
+    spawn.mutable_velocity()->set_x(5.0f);
+    spawn.mutable_velocity()->set_y(6.0f);
+    spawn.set_expires_at_tick(999);
+    spawn.set_server_tick(123);
+    odyssey::client::network::payload::ProjectileSpawnData spawn_view;
+    CHECK(DecodeProjectileSpawn(Serialize(spawn), spawn_view));
+    CHECK(spawn_view.projectile_id == 700);
+    CHECK(spawn_view.owner_id == 10);
+    CHECK(spawn_view.pos_x == 3.0f);
+    CHECK(spawn_view.pos_z == 4.0f);
+    CHECK(spawn_view.vel_x == 5.0f);
+    CHECK(spawn_view.vel_z == 6.0f);
+    CHECK(spawn_view.expires_at_tick == 999);
+    CHECK(spawn_view.server_tick == 123);
+
+    // ProjectileDestroyEvent
+    odyssey::protocol::v1::ProjectileDestroyEvent destroy;
+    destroy.set_projectile_id(700);
+    destroy.set_owner_id(10);
+    destroy.mutable_position()->set_x(9.0f);
+    destroy.mutable_position()->set_y(9.0f);
+    destroy.set_server_tick(130);
+    odyssey::client::network::payload::ProjectileDestroyData destroy_view;
+    CHECK(DecodeProjectileDestroy(Serialize(destroy), destroy_view));
+    CHECK(destroy_view.projectile_id == 700);
+    CHECK(destroy_view.pos_x == 9.0f);
+    CHECK(destroy_view.pos_z == 9.0f);
+
+    // DamageEvent
+    odyssey::protocol::v1::DamageEvent damage;
+    damage.set_source_id(10);
+    damage.set_target_id(900);
+    damage.set_amount(12.5f);
+    damage.set_remaining_health(37.5f);
+    damage.set_server_tick(131);
+    odyssey::client::network::payload::DamageEventData damage_view;
+    CHECK(DecodeDamageEvent(Serialize(damage), damage_view));
+    CHECK(damage_view.source_id == 10);
+    CHECK(damage_view.target_id == 900);
+    CHECK(damage_view.amount == 12.5f);
+    CHECK(damage_view.remaining_health == 37.5f);
+
+    // DeathEvent
+    odyssey::protocol::v1::DeathEvent death;
+    death.set_entity_id(900);
+    death.set_killer_id(10);
+    death.set_server_tick(132);
+    odyssey::client::network::payload::DeathEventData death_view;
+    CHECK(DecodeDeathEvent(Serialize(death), death_view));
+    CHECK(death_view.entity_id == 900);
+    CHECK(death_view.killer_id == 10);
+
+    // StageStartedEvent / StageClearedEvent / TeamDefeatedEvent share a shape.
+    odyssey::protocol::v1::StageStartedEvent stage;
+    stage.set_stage_index(2);
+    stage.set_server_tick(200);
+    odyssey::client::network::payload::StageEventData stage_view;
+    CHECK(DecodeStageEvent(Serialize(stage), stage_view));
+    CHECK(stage_view.stage_index == 2);
+    CHECK(stage_view.server_tick == 200);
+}
+
+void TestRewardWire() {
+    // RewardOptions (S -> C)
+    odyssey::protocol::v1::RewardOptions options;
+    options.set_stage_index(2);
+    options.add_equipment_ids(11);
+    options.add_equipment_ids(12);
+    options.add_equipment_ids(13);
+    options.set_deadline_server_tick(5000);
+    odyssey::client::network::payload::RewardOptionsData options_view;
+    CHECK(DecodeRewardOptions(Serialize(options), options_view));
+    CHECK(options_view.stage_index == 2);
+    CHECK(options_view.equipment_ids.size() == 3);
+    CHECK(options_view.equipment_ids[1] == 12);
+    CHECK(options_view.deadline_server_tick == 5000);
+
+    // RewardChoice (C -> S): only the candidate id travels.
+    const auto choice_bytes = EncodeRewardChoice(12);
+    odyssey::protocol::v1::RewardChoice choice;
+    CHECK(choice.ParseFromArray(choice_bytes.data(), static_cast<int>(choice_bytes.size())));
+    CHECK(choice.equipment_id() == 12);
+
+    // RewardApplied ok + refused.
+    odyssey::protocol::v1::RewardApplied applied;
+    applied.set_reason(odyssey::protocol::v1::REASON_OK);
+    applied.set_equipment_id(12);
+    odyssey::client::network::payload::RewardAppliedData applied_view;
+    CHECK(DecodeRewardApplied(Serialize(applied), applied_view));
+    CHECK(applied_view.ok);
+    CHECK(applied_view.equipment_id == 12);
+
+    odyssey::protocol::v1::RewardApplied refused;
+    refused.set_reason(odyssey::protocol::v1::REASON_INVALID_STATE);
+    refused.set_equipment_id(99);
+    odyssey::client::network::payload::RewardAppliedData refused_view;
+    CHECK(DecodeRewardApplied(Serialize(refused), refused_view));
+    CHECK(!refused_view.ok);
+    CHECK(refused_view.reason ==
+          static_cast<std::uint32_t>(odyssey::protocol::v1::REASON_INVALID_STATE));
+}
+
+void TestResumeWire() {
+    const std::vector<std::uint8_t> token = {0xDE, 0xAD, 0xBE, 0xEF};
+    const auto bytes = EncodeResumeRequest(token, 1);
+    odyssey::protocol::v1::ResumeRequest parsed;
+    CHECK(parsed.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())));
+    CHECK(parsed.protocol_version() == 1);
+    CHECK(parsed.resume_token().size() == token.size());
+    CHECK(static_cast<std::uint8_t>(parsed.resume_token()[0]) == 0xDE);
+    CHECK(static_cast<std::uint8_t>(parsed.resume_token()[3]) == 0xEF);
+
+    odyssey::protocol::v1::ResumeResponse ok;
+    ok.set_reason(odyssey::protocol::v1::REASON_OK);
+    ok.set_session_id(77);
+    ok.set_player_id(9);
+    odyssey::client::network::payload::ResumeResponseData ok_view;
+    CHECK(DecodeResumeResponse(Serialize(ok), ok_view));
+    CHECK(ok_view.ok);
+    CHECK(ok_view.session_id == 77);
+    CHECK(ok_view.player_id == 9);
+
+    odyssey::protocol::v1::ResumeResponse expired;
+    expired.set_reason(odyssey::protocol::v1::REASON_RESUME_TOKEN_EXPIRED);
+    expired.set_message("token expired");
+    odyssey::client::network::payload::ResumeResponseData expired_view;
+    CHECK(DecodeResumeResponse(Serialize(expired), expired_view));
+    CHECK(!expired_view.ok);
+    CHECK(expired_view.reason ==
+          static_cast<std::uint32_t>(odyssey::protocol::v1::REASON_RESUME_TOKEN_EXPIRED));
+    CHECK(expired_view.message == "token expired");
 }
 
 void TestDisconnectDecode() {
@@ -255,6 +440,9 @@ int main() {
     TestMatchmakingWire();
     TestPlayerInputWire();
     TestWorldSnapshotDecode();
+    TestCombatEventsDecode();
+    TestRewardWire();
+    TestResumeWire();
     TestDisconnectDecode();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

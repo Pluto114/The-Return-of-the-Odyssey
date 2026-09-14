@@ -12,11 +12,21 @@
 #include "network/PayloadCodec.h"
 #include "network/ProtocolIds.h"
 #include "raylib.h"
+#include "sync/CombatView.h"
 #include "sync/GameView.h"
+#include "sync/Interpolation.h"
+#include "sync/Prediction.h"
+#include "sync/RecoveryState.h"
+#include "sync/RewardView.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <map>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -25,8 +35,16 @@ constexpr int kScreenWidth = 960;
 constexpr int kScreenHeight = 540;
 constexpr int kFps = 60;
 
+// World [0,20]^2 arena mapped into this screen rectangle (shared by the aim
+// inverse mapping and the drawing code).
+constexpr float kWorldSize = 20.0f;
+constexpr float kArenaX = 560.0f;
+constexpr float kArenaY = 190.0f;
+constexpr float kArenaW = 340.0f;
+constexpr float kArenaH = 280.0f;
+
 // Gameserver endpoint reserved in the infra docs; read from config later.
-constexpr const char* kServerHost = "127.0.0.1";
+constexpr const char* kServerHost = "10.22.31.251";
 constexpr std::uint16_t kServerPort = 7777;
 
 // Development-mode login (Phase 1 has no real auth; server assigns identity).
@@ -36,6 +54,19 @@ constexpr std::uint32_t kClientProtocolVersion = 1;
 
 constexpr float kPingIntervalSeconds = 1.0f;
 constexpr double kFrameSeconds = 1.0 / 60.0;
+
+const char* StageStateName(std::uint32_t state) {
+    switch (state) {
+        case 0: return "waiting";
+        case 1: return "playing";
+        case 2: return "clear";
+        case 3: return "reward";
+        case 4: return "preparing";
+        case 5: return "failed";
+        case 6: return "closed";
+        default: return "?";
+    }
+}
 
 using namespace odyssey::client::network::ids;
 namespace payload = odyssey::client::network::payload;
@@ -49,6 +80,8 @@ using odyssey::client::network::ConnectionState;
 using odyssey::client::network::NetClient;
 using odyssey::client::network::NetEvent;
 using odyssey::client::network::ToString;
+using odyssey::client::network::payload::DamageEventData;
+using odyssey::client::network::payload::DeathEventData;
 using odyssey::client::network::payload::DisconnectData;
 using odyssey::client::network::payload::LoginRequestData;
 using odyssey::client::network::payload::LoginResponseData;
@@ -56,9 +89,27 @@ using odyssey::client::network::payload::MatchFoundData;
 using odyssey::client::network::payload::PingData;
 using odyssey::client::network::payload::PlayerInputData;
 using odyssey::client::network::payload::PongData;
+using odyssey::client::network::payload::ProjectileDestroyData;
+using odyssey::client::network::payload::ProjectileSpawnData;
+using odyssey::client::network::payload::RewardAppliedData;
+using odyssey::client::network::payload::RewardOptionsData;
+using odyssey::client::network::payload::ResumeResponseData;
+using odyssey::client::network::payload::StageEventData;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
+using odyssey::client::sync::CombatView;
+using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::MovementPredictor;
+using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::RecoveryPhase;
+using odyssey::client::sync::RecoveryState;
+using odyssey::client::sync::RewardState;
+using odyssey::client::sync::RewardView;
+using odyssey::client::sync::SnapshotInterpolator;
+using odyssey::client::sync::StageInfo;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -73,6 +124,8 @@ struct DemoState {
     std::uint64_t session_id = 0;
     std::uint64_t player_id = 0;
     std::string login_note = "not sent";
+    std::vector<std::uint8_t> resume_token;  // from LoginResponse; enables resume
+    bool resumed = false;                    // this session was re-attached
 
     // Matchmaking / room binding.
     bool match_sent = false;
@@ -99,6 +152,29 @@ struct DemoState {
 
     // WorldSnapshot ingestion stats.
     std::uint64_t snapshots_received = 0;
+
+    // Combat (D4) state.
+    float self_hp = 0.0f;
+    float self_max_hp = 0.0f;
+    std::uint32_t stage_index = 0;
+    std::uint32_t stage_state = 0;
+    std::uint32_t monsters_remaining = 0;
+    std::uint32_t prev_stage_index = 0;
+    std::string banner;       // transient stage outcome message
+    float banner_ttl = 0.0f;
+    std::uint32_t spawns = 0;
+    std::uint32_t destroys = 0;
+    std::uint32_t damages = 0;
+    std::uint32_t deaths = 0;
+    std::string last_event_note = "(none)";
+
+    // Self base stats from the newest snapshot (reward effects show up here).
+    float self_attack = 0.0f;
+    float self_defense = 0.0f;
+    float self_move_speed = 0.0f;
+
+    // D7 readiness (client-side echo; the server owns the ready barrier).
+    bool ready_sent = false;
 };
 
 }  // namespace
@@ -117,8 +193,33 @@ int main() {
     InputSequencer input_sequencer;
     InputSample last_sample;
     InputReport last_report;      // normalized vector + sequence (connected ticks)
+    float last_aim_x = 1.0f;      // aim heading sent to the server (for the HUD)
+    float last_aim_z = 0.0f;
+    bool last_shoot = false;
     double last_input_time = 0.0;
-    GameView game_view;           // filled once the WorldSnapshot decode slice lands
+    GameView game_view;           // players from authoritative snapshots
+    CombatView combat_view;       // monsters (snapshot) + projectiles (events)
+    RewardView reward_view;       // treasure chest options / choice state
+    RecoveryState recovery;       // reconnect/resume state machine (D8)
+    MovementPredictor predictor;  // local prediction + reconciliation (D9)
+    SnapshotInterpolator remote_interp;   // other players (10Hz -> smooth)
+    SnapshotInterpolator monster_interp;  // monsters (10Hz -> smooth)
+    EquipmentTable equipment_table;
+
+    // Optional local display table (static equipment data is never sent on the
+    // wire). Missing file simply means "equipment#<id>" placeholders.
+    for (const char* candidate : {"equipment.csv", "assets/data/equipment.csv",
+                                  "client/assets/data/equipment.csv"}) {
+        std::ifstream file(candidate);
+        if (file) {
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            const std::size_t loaded = odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
+            std::printf("main: loaded %zu equipment entries from %s\n", loaded, candidate);
+            std::fflush(stdout);
+            break;
+        }
+    }
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
     std::printf("main: starting net thread\n"); fflush(stdout);
@@ -145,6 +246,15 @@ int main() {
             break;
         }
         const double frame_start = GetTime();
+        // Decay transient combat feedback (hit flashes, banner).
+        const float frame_dt = GetFrameTime();
+        combat_view.Tick(frame_dt);
+        if (demo.banner_ttl > 0.0f) {
+            demo.banner_ttl -= frame_dt;
+            if (demo.banner_ttl <= 0.0f) {
+                demo.banner.clear();
+            }
+        }
         if ((frame_counter % 120) == 0) {
             std::printf("main: frame %d state=%s elapsed=%.1fs fps=%d\n", frame_counter,
                         ToString(demo.state), GetTime() - t_start, GetFPS());
@@ -167,9 +277,47 @@ int main() {
             demo.room_id = 0;
             demo.match_note = "not sent";
             demo.server_note.clear();
-            input_sequencer.Reset();
+            recovery.Reset();
+            predictor.Reset();
+            remote_interp.Clear();
+            monster_interp.Clear();
             game_view = GameView{};
+            combat_view.Clear();
+            reward_view.Clear();
+            demo.prev_stage_index = 0;
+            demo.banner.clear();
+            demo.banner_ttl = 0.0f;
+            demo.ready_sent = false;
             client.Connect(kServerHost, kServerPort);
+        }
+
+        // Automatic reconnect with bounded backoff after a transient outage.
+        // The window stays responsive: this only initiates an async connect.
+        if (demo.state != ConnectionState::kConnected && recovery.ShouldRetry(GetTime())) {
+            recovery.MarkRetryStarted(GetTime());
+            demo.state = ConnectionState::kIdle;
+            demo.state_detail = recovery.Note();
+            std::printf("main: %s\n", recovery.Note().c_str());
+            std::fflush(stdout);
+            client.Connect(kServerHost, kServerPort);
+        }
+
+        // Reward choice: keys 1..3 pick one of the offered options. Only a
+        // candidate equipment_id is sent; the server validates and applies it.
+        if (demo.in_room && reward_view.State() == RewardState::kOffered) {
+            const int keys[3] = {KEY_ONE, KEY_TWO, KEY_THREE};
+            for (int index = 0; index < 3 &&
+                                index < static_cast<int>(reward_view.Options().size());
+                 ++index) {
+                if (IsKeyPressed(keys[index])) {
+                    std::uint32_t equipment_id = 0;
+                    if (reward_view.ChooseByIndex(static_cast<std::size_t>(index), equipment_id)) {
+                        SendPayload(kRewardChoice, payload::EncodeRewardChoice(equipment_id));
+                        std::printf("main: reward choice sent id=%u\n", equipment_id);
+                        std::fflush(stdout);
+                    }
+                }
+            }
         }
 
         // Sample and transmit intent at a fixed 30Hz after MatchFound. The
@@ -181,11 +329,42 @@ int main() {
                 last_sample = input_sampler.SampleNow();
                 if (demo.in_room) {
                     last_report = input_sequencer.Tick(last_sample);
+                    // Aim heading: mouse position mapped back to world space,
+                    // relative to our own authoritative position. The client
+                    // never sends positions or hit results.
+                    const Vector2 mouse = GetMousePosition();
+                    const float mx = (mouse.x - kArenaX) / kArenaW * kWorldSize;
+                    const float mz = (mouse.y - kArenaY) / kArenaH * kWorldSize;
+                    float aim_x = 1.0f;
+                    float aim_z = 0.0f;
+                    if (const auto* self = game_view.Find(demo.player_id)) {
+                        aim_x = mx - self->x;
+                        aim_z = mz - self->z;
+                        const float length = std::sqrt(aim_x * aim_x + aim_z * aim_z);
+                        if (length > 1e-4f) {
+                            aim_x /= length;
+                            aim_z /= length;
+                        } else {
+                            aim_x = 1.0f;
+                            aim_z = 0.0f;
+                        }
+                    }
                     PlayerInputData input;
                     input.input_seq = last_report.sequence;
                     input.dir_x = last_report.vector.x;
                     input.dir_z = last_report.vector.z;
+                    input.aim_x = aim_x;
+                    input.aim_z = aim_z;
+                    input.shoot = IsKeyDown(KEY_SPACE);
                     input.client_tick_ms = static_cast<std::uint64_t>(now * 1000.0);
+                    last_aim_x = aim_x;
+                    last_aim_z = aim_z;
+                    last_shoot = input.shoot;
+                    // Predict immediately and remember the input for replay
+                    // until the server confirms it via last_processed_input.
+                    predictor.RecordInput(InputCommand{last_report.sequence,
+                                                       last_report.vector.x,
+                                                       last_report.vector.z});
                     SendPayload(kPlayerInput, payload::EncodePlayerInput(input));
                 } else {
                     last_report.sequence = 0;
@@ -205,6 +384,10 @@ int main() {
                     fflush(stdout);
                     if (demo.state != ConnectionState::kConnected) {
                         // Fresh session on every reconnect; never reuse identity.
+                        // InputSeq is deliberately NOT reset here: a resumed
+                        // session must keep its sequence so the server never
+                        // sees a replayed/stale range.
+                        const bool had_session = demo.login_ok || !demo.resume_token.empty();
                         demo.login_sent = false;
                         demo.login_ok = false;
                         demo.session_id = 0;
@@ -214,8 +397,24 @@ int main() {
                         demo.in_room = false;
                         demo.room_id = 0;
                         demo.match_note = "not sent";
-                        input_sequencer.Reset();
+                        predictor.Reset();
+                        remote_interp.Clear();
+                        monster_interp.Clear();
                         game_view = GameView{};
+                        combat_view.Clear();
+                        reward_view.Clear();
+                        demo.prev_stage_index = 0;
+                        demo.banner.clear();
+                        demo.banner_ttl = 0.0f;
+                        demo.ready_sent = false;
+                        if (had_session) {
+                            recovery.OnDisconnect(GetTime());
+                            std::printf("main: connection lost -> recovery (%s)\n",
+                                        recovery.Note().c_str());
+                            std::fflush(stdout);
+                        } else {
+                            recovery.Reset();
+                        }
                     }
                     break;
                 case NetEvent::Kind::kMessage:
@@ -233,9 +432,48 @@ int main() {
                                                   ? "ok"
                                                   : ("reason=" + std::to_string(login.reason) +
                                                      " " + login.message);
+                            if (login.ok) {
+                                // Fresh session: InputSeq restarts at 1 and the
+                                // new resume token enables a later reconnect.
+                                demo.resume_token = login.resume_token;
+                                recovery.SetToken(login.resume_token);
+                                recovery.OnFreshLoginOk();
+                                demo.resumed = false;
+                                input_sequencer.Reset();
+                            }
                         } else {
                             demo.login_ok = false;
                             demo.login_note = "LoginResponse decode failed";
+                        }
+                    } else if (event->message.message_type == kResumeResponse) {
+                        ResumeResponseData resume;
+                        if (payload::DecodeResumeResponse(event->message.payload, resume)) {
+                            recovery.OnResumeResult(resume.ok);
+                            if (resume.ok) {
+                                demo.login_ok = true;
+                                demo.session_id = resume.session_id;
+                                demo.player_id = resume.player_id;
+                                demo.resumed = true;
+                                demo.in_room = true;
+                                demo.login_note = "resumed session";
+                                std::printf("main: session resumed session=%llu player=%llu\n",
+                                            static_cast<unsigned long long>(resume.session_id),
+                                            static_cast<unsigned long long>(resume.player_id));
+                                std::fflush(stdout);
+                            } else {
+                                // Refused (expired/forged/replayed). Never replay
+                                // old inputs: drop identity and log in fresh.
+                                demo.login_ok = false;
+                                demo.in_room = false;
+                                demo.login_sent = false;
+                                demo.match_sent = false;
+                                demo.resume_token.clear();
+                                demo.login_note = "resume refused reason=" +
+                                                  std::to_string(resume.reason) + " " +
+                                                  resume.message;
+                                std::printf("main: resume refused reason=%u\n", resume.reason);
+                                std::fflush(stdout);
+                            }
                         }
                     } else if (event->message.message_type == kMatchFound) {
                         MatchFoundData match;
@@ -285,6 +523,9 @@ int main() {
                                 v.z = p.pos_z;
                                 v.vx = p.vel_x;
                                 v.vz = p.vel_z;
+                                v.hp = p.hp;
+                                v.max_hp = p.max_hp;
+                                v.alive = p.alive;
                                 if (snap.has_self && p.id == snap.self.id) {
                                     v.last_processed_input_seq = snap.last_processed_input;
                                 }
@@ -297,6 +538,174 @@ int main() {
                                 add(other);
                             }
                             game_view.Apply(sv);
+
+                            // Monsters are a FULL set from the snapshot: a
+                            // monster missing from the newest one is removed.
+                            std::vector<MonsterEntity> monsters;
+                            monsters.reserve(snap.monsters.size());
+                            for (const auto& m : snap.monsters) {
+                                MonsterEntity entity;
+                                entity.id = m.id;
+                                entity.x = m.pos_x;
+                                entity.z = m.pos_z;
+                                entity.vx = m.vel_x;
+                                entity.vz = m.vel_z;
+                                entity.hp = m.hp;
+                                entity.max_hp = m.max_hp;
+                                entity.state = m.state;
+                                monsters.push_back(entity);
+                            }
+                            combat_view.ApplyMonsters(monsters);
+
+                            StageInfo stage;
+                            stage.index = snap.stage.index;
+                            stage.seed = snap.stage.seed;
+                            stage.state = snap.stage.state;
+                            stage.monsters_remaining = snap.stage.monsters_remaining;
+                            combat_view.SetStage(stage);
+                            // New stage: old projectiles must not leak across
+                            // the transition (they are event-driven only).
+                            if (demo.prev_stage_index != 0 &&
+                                snap.stage.index != demo.prev_stage_index) {
+                                combat_view.ClearProjectiles();
+                                demo.last_event_note = "stage index changed -> projectiles cleared";
+                            }
+                            demo.prev_stage_index = snap.stage.index;
+                            demo.stage_index = snap.stage.index;
+                            demo.stage_state = snap.stage.state;
+                            demo.monsters_remaining = snap.stage.monsters_remaining;
+                            if (snap.has_self) {
+                                demo.self_hp = snap.self.hp;
+                                demo.self_max_hp = snap.self.max_hp;
+                                demo.self_attack = snap.self.attack;
+                                demo.self_defense = snap.self.defense;
+                                demo.self_move_speed = snap.self.move_speed;
+                                // D9: snap to the authoritative position and
+                                // replay only the inputs the server has not
+                                // confirmed yet.
+                                predictor.ApplyAuthoritative(snap.self.pos_x, snap.self.pos_z,
+                                                             snap.last_processed_input);
+                            }
+
+                            // D9: remote entities are rendered from an
+                            // interpolated 10Hz buffer (full-set semantics).
+                            std::map<std::uint64_t, std::pair<float, float>> others_positions;
+                            for (const auto& other : snap.others) {
+                                others_positions[other.id] = {other.pos_x, other.pos_z};
+                            }
+                            remote_interp.ApplyEntities(others_positions, snap.server_tick);
+
+                            std::map<std::uint64_t, std::pair<float, float>> monster_positions;
+                            for (const auto& m : snap.monsters) {
+                                monster_positions[m.id] = {m.pos_x, m.pos_z};
+                            }
+                            monster_interp.ApplyEntities(monster_positions, snap.server_tick);
+                            // Local deadline guard: stop accepting choices once
+                            // the authoritative tick passes the deadline. The
+                            // server still applies its default.
+                            if (reward_view.State() == RewardState::kOffered &&
+                                reward_view.DeadlineTick() != 0 &&
+                                snap.server_tick > reward_view.DeadlineTick()) {
+                                reward_view.Timeout();
+                                std::printf("main: reward deadline passed (tick=%llu)\n",
+                                            static_cast<unsigned long long>(snap.server_tick));
+                                std::fflush(stdout);
+                            }
+                        }
+                    } else if (event->message.message_type == kProjectileSpawn) {
+                        ProjectileSpawnData spawn;
+                        if (payload::DecodeProjectileSpawn(event->message.payload, spawn)) {
+                            ProjectileVisual projectile;
+                            projectile.id = spawn.projectile_id;
+                            projectile.owner_id = spawn.owner_id;
+                            projectile.x = spawn.pos_x;
+                            projectile.z = spawn.pos_z;
+                            projectile.vx = spawn.vel_x;
+                            projectile.vz = spawn.vel_z;
+                            projectile.expires_at_tick = spawn.expires_at_tick;
+                            projectile.server_tick = spawn.server_tick;
+                            combat_view.SpawnProjectile(projectile);
+                            ++demo.spawns;
+                            demo.last_event_note = "projectile spawn id=" +
+                                                   std::to_string(spawn.projectile_id);
+                        }
+                    } else if (event->message.message_type == kProjectileDestroy) {
+                        ProjectileDestroyData destroy;
+                        if (payload::DecodeProjectileDestroy(event->message.payload, destroy)) {
+                            combat_view.DestroyProjectile(destroy.projectile_id);
+                            ++demo.destroys;
+                            demo.last_event_note = "projectile destroy id=" +
+                                                   std::to_string(destroy.projectile_id);
+                        }
+                    } else if (event->message.message_type == kDamageEvent) {
+                        DamageEventData damage;
+                        if (payload::DecodeDamageEvent(event->message.payload, damage)) {
+                            ++demo.damages;
+                            combat_view.ApplyDamageFx(damage.target_id);
+                            demo.last_event_note = "damage target=" +
+                                                   std::to_string(damage.target_id) + " amount=" +
+                                                   std::to_string(damage.amount) + " hp=" +
+                                                   std::to_string(damage.remaining_health);
+                        }
+                    } else if (event->message.message_type == kDeathEvent) {
+                        DeathEventData death;
+                        if (payload::DecodeDeathEvent(event->message.payload, death)) {
+                            ++demo.deaths;
+                            combat_view.ApplyDeath(death.entity_id);
+                            demo.last_event_note = "death entity=" +
+                                                   std::to_string(death.entity_id) + " killer=" +
+                                                   std::to_string(death.killer_id);
+                        }
+                    } else if (event->message.message_type == kStageStartedEvent ||
+                               event->message.message_type == kStageClearedEvent ||
+                               event->message.message_type == kTeamDefeatedEvent) {
+                        StageEventData stage_event;
+                        if (payload::DecodeStageEvent(event->message.payload, stage_event)) {
+                            const char* kind = event->message.message_type == kStageStartedEvent
+                                                   ? "stage started"
+                                                   : (event->message.message_type == kStageClearedEvent
+                                                          ? "stage cleared"
+                                                          : "team defeated");
+                            demo.last_event_note = std::string(kind) + " index=" +
+                                                   std::to_string(stage_event.stage_index);
+                            demo.banner = std::string(kind) + "  stage " +
+                                          std::to_string(stage_event.stage_index);
+                            demo.banner_ttl = 2.5f;
+                            if (event->message.message_type == kStageStartedEvent) {
+                                // A new stage begins: drop event-driven bullets
+                                // from the previous wave and any reward panel.
+                                combat_view.ClearProjectiles();
+                                reward_view.Clear();
+                                demo.ready_sent = false;
+                            }
+                            std::printf("main: %s stage=%u tick=%llu\n", kind,
+                                        stage_event.stage_index,
+                                        static_cast<unsigned long long>(stage_event.server_tick));
+                            std::fflush(stdout);
+                        }
+                    } else if (event->message.message_type == kRewardOptions) {
+                        RewardOptionsData options;
+                        if (payload::DecodeRewardOptions(event->message.payload, options)) {
+                            reward_view.SetOptions(options.equipment_ids,
+                                                   options.deadline_server_tick,
+                                                   equipment_table);
+                            demo.last_event_note = "reward options=" +
+                                                   std::to_string(options.equipment_ids.size());
+                            std::printf("main: reward options stage=%u count=%zu deadline=%llu\n",
+                                        options.stage_index, options.equipment_ids.size(),
+                                        static_cast<unsigned long long>(options.deadline_server_tick));
+                            std::fflush(stdout);
+                        }
+                    } else if (event->message.message_type == kRewardApplied) {
+                        RewardAppliedData applied;
+                        if (payload::DecodeRewardApplied(event->message.payload, applied)) {
+                            reward_view.ApplyResult(applied.ok, applied.equipment_id, applied.reason);
+                            demo.last_event_note = std::string("reward applied id=") +
+                                                   std::to_string(applied.equipment_id) +
+                                                   (applied.ok ? " ok" : " refused");
+                            std::printf("main: reward applied id=%u ok=%d reason=%u\n",
+                                        applied.equipment_id, applied.ok ? 1 : 0, applied.reason);
+                            std::fflush(stdout);
                         }
                     }
                     break;
@@ -309,8 +718,17 @@ int main() {
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
 
-            // Auto-login once per connection (dev mode: token accepted as-is).
-            if (!demo.login_sent) {
+            // Resume first when we still hold a token (D8); otherwise perform a
+            // fresh development login.
+            if (recovery.WantsResumeRequest()) {
+                recovery.MarkResumeSent();
+                demo.login_sent = true;
+                demo.login_note = "sending ResumeRequest";
+                SendPayload(kResumeRequest,
+                            payload::EncodeResumeRequest(recovery.Token(), kClientProtocolVersion));
+                std::printf("main: sent ResumeRequest token_bytes=%zu\n", recovery.Token().size());
+                std::fflush(stdout);
+            } else if (!demo.login_sent && recovery.Phase() != RecoveryPhase::kResuming) {
                 demo.login_sent = true;
                 demo.login_note = "sent, awaiting response";
                 LoginRequestData login;
@@ -335,6 +753,17 @@ int main() {
                 ++demo.pings_sent;
                 SendPayload(kPing, payload::EncodePing(ping));
             }
+
+            // D7: while in the Reward state, ENTER reports "ready for the next
+            // stage". The server applies the ready barrier; repeat presses are
+            // idempotent server-side.
+            if (demo.in_room && demo.stage_state == 3 && IsKeyPressed(KEY_ENTER)) {
+                SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
+                demo.ready_sent = true;
+                demo.last_event_note = "next stage ready sent";
+                std::printf("main: next stage ready sent\n");
+                std::fflush(stdout);
+            }
         }
 
         BeginDrawing();
@@ -347,6 +776,22 @@ int main() {
             std::string("Connection: ") + ToString(demo.state) + "  (" + demo.state_detail + ")";
         DrawText(state_line.c_str(), 24, 100, 20,
                  demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
+
+        const char* recovery_phase = "idle";
+        switch (recovery.Phase()) {
+            case RecoveryPhase::kIdle: recovery_phase = "idle"; break;
+            case RecoveryPhase::kWaitingToRetry: recovery_phase = "waiting"; break;
+            case RecoveryPhase::kConnecting: recovery_phase = "connecting"; break;
+            case RecoveryPhase::kResuming: recovery_phase = "resuming"; break;
+            case RecoveryPhase::kRestored: recovery_phase = "restored"; break;
+            case RecoveryPhase::kFailed: recovery_phase = "failed"; break;
+        }
+        const std::string recovery_line =
+            std::string("Recovery: ") + recovery_phase + " attempts=" +
+            std::to_string(recovery.Attempts()) + " token_bytes=" +
+            std::to_string(demo.resume_token.size()) +
+            (demo.resumed ? " (resumed session)" : "") + "  " + recovery.Note();
+        DrawText(recovery_line.c_str(), 24, 115, 18, GRAY);
 
         const std::string login_line =
             "Login: " + demo.login_note +
@@ -391,18 +836,138 @@ int main() {
             " snaps=" + std::to_string(demo.snapshots_received);
         DrawText(view_line.c_str(), 24, 310, 20, GRAY);
 
-        // World [0,20]^2 mapped into a compact arena. Self is blue, peers red.
-        DrawRectangleLines(560, 190, 340, 280, LIGHTGRAY);
-        for (const auto& player : game_view.Players()) {
-            const float px = 560.0f + (player.x / 20.0f) * 340.0f;
-            const float py = 190.0f + (player.z / 20.0f) * 280.0f;
-            DrawCircleV(Vector2{px, py}, 9.0f,
-                        player.id == demo.player_id ? BLUE : RED);
-            DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
-                     static_cast<int>(py - 8), 16, DARKGRAY);
+        const std::string combat_line =
+            "Stage: idx=" + std::to_string(demo.stage_index) +
+            " state=" + StageStateName(demo.stage_state) +
+            " remain=" + std::to_string(demo.monsters_remaining) +
+            " | monsters=" + std::to_string(combat_view.MonsterCount()) +
+            " bullets=" + std::to_string(combat_view.ProjectileCount());
+        DrawText(combat_line.c_str(), 24, 340, 20, GRAY);
+
+        const std::string hp_line =
+            "HP self=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
+            std::to_string(static_cast<int>(demo.self_max_hp)) +
+            "  shoot=" + std::string(last_shoot ? "yes" : "no") +
+            "  events sp/dst/dmg/dth=" + std::to_string(demo.spawns) + "/" +
+            std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
+            std::to_string(demo.deaths);
+        DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
+
+        const std::string stats_line =
+            "Stats(snapshot): ATK=" + std::to_string(static_cast<int>(demo.self_attack)) +
+            " DEF=" + std::to_string(static_cast<int>(demo.self_defense)) +
+            " SPD=" + std::to_string(static_cast<int>(demo.self_move_speed)) +
+            "  Ready: " + (demo.ready_sent ? "sent" : "no") +
+            "  seed=" + std::to_string(combat_view.Stage().seed);
+        DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
+        DrawText(("Last event: " + demo.last_event_note).c_str(), 470, 400, 18, MAROON);
+
+        char correction_text[32] = {0};
+        std::snprintf(correction_text, sizeof(correction_text), "%.3f",
+                      predictor.LastCorrectionDistance());
+        const std::string netcode_line =
+            "Netcode: pending=" + std::to_string(predictor.PendingCount()) +
+            " corr=" + correction_text +
+            " interpDelay=" + std::to_string(static_cast<int>(remote_interp.DelayTicks())) +
+            "t tracks=" + std::to_string(remote_interp.Count()) + "/" +
+            std::to_string(monster_interp.Count());
+        DrawText(netcode_line.c_str(), 24, 430, 20, GRAY);
+
+        // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
+        // projectiles gold. Projectiles exist only via spawn/destroy events.
+        DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
+                           static_cast<int>(kArenaW), static_cast<int>(kArenaH), LIGHTGRAY);
+        const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
+        const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
+
+        for (const auto& [id, projectile] : combat_view.Projectiles()) {
+            (void)id;
+            DrawCircleV(Vector2{to_screen_x(projectile.x), to_screen_y(projectile.z)}, 3.0f, GOLD);
         }
 
-        DrawText("R: retry connect   |   ESC / close window: quit", 24, kScreenHeight - 60, 20, LIGHTGRAY);
+        for (const auto& [id, monster] : combat_view.Monsters()) {
+            // D9: render monsters from the interpolated 10Hz buffer.
+            float mx = monster.x;
+            float mz = monster.z;
+            monster_interp.SampleEntity(id, mx, mz);
+            const float sx = to_screen_x(mx);
+            const float sy = to_screen_y(mz);
+            const bool dead = combat_view.IsDead(id);
+            DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
+                          dead ? DARKGRAY : ORANGE);
+            if (dead) {
+                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7,
+                         static_cast<int>(sx) + 7, static_cast<int>(sy) + 7, BLACK);
+                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) + 7,
+                         static_cast<int>(sx) + 7, static_cast<int>(sy) - 7, BLACK);
+            }
+            const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
+            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
+                          static_cast<int>(20.0f * ratio), 4, LIME);
+            if (combat_view.IsHitFlashing(id)) {
+                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f, GOLD);
+            }
+            DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 9,
+                     static_cast<int>(sy) - 8, 12, DARKGRAY);
+        }
+
+        for (const auto& player : game_view.Players()) {
+            const bool is_self = (player.id == demo.player_id);
+            float px = player.x;
+            float pz = player.z;
+            if (is_self) {
+                // D9: draw our predicted position (reconciled each snapshot).
+                if (predictor.HasPrediction()) {
+                    px = predictor.X();
+                    pz = predictor.Z();
+                }
+            } else {
+                // D9: remote players come from the interpolated buffer.
+                remote_interp.SampleEntity(player.id, px, pz);
+            }
+            px = to_screen_x(px);
+            pz = to_screen_y(pz);
+            DrawCircleV(Vector2{px, pz}, 9.0f,
+                        !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
+            if (combat_view.IsHitFlashing(player.id)) {
+                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f, GOLD);
+            }
+            // HP bar above every player (authoritative hp/max_hp from snapshot).
+            const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4, Fade(RED, 0.25f));
+            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20,
+                          static_cast<int>(24.0f * hp_ratio), 4, player.alive ? GREEN : GRAY);
+            if (is_self) {
+                // Aim heading we are sending to the server.
+                DrawLineV(Vector2{px, pz},
+                          Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f}, DARKBLUE);
+            }
+            DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
+                     static_cast<int>(pz - 8), 16, DARKGRAY);
+        }
+
+        if (!demo.banner.empty()) {
+            DrawText(demo.banner.c_str(), 300, 20, 32, MAROON);
+        }
+
+        if (reward_view.State() != RewardState::kNone) {
+            // Treasure chest panel: options come from the server; display text
+            // comes from the local static table (ids travel on the wire).
+            DrawRectangle(20, 452, 920, 72, Fade(LIGHTGRAY, 0.45f));
+            DrawText(("REWARD - " + reward_view.Note() + "   (keys 1-3 choose)").c_str(),
+                     30, 456, 20, MAROON);
+            std::string row;
+            const auto& options = reward_view.Options();
+            for (std::size_t i = 0; i < options.size(); ++i) {
+                row += "[" + std::to_string(i + 1) + "] " + options[i].display.name + " (" +
+                       options[i].display.slot + ") " + options[i].display.stats + "   ";
+            }
+            DrawText(row.c_str(), 30, 486, 18, DARKGRAY);
+        } else {
+            DrawText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
+                     24, kScreenHeight - 60, 20, LIGHTGRAY);
+        }
         DrawFPS(kScreenWidth - 90, 12);
 
         EndDrawing();

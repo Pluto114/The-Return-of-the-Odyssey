@@ -214,6 +214,10 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		close:       router.NewCloseWatcher(),
 		projectiles: make(map[entity.ID]struct{}),
 	}
+	// Route dispatcher saturation warnings through the application logger so
+	// reliable-queue overflow is observable alongside other server logs (T10).
+	active.events.SetLogger(a.logger)
+	active.close.SetLogger(a.logger)
 	active.close.OnClose(func(id room.ID, reason string) {
 		a.mu.Lock()
 		delete(a.rooms, id)

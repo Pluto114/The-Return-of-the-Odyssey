@@ -1,13 +1,14 @@
-# 角色 C：第一阶段客户端与接入契约
+# 角色 C：客户端与接入契约
 
-状态：客户端已接入 **A 的 v0 协议**（feature/network 分支：MessageType 枚举、Ping/Pong/Login/PlayerInput/WorldSnapshot），
-在本地集成分支 `work/d2` 实现并验证（无头 CTest 4/4：core/net/logic/protocol）。
-`feature/client`（fork: xxhsir，PR #1）保持 D1 协议无关基线；待 A/B 合入 develop 后回填成熟改动。
-本机画面呈现（纯色图元上屏）存在 raylib/驱动环境问题，详见验证记录；逻辑/协议/网络联调不受影响。
+状态（第二周 D4–D9 客户端侧已完成）：分支 `feature/week2-client-gameplay`（基于 main）。
+战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
+（`ctest` 四套件；`odyssey_logic_tests` 158 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
+仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
+端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
 
-依据：[前三天计划](../plans/PHASE1-DAYS1-3.md)、[总体架构](../../ARCHITECTURE.md)、B 的 [核心交接文档](GAME-CORE-PHASE1.md)。
+依据：[第二周计划](../plans/WEEK2-DAYS4-10.md)、[前三天计划](../plans/PHASE1-DAYS1-3.md)、[总体架构](../../ARCHITECTURE.md)。
 
-## 1. 本阶段已交付范围（客户端侧）
+## 1. 已交付范围（客户端侧）
 
 | 模块 | 位置 | 作用 |
 | --- | --- | --- |
@@ -16,11 +17,15 @@
 | 有界队列 | `client/src/core/BoundedQueue.h` | 线程安全有界队列：Push(丢最旧)/TryPush(拒绝)；Close 唤醒等待者 |
 | 网络线程 | `client/src/network/NetClient.{h,cpp}` | Asio TCP 客户端，独立 Network Thread；异步连接/读写；断连事件 |
 | 消息 ID 适配 | `client/src/network/ProtocolIds.h` | A 的 `MessageType` 枚举 → 客户端 constexpr 常量（单一映射点） |
-| 载荷编解码 | `client/src/network/PayloadCodec.h` | Ping/Pong/Login(Req/Resp)/Disconnect/PlayerInput/WorldSnapshot ↔ POD 视图 |
+| 载荷编解码 | `client/src/network/PayloadCodec.h` | Ping/Pong/Login/Resume/Match/Input/Snapshot/战斗事件/奖励 ↔ POD 视图 |
 | 事件/消息类型 | `client/src/network/NetMessage.h` | Network→Main 交接类型（状态变化/入站帧/出站丢弃） |
-| 输入 | `client/src/input/InputSample.h`、`InputSampler.{h,cpp}` | WASD→意图向量；对角限长；30Hz InputSeq 递增器 |
-| 快照视图 | `client/src/sync/GameView.h` | 按 B 语义应用**全量快照**：缺失实体移除、closed 清空、self ack |
-| 窗口/HUD | `client/src/main.cpp` | raylib 窗口；连接状态/入站消息/输入意图/视图计数显示；R 重试；ESC/关窗干净退出 |
+| 输入 | `client/src/input/InputSample.h`、`InputSampler.{h,cpp}` | WASD→移动意图、鼠标→瞄准、SPACE→射击、对角限长、30Hz InputSeq |
+| 玩家/快照视图 | `client/src/sync/GameView.h` | 全量快照语义：缺失移除、closed 清空、self ack、HP/alive/属性 |
+| 战斗视图 | `client/src/sync/CombatView.h` | 怪物全量集合、子弹仅由 Spawn/Destroy 事件增删、受击闪环/死亡标记 |
+| 奖励视图 | `client/src/sync/RewardView.h` | 奖励选项/选择/超时/Applied 状态；本地静态装备显示表（可选文件） |
+| 恢复状态机 | `client/src/sync/RecoveryState.h` | 有界退避重连、Resume 与全新登录决策、令牌失效处理 |
+| 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | 本地预测+服务器校正（只重放未确认输入）；远端/怪物 10Hz 插值 |
+| 窗口/HUD | `client/src/main.cpp` | 连接/登录/匹配/战斗/奖励/恢复/网络统计 HUD；R 重试；ESC/关窗干净退出 |
 
 构建与自检：
 
@@ -28,7 +33,7 @@
 pwsh -NoProfile -File scripts/generate-proto/generate.ps1
 pwsh -NoProfile -File scripts/build/build.ps1 -Target client
 ctest --test-dir build\client-windows -C Debug --output-on-failure
-# 窗口（可选）：build\client-windows\client\odyssey_client.exe
+# 窗口：build\client-windows\client\odyssey_client.exe
 ```
 
 ## 2. 客户端与服务器之间的传输契约（C 侧实现口径）

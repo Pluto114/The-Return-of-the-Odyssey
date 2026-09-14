@@ -27,6 +27,10 @@ struct PlayerView {
     // simulated tick (B semantics - it is "the newest intent used this tick",
     // not a per-packet confirmation).
     std::uint32_t last_processed_input_seq = 0;
+    // Combat display (D5): authoritative HP and alive flag from the snapshot.
+    float hp = 0.0f;
+    float max_hp = 0.0f;
+    bool alive = true;
 };
 
 struct SnapshotView {
