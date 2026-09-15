@@ -98,6 +98,10 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 | `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | 报告“准备下一关”：仅当权威状态已是 `PreparingNextStage` 且自身奖励已结清；提前按会显示被拦截原因 |
 | `R` | 失败后手动重连 |
+| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS） |
+| `F2` | 实体调试：包围盒、发送中的瞄准锥、自身权威位姿与预测位姿的误差线、远端/怪物的插值延迟线 |
+| `F3` | 无障碍菜单（↑/↓ 选择、ENTER/SPACE 切换）：glitch 效果 / 屏幕抖动 / 伤害飘字；改动**立即写入** `settings.ini` |
+| `ESC` | 优先关闭当前面板（F3 → F2 → F1），都没有打开时才退出游戏 |
 | `ESC` / 关闭按钮 | 停止网络线程并退出 |
 
 ## 线程与边界（校验用）

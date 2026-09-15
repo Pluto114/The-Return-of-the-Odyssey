@@ -153,6 +153,7 @@ using odyssey::client::ui::OnHealthFraction;
 using odyssey::client::ui::ReleaseHudFont;
 using odyssey::client::ui::RTToWorld;
 using odyssey::client::ui::SanitizeAscii;
+using odyssey::client::ui::SaveAccessibility;
 using odyssey::client::ui::SegmentWidth;
 using odyssey::client::ui::SetHitDirection;
 using odyssey::client::ui::SettingsFileExists;
@@ -399,7 +400,8 @@ int main(int argc, char** argv) {
                 GetScreenHeight(), layout.scale, layout.offset_x, layout.offset_y);
     std::fflush(stdout);
     const Theme theme = kDefaultTheme;
-    const AccessibilityConfig accessibility = LoadAccessibility();
+    // Mutable: the F3 menu toggles these and persists them (P3).
+    AccessibilityConfig accessibility = LoadAccessibility();
     std::printf("main: asset root '%s' (settings '%s'%s)\n", AssetRoot().c_str(),
                 SettingsFilePath().c_str(), SettingsFileExists() ? "" : ", not created yet");
     // The accessibility switches are consumed by the HUD/effects in P1-P3; logging
@@ -481,6 +483,10 @@ int main(int argc, char** argv) {
     // F1 development overlay (design section 7): every diagnostic line that used to be
     // always on screen. stdout evidence logging is unaffected.
     bool debug_overlay = false;
+    // P3 panels: F2 entity/aim/interpolation debug, F3 accessibility menu.
+    bool entity_debug = false;
+    bool accessibility_menu = false;
+    int accessibility_cursor = 0;
     // P1b-2 combat feedback: white ghost of the health bar, the direction the last
     // hit came from, and the damage floater pool with its hit de-duplication table.
     DamageGhost damage_ghost;
@@ -532,8 +538,22 @@ int main(int argc, char** argv) {
         }
         ++frame_counter;
         if (IsKeyPressed(KEY_ESCAPE)) {
-            std::printf("main: ESC pressed, exiting loop\n"); fflush(stdout);
-            break;
+            // ESC closes whatever panel is open first and only quits when nothing is
+            // open (the UI contract's priority order). KEY_NULL already stopped
+            // raylib from closing the window itself.
+            if (accessibility_menu) {
+                accessibility_menu = false;
+                std::printf("main: ESC closed the accessibility menu\n"); fflush(stdout);
+            } else if (entity_debug) {
+                entity_debug = false;
+                std::printf("main: ESC closed the entity debug view\n"); fflush(stdout);
+            } else if (debug_overlay) {
+                debug_overlay = false;
+                std::printf("main: ESC closed the diagnostics view\n"); fflush(stdout);
+            } else {
+                std::printf("main: ESC pressed, exiting loop\n"); fflush(stdout);
+                break;
+            }
         }
         if (IsKeyPressed(KEY_R)) {
             // Retry after a failed/disconnected connect attempt.
@@ -1235,11 +1255,51 @@ int main(int argc, char** argv) {
         const bool in_stage = hud_phase == HudPhase::kPlaying || hud_phase == HudPhase::kReward ||
                               hud_phase == HudPhase::kTransition;
         // F1 swaps the whole screen for the diagnostics view (section 7): a long column of
-        // numbers is easier to read without the world painted over it, and the F2
-        // entity view (P3) will be the one that keeps the world visible. stdout
-        // evidence logging is unaffected either way.
+        // numbers is easier to read without the world painted over it, while F2 keeps
+        // the world visible and annotates it. stdout evidence logging is unaffected
+        // either way.
         if (IsKeyPressed(KEY_F1)) {
             debug_overlay = !debug_overlay;
+        }
+        if (IsKeyPressed(KEY_F2)) {
+            entity_debug = !entity_debug;
+            std::printf("main: entity debug %s\n", entity_debug ? "on" : "off");
+            std::fflush(stdout);
+        }
+        if (IsKeyPressed(KEY_F3)) {
+            accessibility_menu = !accessibility_menu;
+            accessibility_cursor = 0;
+            std::printf("main: accessibility menu %s\n", accessibility_menu ? "open" : "closed");
+            std::fflush(stdout);
+        }
+        if (accessibility_menu) {
+            // Three switches, keys only: UP/DOWN select, ENTER or SPACE toggles and
+            // writes settings.ini (a write failure is a warning, never a crash).
+            if (IsKeyPressed(KEY_DOWN)) {
+                accessibility_cursor = (accessibility_cursor + 1) % 3;
+            }
+            if (IsKeyPressed(KEY_UP)) {
+                accessibility_cursor = (accessibility_cursor + 2) % 3;
+            }
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
+                switch (accessibility_cursor) {
+                    case 0: accessibility.disable_glitch_fx = !accessibility.disable_glitch_fx; break;
+                    case 1:
+                        accessibility.disable_screen_shake = !accessibility.disable_screen_shake;
+                        break;
+                    default:
+                        accessibility.disable_damage_floaters =
+                            !accessibility.disable_damage_floaters;
+                        break;
+                }
+                const bool saved = SaveAccessibility(accessibility);
+                std::printf("main: accessibility glitch_fx=%d screen_shake=%d damage_floaters=%d "
+                            "saved=%s\n",
+                            accessibility.disable_glitch_fx ? 0 : 1,
+                            accessibility.disable_screen_shake ? 0 : 1,
+                            accessibility.disable_damage_floaters ? 0 : 1, saved ? "yes" : "no");
+                std::fflush(stdout);
+            }
         }
 
         // Every HUD string is formatted into a fixed stack buffer - no std::string or
@@ -1514,6 +1574,73 @@ int main(int argc, char** argv) {
                 DrawHudText(label, px + 12, pz - 8, 16, ToRayColor(theme.text_dim));
             }
 
+            // ---- F2: entity / aim / interpolation debug (P3) --------------------------
+            // Annotates the world instead of replacing it: bounding boxes, the aim cone
+            // we are actually sending, and - the point of the view - the distance
+            // between what the server last said and what we are drawing. A large gap
+            // between a raw entity position and its interpolated position is the
+            // snapshot delay; the line from our authoritative position to the predicted
+            // one is the current prediction error.
+            if (entity_debug) {
+                const Color box_colour = ToRayColor(theme.neon_cyan);
+                const Color raw_colour = ToRayColor(theme.neon_yellow);
+                for (const auto& player : game_view.Players()) {
+                    const bool is_self = (player.id == demo.player_id);
+                    const Vector2 raw = to_screen(player.x, player.z);
+                    float drawn_x = player.x;
+                    float drawn_z = player.z;
+                    if (is_self) {
+                        if (predictor.HasPrediction()) {
+                            drawn_x = predictor.X();
+                            drawn_z = predictor.Z();
+                        }
+                    } else {
+                        remote_interp.SampleEntity(player.id, drawn_x, drawn_z);
+                    }
+                    const Vector2 drawn = to_screen(drawn_x, drawn_z);
+                    DrawRectangleLines(static_cast<int>(drawn.x) - 11, static_cast<int>(drawn.y) - 11,
+                                       22, 22, is_self ? box_colour : ToRayColor(theme.peer));
+                    if (is_self) {
+                        // Authoritative pose, and the error line to the predicted one.
+                        DrawCircleLines(static_cast<int>(raw.x), static_cast<int>(raw.y), 3.0f,
+                                        raw_colour);
+                        DrawLineV(drawn, raw, Fade(raw_colour, 0.75f));
+                        // The aim cone we transmit (heading already normalised).
+                        const float heading = std::atan2(last_aim_z, last_aim_x);
+                        for (const float offset : {-0.26f, 0.26f}) {
+                            const float angle = heading + offset;
+                            DrawLineV(drawn,
+                                      Vector2{drawn.x + std::cos(angle) * 60.0f,
+                                              drawn.y + std::sin(angle) * 60.0f},
+                                      Fade(box_colour, 0.55f));
+                        }
+                    } else {
+                        DrawLineV(drawn, raw, Fade(raw_colour, 0.5f));
+                        DrawCircleLines(static_cast<int>(raw.x), static_cast<int>(raw.y), 2.0f,
+                                        raw_colour);
+                    }
+                }
+                for (const auto& [id, monster] : combat_view.Monsters()) {
+                    float interp_x = monster.x;
+                    float interp_z = monster.z;
+                    monster_interp.SampleEntity(id, interp_x, interp_z);
+                    const Vector2 drawn = to_screen(interp_x, interp_z);
+                    const Vector2 raw = to_screen(monster.x, monster.z);
+                    DrawRectangleLines(static_cast<int>(drawn.x) - 9, static_cast<int>(drawn.y) - 9,
+                                       18, 18, ToRayColor(theme.monster));
+                    DrawCircleLines(static_cast<int>(raw.x), static_cast<int>(raw.y), 2.0f,
+                                    raw_colour);
+                    DrawLineV(drawn, raw, Fade(raw_colour, 0.4f));
+                }
+                // Summary line in the corner, so a screenshot alone is self-explanatory.
+                std::snprintf(line, sizeof(line),
+                              "F2 DEBUG  players=%zu monsters=%zu interpDelay=%dt snaps=%llu",
+                              game_view.PlayerCount(), combat_view.MonsterCount(),
+                              static_cast<int>(remote_interp.DelayTicks()),
+                              static_cast<unsigned long long>(demo.snapshots_received));
+                DrawHudText(line, 24, 448, 16, ToRayColor(theme.neon_cyan));
+            }
+
             // ---- Game HUD (design sections 3-4) ------------------------------------------
             // Per-frame feedback clocks (P1b-2): the hit marker expires, the damage
             // ghost drains and retired floaters are recycled. All three are pure state
@@ -1768,6 +1895,45 @@ int main(int argc, char** argv) {
                 }
             }
         }  // end game view
+
+        // ---- F3: accessibility menu (P3) -----------------------------------------
+        // Drawn inside the render target so it scales with everything else. Raylib for
+        // now; the same state feeds the ImGui menu once that layer lands.
+        if (accessibility_menu) {
+            constexpr float kMenuW = 520.0f;
+            constexpr float kMenuH = 210.0f;
+            const float menu_x = (kScreenWidth - kMenuW) * 0.5f;
+            const float menu_y = (kScreenHeight - kMenuH) * 0.5f;
+            DrawRectangle(static_cast<int>(menu_x), static_cast<int>(menu_y),
+                          static_cast<int>(kMenuW), static_cast<int>(kMenuH),
+                          Fade(ToRayColor(theme.panel), 0.96f));
+            DrawRectangleLines(static_cast<int>(menu_x), static_cast<int>(menu_y),
+                               static_cast<int>(kMenuW), static_cast<int>(kMenuH),
+                               ToRayColor(theme.panel_edge));
+            DrawHudText("ACCESSIBILITY  (F3)", menu_x + 20.0f, menu_y + 14.0f, 22,
+                        ToRayColor(theme.neon_cyan));
+
+            const char* rows[3] = {"disable glitch effects", "disable screen shake",
+                                   "disable damage floaters"};
+            const bool switches[3] = {accessibility.disable_glitch_fx,
+                                      accessibility.disable_screen_shake,
+                                      accessibility.disable_damage_floaters};
+            for (int i = 0; i < 3; ++i) {
+                const float row_y = menu_y + 62.0f + static_cast<float>(i) * 32.0f;
+                if (i == accessibility_cursor) {
+                    DrawRectangle(static_cast<int>(menu_x) + 12, static_cast<int>(row_y) - 4,
+                                  static_cast<int>(kMenuW) - 24, 28,
+                                  Fade(ToRayColor(theme.neon_cyan), 0.18f));
+                }
+                std::snprintf(line, sizeof(line), "%s %s", switches[i] ? "[x]" : "[ ]", rows[i]);
+                DrawHudText(line, menu_x + 28.0f, row_y, 18,
+                            i == accessibility_cursor ? ToRayColor(theme.text)
+                                                      : ToRayColor(theme.text_dim));
+            }
+            DrawHudText("UP/DOWN select   ENTER or SPACE toggle   ESC close",
+                        menu_x + 20.0f, menu_y + kMenuH - 30.0f, 16,
+                        ToRayColor(theme.text_dim));
+        }
 
         if (target_ready) {
             EndTextureMode();

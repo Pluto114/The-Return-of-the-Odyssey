@@ -233,4 +233,40 @@ AccessibilityConfig LoadAccessibility() {
     return config;
 }
 
+bool SaveAccessibility(const AccessibilityConfig& config) {
+    const std::string& path = SettingsFilePath();
+    if (path.empty()) {
+        Warn("no settings file location; accessibility changes stay in memory");
+        return false;
+    }
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // std::fopen: This function or variable may be unsafe
+#endif
+    std::FILE* file = std::fopen(path.c_str(), "wb");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+    if (file == nullptr) {
+        Warn("cannot write '" + path + "'; accessibility changes stay in memory");
+        return false;
+    }
+    // Plain key=value, same keys LoadAccessibility reads. The file is ours, so it is
+    // rewritten wholesale; hand-written comments are not preserved.
+    const std::string contents =
+        "# Odyssey client settings. Written by the F3 accessibility menu; safe to edit.\n"
+        "# 1 enables the switch (i.e. disables that effect).\n"
+        "disable_glitch_fx=" + std::string(config.disable_glitch_fx ? "1" : "0") + "\n" +
+        "disable_screen_shake=" + std::string(config.disable_screen_shake ? "1" : "0") + "\n" +
+        "disable_damage_floaters=" + std::string(config.disable_damage_floaters ? "1" : "0") +
+        "\n";
+    const std::size_t written = std::fwrite(contents.data(), 1, contents.size(), file);
+    const bool flushed = std::fclose(file) == 0;
+    if (written != contents.size() || !flushed) {
+        Warn("short write to '" + path + "'; accessibility changes may not persist");
+        return false;
+    }
+    return true;
+}
+
 }  // namespace odyssey::client::ui

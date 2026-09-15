@@ -122,8 +122,13 @@ const std::string& SettingsFilePath();
 bool SettingsFileExists();
 
 // Reads the accessibility switches. A missing or unreadable file - and any write
-// failure reported by the writer added in P3 - yields the defaults plus a stdout
-// warning; it must never block or crash the client.
+// failure reported by SaveAccessibility - yields the defaults plus a stdout warning;
+// it must never block or crash the client.
 AccessibilityConfig LoadAccessibility();
+
+// Writes the accessibility switches to SettingsFilePath(). Returns false (after a
+// stdout warning) when the file cannot be written; the caller keeps its in-memory
+// values either way. Comments a user added by hand are not preserved.
+bool SaveAccessibility(const AccessibilityConfig& config);
 
 }  // namespace odyssey::client::ui

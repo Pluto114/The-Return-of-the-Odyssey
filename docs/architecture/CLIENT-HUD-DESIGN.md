@@ -164,6 +164,13 @@ P3 在此之上新增：RTT EMA(α=0.1)、Server Tick 频率（Δ server_tick/Δ
 
 **验收**：`ctest` 5/5 与 logic 套件全绿；P1b 结束后按提示词 §四.3 每期回归门禁执行；无操作时屏幕只剩游戏 HUD。
 
+**P3（部分已完成）**
+
+- ✅ **F2 实体调试**（Raylib，在 RT 内叠加、不替换世界）：玩家/怪物包围盒、自身**发送中的瞄准锥**、自身**权威位姿 ↔ 预测位姿的误差线**、远端与怪物的**原始快照位姿 ↔ 插值位姿连线**（直观显示插值延迟），左下角一行 `F2 DEBUG players=.. monsters=.. interpDelay=..t snaps=..` 便于单张截图自证
+- ✅ **F3 无障碍菜单**（Raylib 绘制；同一份状态将来直接喂给 ImGui 菜单）：三项开关（glitch / 屏幕抖动 / 伤害飘字），↑↓ 选择、ENTER/SPACE 切换，改动**立即持久化**到 `settings.ini`（写失败只告警）；全部字段实时生效（`disable_screen_shake` 归零抖动幅度、`disable_damage_floaters` 只消费事件不绘制、`disable_glitch_fx` 停准星自转）
+- ✅ **ESC 优先级**：F3 → F2 → F1 依次关闭，都没打开时才退出游戏（对齐提示词 §一.5）
+- ⏳ 待做：F1 面板补**双向队列深度（瞬时/峰值）**与 EMA 折线图、RTT/Server Tick/Prediction Error 指标口径落地、`--no-ui` / `ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收（后者的预设来自 D）
+
 ---
 
 ## 9. 决策记录
