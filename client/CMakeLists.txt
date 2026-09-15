@@ -140,6 +140,22 @@ target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+
+# Vendored rlImGui (raylib + Dear ImGui glue). Compiled into the client target ONLY -
+# never into the test targets, which must stay window-free. Dear ImGui itself comes
+# from vcpkg through odyssey_client_dependencies; NO_FONT_AWESOME keeps the Font
+# Awesome icon font (and its 1.4MB data) out, since the HUD is ASCII-only.
+set(_rlimgui_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rlImGui")
+if(EXISTS "${_rlimgui_dir}/rlImGui.cpp")
+    target_sources(odyssey_client PRIVATE "${_rlimgui_dir}/rlImGui.cpp")
+    target_include_directories(odyssey_client PRIVATE "${_rlimgui_dir}")
+    target_compile_definitions(odyssey_client PRIVATE NO_FONT_AWESOME)
+    message(STATUS "Odyssey: vendored rlImGui enabled (${_rlimgui_dir})")
+else()
+    # Keeps the tree buildable before/without the vendored copy; the UI falls back to
+    # the raylib-drawn panels.
+    message(STATUS "Odyssey: rlImGui not vendored; ImGui panels disabled")
+endif()
 # The generated table is copied beside the executable, and again into its assets/
 # directory after the assets copy: the client tries the asset root first (its normal
 # resolution path) and keeps the executable directory as a fallback, so a shipped

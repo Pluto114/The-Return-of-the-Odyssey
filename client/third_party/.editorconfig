@@ -1,0 +1,11 @@
+# Vendored third-party sources keep their upstream formatting verbatim.
+# These rules stop this repository's own style (indent size, line endings) from being
+# applied to files we do not own, so `git diff` against upstream stays meaningful and
+# a re-vendor is a clean copy rather than a reformat.
+[*]
+indent_style = unset
+indent_size = unset
+end_of_line = unset
+charset = unset
+trim_trailing_whitespace = unset
+insert_final_newline = unset

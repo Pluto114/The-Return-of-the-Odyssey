@@ -26,6 +26,11 @@
 - 提交 go.mod、go.sum、go.work、go.work.sum、package-lock.json、vcpkg.json；不提交 .env、node_modules、.tools、构建产物与生成协议代码。
 - 统一从 proto/ 生成 Go/C++，Bot 复用 server/generated/protocol；不要手写两份协议结构。
 - 新增依赖应说明用途并同步版本；不引入架构文档排除的大型框架。
+- Vendor 的第三方源码登记（由 C 提交、A 审核）：
+  - **rlImGui**（Raylib + Dear ImGui 的集成后端）：`client/third_party/rlImGui/`，来源 `raylib-extras/rlImGui`，分支 `RL60ImGui19207`，提交 `3bc5731c4216bb8caa67fbea24aa85ce80d57ccb`，zlib 许可。
+    只 Vendor `rlImGui.{h,cpp}`、`imgui_impl_raylib.h`、`rlImGuiColors.h` 与 `LICENSE`（文件与 blob 哈希见该目录 `VENDORED.md`）；**不**带入其 `extras/`（Font Awesome 图标与 1.4MB 字体数据，编译时以 `NO_FONT_AWESOME` 排除）、`examples/`、`resources/` 与 premake 二进制。
+    Dear ImGui 本体一律使用 vcpkg 的 `imgui`（当前 1.92.8#1）静态库，禁止再 Vendor 一份 ImGui 源以免符号冲突。
+    该目录源码保持与上游逐字节一致，因此根 `.gitattributes` 对其标记 `client/third_party/** -text`，并由 `client/third_party/.editorconfig` 停止继承本仓库缩进/换行规则。
 - 骨架阶段尚未引用的 Go 依赖由 go.mod 预置；此时执行 go mod tidy 会删掉未使用依赖，开始实现实际 import 后再整理。
 - 协议源更改后执行生成脚本、Go 检查与 C++ 协议编译；生成代码不手改。
 
