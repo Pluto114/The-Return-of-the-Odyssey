@@ -17,12 +17,17 @@ var (
 	ErrResultQueueFull     = errors.New("result writer queue is full")
 	ErrResultWriterClosed  = errors.New("result writer is closed")
 	ErrInvalidDeadLetter   = errors.New("invalid result dead-letter path")
+	ErrResultDeadLetter    = errors.New("result writer could not save accepted results to dead-letter storage")
 )
 
+// ResultSink implementations must return when ctx is cancelled.
 type ResultSink interface {
 	Persist(context.Context, ResultEnvelope) (PersistDisposition, error)
 }
 
+// FailureSink implementations must observe ctx wherever their I/O supports
+// cancellation. Shutdown waits for StoreFailure to return; filesystem writes
+// and Sync cannot be forcibly interrupted by a context deadline.
 type FailureSink interface {
 	StoreFailure(context.Context, ResultFailure) error
 }
@@ -73,6 +78,12 @@ type ResultWriter struct {
 
 	mu     sync.RWMutex
 	closed bool
+	// The forced drain uses one total budget, independent of the cancelled
+	// worker and caller contexts. Protected by mu and set before cancel.
+	cleanupContext context.Context
+	cleanupCancel  context.CancelFunc
+	// Written only by run; read only after done is closed.
+	firstDeadLetterError error
 
 	inFlight           atomic.Int64
 	submitted          atomic.Uint64
@@ -131,9 +142,13 @@ func (w *ResultWriter) Stats() ResultWriterStats {
 	}
 }
 
-// Shutdown stops admission and drains accepted envelopes. If the caller's
-// deadline expires, in-flight work is cancelled and remaining queue depth is
-// retained in Stats for the shutdown log.
+// Shutdown stops admission and drains accepted envelopes. When ctx expires,
+// database attempts and retry waits stop. Accepted envelopes still awaiting
+// persistence are sent to dead-letter storage with one independent total
+// context budget of AttemptTimeout. Shutdown waits for cleanup before returning.
+// This is not a hard wall-clock limit: an uncancellable sink I/O operation must
+// finish first. Any unsaved envelope is counted and returned as
+// ErrResultDeadLetter, including when the cleanup deadline is exhausted.
 func (w *ResultWriter) Shutdown(ctx context.Context) error {
 	w.mu.Lock()
 	if !w.closed {
@@ -143,35 +158,48 @@ func (w *ResultWriter) Shutdown(ctx context.Context) error {
 	w.mu.Unlock()
 	select {
 	case <-w.done:
-		return nil
+		return w.shutdownError()
 	case <-ctx.Done():
+		w.mu.Lock()
+		if w.cleanupContext == nil {
+			w.cleanupContext, w.cleanupCancel = context.WithTimeout(context.Background(), w.options.AttemptTimeout)
+		}
 		w.cancel()
-		return ctx.Err()
+		w.mu.Unlock()
+		<-w.done
+		return errors.Join(ctx.Err(), w.shutdownError())
 	}
 }
 
 func (w *ResultWriter) run() {
 	defer close(w.done)
 	defer w.cancel()
-	for {
-		select {
-		case <-w.ctx.Done():
-			return
-		case envelope, open := <-w.queue:
-			if !open {
-				return
-			}
-			w.persist(envelope)
+	defer func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.cleanupCancel != nil {
+			w.cleanupCancel()
 		}
+	}()
+	// Shutdown closes the queue before cancellation. Keep draining it even
+	// after cancellation so no admitted envelope silently disappears.
+	for envelope := range w.queue {
+		w.inFlight.Add(1)
+		attempts, err := w.persist(envelope)
+		if err != nil {
+			w.storeFailure(envelope, attempts, err)
+		}
+		w.inFlight.Add(-1)
 	}
 }
 
-func (w *ResultWriter) persist(envelope ResultEnvelope) {
-	w.inFlight.Add(1)
-	defer w.inFlight.Add(-1)
+func (w *ResultWriter) persist(envelope ResultEnvelope) (int, error) {
 	var lastErr error
 	attemptsUsed := 0
 	for attempt := 1; attempt <= w.options.MaxAttempts; attempt++ {
+		if err := w.ctx.Err(); err != nil {
+			return attemptsUsed, err
+		}
 		attemptsUsed = attempt
 		attemptContext, cancel := context.WithTimeout(w.ctx, w.options.AttemptTimeout)
 		disposition, err := w.sink.Persist(attemptContext, envelope)
@@ -182,7 +210,7 @@ func (w *ResultWriter) persist(envelope ResultEnvelope) {
 			} else {
 				w.persisted.Add(1)
 			}
-			return
+			return attemptsUsed, nil
 		}
 		lastErr = err
 		if errors.Is(err, ErrInvalidResultEnvelope) || errors.Is(err, ErrResultConflict) || attempt == w.options.MaxAttempts {
@@ -190,14 +218,42 @@ func (w *ResultWriter) persist(envelope ResultEnvelope) {
 		}
 		w.retries.Add(1)
 		if !waitContext(w.ctx, w.options.RetryBackoff) {
-			return
+			return attemptsUsed, w.ctx.Err()
 		}
 	}
+	return attemptsUsed, lastErr
+}
+
+func (w *ResultWriter) storeFailure(envelope ResultEnvelope, attempts int, cause error) {
 	w.failed.Add(1)
-	failure := ResultFailure{FailedAt: time.Now().UTC(), Attempts: attemptsUsed, Kind: resultFailureKind(lastErr), Envelope: envelope.Clone()}
-	if err := w.failure.StoreFailure(w.ctx, failure); err != nil {
-		w.deadLetterFailures.Add(1)
+	failure := ResultFailure{FailedAt: time.Now().UTC(), Attempts: attempts, Kind: resultFailureKind(cause), Envelope: envelope.Clone()}
+	// Ordinary failures also have a deadline. If shutdown interrupts this
+	// attempt, retry its envelope using the independent forced-drain budget.
+	err := w.ctx.Err()
+	if err == nil {
+		failureContext, cancel := context.WithTimeout(w.ctx, w.options.AttemptTimeout)
+		err = w.failure.StoreFailure(failureContext, failure)
+		cancel()
 	}
+	if err != nil && w.ctx.Err() != nil {
+		w.mu.RLock()
+		cleanupContext := w.cleanupContext
+		w.mu.RUnlock()
+		err = w.failure.StoreFailure(cleanupContext, failure)
+	}
+	if err != nil {
+		w.deadLetterFailures.Add(1)
+		if w.firstDeadLetterError == nil {
+			w.firstDeadLetterError = err
+		}
+	}
+}
+
+func (w *ResultWriter) shutdownError() error {
+	if failures := w.deadLetterFailures.Load(); failures != 0 {
+		return fmt.Errorf("%w: %d envelope(s); first error: %w", ErrResultDeadLetter, failures, w.firstDeadLetterError)
+	}
+	return nil
 }
 
 func waitContext(ctx context.Context, duration time.Duration) bool {
@@ -216,6 +272,8 @@ func waitContext(ctx context.Context, duration time.Duration) bool {
 
 func resultFailureKind(err error) string {
 	switch {
+	case errors.Is(err, context.Canceled):
+		return "shutdown"
 	case errors.Is(err, ErrResultConflict):
 		return "conflict"
 	case errors.Is(err, ErrInvalidResultEnvelope):
@@ -252,6 +310,9 @@ func (s *FileFailureSink) StoreFailure(ctx context.Context, failure ResultFailur
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := json.NewEncoder(s.file).Encode(failure); err != nil {
 		return fmt.Errorf("write result dead-letter: %w", err)
 	}

@@ -55,12 +55,9 @@ func (s *ResultService) Shutdown(ctx context.Context) error {
 	if s.writer != nil {
 		result = s.writer.Shutdown(ctx)
 	}
-	// If the drain deadline elapsed, the writer may still be unwinding a sink
-	// call. Leave its dependencies open until process exit instead of racing a
-	// database/file close against that goroutine.
-	if result != nil {
-		return result
-	}
+	// Shutdown waits for the worker and its bounded dead-letter cleanup even
+	// when returning a deadline or persistence error. Its dependencies can now
+	// be closed without racing outstanding writes.
 	if s.store != nil {
 		result = errors.Join(result, s.store.Close())
 	}

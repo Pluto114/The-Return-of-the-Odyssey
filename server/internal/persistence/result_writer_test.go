@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,11 +55,20 @@ type memoryFailureSink struct {
 	err      error
 }
 
-func (s *memoryFailureSink) StoreFailure(_ context.Context, failure ResultFailure) error {
+func (s *memoryFailureSink) StoreFailure(ctx context.Context, failure ResultFailure) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failures = append(s.failures, failure)
 	return s.err
+}
+
+type failureSinkFunc func(context.Context, ResultFailure) error
+
+func (f failureSinkFunc) StoreFailure(ctx context.Context, failure ResultFailure) error {
+	return f(ctx, failure)
 }
 
 func writerOptions(failure FailureSink) ResultWriterOptions {
@@ -200,5 +211,192 @@ func TestFileFailureSinkWritesRecoverableJSONLine(t *testing.T) {
 	}
 	if restored.Kind != "backend" || restored.Attempts != 3 || restored.Envelope.MatchID != failure.Envelope.MatchID {
 		t.Fatalf("restored failure = %+v", restored)
+	}
+}
+
+func TestResultWriterShutdownDuringRetrySavesInFlightResult(t *testing.T) {
+	sink := &scriptedResultSink{errors: []error{ErrResultBackend}}
+	failures := &memoryFailureSink{}
+	options := writerOptions(failures)
+	options.RetryBackoff = time.Hour
+	writer, err := NewResultWriter(sink, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = writer.Shutdown(ctx)
+	})
+	if err := writer.Submit(validResultEnvelope()); err != nil {
+		t.Fatal(err)
+	}
+	// The counter is published immediately before the retry wait, so the
+	// shutdown tests that path without depending on an arbitrary sleep.
+	deadline := time.Now().Add(time.Second)
+	for writer.Stats().Retries == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("writer did not reach its retry wait")
+		}
+		runtime.Gosched()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := writer.Shutdown(ctx); !errors.Is(err, context.Canceled) || errors.Is(err, ErrResultDeadLetter) {
+		t.Fatalf("Shutdown = %v, want cancellation with successful dead-letter cleanup", err)
+	}
+	if stats := writer.Stats(); stats.Submitted != 1 || stats.Failed != 1 || stats.DeadLetterFailures != 0 || stats.InFlight != 0 || stats.QueueDepth != 0 {
+		t.Fatalf("shutdown stats = %+v", stats)
+	}
+	if len(failures.failures) != 1 || failures.failures[0].Attempts != 1 || failures.failures[0].Kind != "shutdown" {
+		t.Fatalf("in-flight dead letters = %+v", failures.failures)
+	}
+}
+
+func TestResultWriterShutdownSavesInFlightAndQueuedResults(t *testing.T) {
+	sink := &scriptedResultSink{started: make(chan struct{}, 1), release: make(chan struct{})}
+	failures := &memoryFailureSink{}
+	writer, err := NewResultWriter(sink, writerOptions(failures))
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitBlockedResults(t, writer, sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := writer.Shutdown(ctx); !errors.Is(err, context.Canceled) || errors.Is(err, ErrResultDeadLetter) {
+		t.Fatalf("Shutdown = %v", err)
+	}
+	if stats := writer.Stats(); stats.Submitted != 3 || stats.Failed != 3 || stats.DeadLetterFailures != 0 || stats.InFlight != 0 || stats.QueueDepth != 0 {
+		t.Fatalf("shutdown stats = %+v", stats)
+	}
+	if len(failures.failures) != 3 {
+		t.Fatalf("dead letters = %+v", failures.failures)
+	}
+	for i, failure := range failures.failures {
+		wantAttempts := 0
+		if i == 0 {
+			wantAttempts = 1
+		}
+		if failure.Envelope.RoomID != uint64(i+1) || failure.Attempts != wantAttempts {
+			t.Fatalf("dead letter %d = %+v", i, failure)
+		}
+	}
+}
+
+func TestResultWriterShutdownReportsDeadLetterFailure(t *testing.T) {
+	sink := &scriptedResultSink{started: make(chan struct{}, 1), release: make(chan struct{})}
+	diskError := errors.New("dead-letter disk unavailable")
+	failures := &memoryFailureSink{err: diskError}
+	writer, err := NewResultWriter(sink, writerOptions(failures))
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitBlockedResults(t, writer, sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = writer.Shutdown(ctx)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrResultDeadLetter) || !errors.Is(err, diskError) {
+		t.Fatalf("Shutdown = %v, want cancellation and visible dead-letter failure", err)
+	}
+	if stats := writer.Stats(); stats.Failed != 3 || stats.DeadLetterFailures != 3 || stats.QueueDepth != 0 || stats.InFlight != 0 {
+		t.Fatalf("shutdown stats = %+v", stats)
+	}
+	if err := writer.Shutdown(context.Background()); !errors.Is(err, ErrResultDeadLetter) {
+		t.Fatalf("repeated Shutdown lost failure: %v", err)
+	}
+}
+
+func TestResultWriterShutdownUsesOneDeadLetterDeadline(t *testing.T) {
+	sink := &scriptedResultSink{started: make(chan struct{}, 1), release: make(chan struct{})}
+	var deadlines []time.Time
+	failure := failureSinkFunc(func(ctx context.Context, _ ResultFailure) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("dead-letter cleanup has no deadline")
+		}
+		deadlines = append(deadlines, deadline)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	options := writerOptions(failure)
+	options.AttemptTimeout = 250 * time.Millisecond
+	writer, err := NewResultWriter(sink, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitBlockedResults(t, writer, sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = writer.Shutdown(ctx)
+	if !errors.Is(err, ErrResultDeadLetter) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown = %v, want exhausted cleanup deadline", err)
+	}
+	if len(deadlines) != 3 || !deadlines[0].Equal(deadlines[1]) || !deadlines[0].Equal(deadlines[2]) {
+		t.Fatalf("cleanup deadlines must be shared across queued results: %v", deadlines)
+	}
+	if stats := writer.Stats(); stats.DeadLetterFailures != 3 || stats.QueueDepth != 0 || stats.InFlight != 0 {
+		t.Fatalf("expired cleanup stats = %+v", stats)
+	}
+}
+
+func submitBlockedResults(t *testing.T, writer *ResultWriter, sink *scriptedResultSink) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = writer.Shutdown(ctx)
+	})
+	for i := 0; i < 3; i++ {
+		envelope := validResultEnvelope()
+		envelope.RoomID = uint64(i + 1)
+		if err := writer.Submit(envelope); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			select {
+			case <-sink.started:
+			case <-time.After(time.Second):
+				t.Fatal("writer did not start persistence")
+			}
+		}
+	}
+}
+
+func TestResultServiceClosesFileAfterForcedDrain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "results.jsonl")
+	failure, err := OpenFileFailureSink(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &scriptedResultSink{started: make(chan struct{}, 1), release: make(chan struct{})}
+	writer, err := NewResultWriter(sink, writerOptions(failure))
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitBlockedResults(t, writer, sink)
+	service := &ResultService{writer: writer, failure: failure}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.Shutdown(ctx); !errors.Is(err, context.Canceled) || errors.Is(err, ErrResultDeadLetter) {
+		t.Fatalf("service Shutdown = %v", err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []json.RawMessage
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	for decoder.More() {
+		var line json.RawMessage
+		if err := decoder.Decode(&line); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) != 3 {
+		t.Fatalf("saved %d dead-letter records, want 3", len(lines))
+	}
+	if err := failure.StoreFailure(context.Background(), ResultFailure{}); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("dead-letter file was not closed after drain: %v", err)
 	}
 }
