@@ -68,9 +68,23 @@ func TestInput(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported potion is rejected explicitly", func(t *testing.T) {
-		if _, err := Input(&protocol.PlayerInput{InputSeq: 1, UsePotion: true}); err != ErrPotionUnsupported {
-			t.Errorf("Input(use_potion) error = %v, want ErrPotionUnsupported", err)
+	t.Run("use potion intent is mapped through", func(t *testing.T) {
+		got, err := Input(&protocol.PlayerInput{InputSeq: 1, UsePotion: true})
+		if err != nil {
+			t.Fatalf("Input(use_potion) error = %v, want nil", err)
+		}
+		if !got.UsePotion {
+			t.Errorf("UsePotion = false, want true")
+		}
+	})
+
+	t.Run("use potion omitted stays false", func(t *testing.T) {
+		got, err := Input(&protocol.PlayerInput{InputSeq: 1})
+		if err != nil {
+			t.Fatalf("Input() error = %v", err)
+		}
+		if got.UsePotion {
+			t.Errorf("UsePotion = true, want false")
 		}
 	})
 }

@@ -23,7 +23,6 @@ import (
 // The room layer never produces a nil intent, but the network boundary must
 // defend against a malformed frame that unmarshals to nil.
 var ErrNilInput = errors.New("convert: nil PlayerInput")
-var ErrPotionUnsupported = errors.New("convert: potion input is not implemented")
 
 // Input converts the wire intent (protocol.PlayerInput) into B's domain intent
 // (game.Input). It maps fields and widens float32 wire coordinates to float64
@@ -38,9 +37,6 @@ func Input(in *protocol.PlayerInput) (game.Input, error) {
 	if in == nil {
 		return game.Input{}, ErrNilInput
 	}
-	if in.UsePotion {
-		return game.Input{}, ErrPotionUnsupported
-	}
 	var out game.Input
 	out.Seq = in.InputSeq
 	if in.Move != nil {
@@ -50,6 +46,7 @@ func Input(in *protocol.PlayerInput) (game.Input, error) {
 		out.Aim = vec2(in.Aim)
 	}
 	out.Shoot = in.Shoot
+	out.UsePotion = in.UsePotion
 	return out, nil
 }
 
