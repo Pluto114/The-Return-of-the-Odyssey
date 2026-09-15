@@ -40,6 +40,19 @@ if (-not (Test-Path -LiteralPath $clientExe)) {
     throw "Client not built: $clientExe`nRun: pwsh -File scripts/build/build.ps1 -Target client"
 }
 
+# The upstream merge added an indirect Go dependency (filippo.io/edwards25519) that
+# is not in a typical local module cache yet; the server cannot compile without it,
+# so fail early with the exact fix instead of after a confusing build error.
+if (-not $NoServer) {
+    $moduleCache = (& go env GOMODCACHE) 2>$null
+    if ($moduleCache -and -not (Test-Path (Join-Path $moduleCache 'filippo.io'))) {
+        Write-Host 'Go modules look incomplete (filippo.io/edwards25519 missing).' -ForegroundColor Yellow
+        Write-Host 'Run once, with network/proxy access:' -ForegroundColor Yellow
+        Write-Host '  cd server; go mod download all' -ForegroundColor Yellow
+        Write-Host '  (# if the proxy times out: $env:GOPROXY = ''https://goproxy.cn,direct'')' -ForegroundColor Yellow
+    }
+}
+
 $stamp = Get-Date -Format 'yyyy-MM-dd-HHmm'
 $evidenceDir = Join-Path $root (Join-Path $EvidenceRoot "first-stage-$stamp")
 New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null

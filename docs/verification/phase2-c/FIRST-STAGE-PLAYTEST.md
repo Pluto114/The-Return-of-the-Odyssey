@@ -13,9 +13,17 @@
 | 项 | 要求 | 检查命令 |
 | --- | --- | --- |
 | 客户端 | 已构建 | `Test-Path build\client-windows\client\odyssey_client.exe` |
-| Go 工具链 | `go` 在 PATH，模块已下载 | `go version`；首次 `cd server; go mod download` |
+| **Go 依赖** | **必须先下载**：本次合并新增了 `filippo.io/edwards25519 v1.2.0`（间接依赖），本地模块缓存里没有，缺它会直接编译失败 | `cd server; go mod download all` |
+| Go 工具链 | `go` 在 PATH | `go version`（本项目实测 go1.26.8） |
 | 端口 | `7777`(TCP) 空闲，`8080`(Admin) / `19091`(Metrics) 未被占用 | `netstat -ano \| findstr :7777` |
 | 服务器配置 | **可缺省**：`config.Load` 在无 `.env` 时使用内置默认值（与 `configs/.env.example` 一致），`ODYSSEY_RESUME_ENABLED=false`、`ODYSSEY_RESULTS_ENABLED=false`，因此**不需要 Redis/MySQL** | 需要覆盖时：`Copy-Item server\configs\.env.example server\configs\.env` 后改（该文件已被 `.gitignore` 忽略） |
+
+> **下载依赖需要网络/代理**。若 `go mod download` 报 `dial tcp ... proxy.golang.org ... timed out`，先接通代理/VPN，或改用国内镜像：
+> ```powershell
+> $env:GOPROXY = 'https://goproxy.cn,direct'
+> cd server; go mod download all
+> ```
+> 注意：仓库里的 `VCPKG_ROOT`（用户级）与 Go 无关，不影响这一步。
 
 > 跨机联调：服务器用 `ODYSSEY_TCP_ADDR=0.0.0.0:7777` 起，客户端用 `--server <服务端局域网 IP>:7777`；同时放行该 TCP 端口。
 
