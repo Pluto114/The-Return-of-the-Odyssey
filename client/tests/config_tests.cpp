@@ -32,8 +32,12 @@ using odyssey::client::core::kDefaultServerHost;
 using odyssey::client::core::kDefaultServerPort;
 using odyssey::client::core::kServerHostEnvVar;
 using odyssey::client::core::kServerPortEnvVar;
+using odyssey::client::core::kPerfFramesEnvVar;
+using odyssey::client::core::kPerfLogEnvVar;
+using odyssey::client::core::kPerfTriggerEnvVar;
 using odyssey::client::core::kUiOffEnvVar;
 using odyssey::client::core::ParseClientOptions;
+using odyssey::client::core::PerfTrigger;
 using odyssey::client::core::ToString;
 
 ConfigParseResult Parse(std::initializer_list<const char*> args, const EndpointEnv& env = {}) {
@@ -297,6 +301,68 @@ void TestUiSwitch() {
     CHECK(std::string(ClientUsageText()).find("--no-ui") != std::string::npos);
 }
 
+void TestPerfCaptureOptions() {
+    // Unset: capture off, nothing written.
+    const auto off = OK(Parse({}));
+    CHECK(off.perf_frames == 0);
+    CHECK(off.perf_log.empty());
+
+    // Frames + destination.
+    const auto on = OK(Parse({}, EndpointEnv{nullptr, nullptr, nullptr, "600", "perf.csv"}));
+    CHECK(on.perf_frames == 600);
+    CHECK(on.perf_log == "perf.csv");
+
+    // A frame count without a destination still measures (the summary goes to stdout).
+    const auto summary_only =
+        OK(Parse({}, EndpointEnv{nullptr, nullptr, nullptr, "600", nullptr}));
+    CHECK(summary_only.perf_frames == 600);
+    CHECK(summary_only.perf_log.empty());
+
+    // Bad counts are rejected: zero, non-numeric, negative and above the capture
+    // capacity all fail loudly instead of producing an empty measurement file.
+    for (const char* bad : {"0", "abc", "-1", "1.5", "4097", "99999999999"}) {
+        const auto result = Parse({}, EndpointEnv{nullptr, nullptr, nullptr, bad, "perf.csv"});
+        EXPECT_ERROR(result);
+        CHECK(result.error.find(kPerfFramesEnvVar) != std::string::npos);
+    }
+    // The capacity boundary is accepted.
+    const auto at_capacity =
+        OK(Parse({}, EndpointEnv{nullptr, nullptr, nullptr, "4096", nullptr}));
+    CHECK(at_capacity.perf_frames == 4096);
+
+    // A destination without a frame count is a half-configured measurement.
+    const auto half = Parse({}, EndpointEnv{nullptr, nullptr, nullptr, nullptr, "perf.csv"});
+    EXPECT_ERROR(half);
+    CHECK(half.error.find(kPerfLogEnvVar) != std::string::npos);
+
+    // Trigger: default is immediate, because a smoke-test capture must not wait forever
+    // for a battle that may never start. `playing` is the acceptance-run mode.
+    CHECK(on.perf_trigger == PerfTrigger::kImmediate);
+    const auto playing =
+        OK(Parse({}, EndpointEnv{nullptr, nullptr, nullptr, "600", "perf.csv", "playing"}));
+    CHECK(playing.perf_trigger == PerfTrigger::kPlaying);
+    const auto immediate =
+        OK(Parse({}, EndpointEnv{nullptr, nullptr, nullptr, "600", nullptr, "immediate"}));
+    CHECK(immediate.perf_trigger == PerfTrigger::kImmediate);
+
+    // A misspelled trigger must not silently fall back to measuring the wrong phase.
+    for (const char* bad : {"Playing", "stage", "1", "playing "}) {
+        const auto result = Parse({}, EndpointEnv{nullptr, nullptr, nullptr, "600", nullptr, bad});
+        EXPECT_ERROR(result);
+        CHECK(result.error.find(kPerfTriggerEnvVar) != std::string::npos);
+    }
+
+    // A trigger without a frame count is half-configured too.
+    const auto trigger_only =
+        Parse({}, EndpointEnv{nullptr, nullptr, nullptr, nullptr, nullptr, "playing"});
+    EXPECT_ERROR(trigger_only);
+    CHECK(trigger_only.error.find(kPerfTriggerEnvVar) != std::string::npos);
+
+    // The measurement variables are documented in --help, so a run is reproducible
+    // without reading this source.
+    CHECK(std::string(ClientUsageText()).find("ODYSSEY_PERF_TRIGGER") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -312,6 +378,7 @@ int main() {
     TestInvalidEnvironmentIsRejected();
     TestHelp();
     TestUiSwitch();
+    TestPerfCaptureOptions();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

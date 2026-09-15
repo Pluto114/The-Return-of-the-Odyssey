@@ -72,6 +72,10 @@ public:
         return outbound_peak_.load(std::memory_order_relaxed);
     }
 
+    // Fixed bound of the write queue: the HUD prints depth/capacity pairs, and the
+    // capacity is the denominator that makes a depth number meaningful.
+    std::size_t OutboundCapacity() const { return outbound_capacity_; }
+
     void ResetOutboundPeak() {
         outbound_peak_.store(outbound_depth_.load(std::memory_order_relaxed),
                              std::memory_order_relaxed);
@@ -350,6 +354,10 @@ std::size_t NetClient::OutboundDepth() const {
 
 std::size_t NetClient::OutboundMaxDepth() const {
     return impl_->OutboundPeakPublished();
+}
+
+std::size_t NetClient::OutboundCapacity() const {
+    return impl_->OutboundCapacity();
 }
 
 void NetClient::ResetOutboundMaxDepth() {

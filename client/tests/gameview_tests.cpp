@@ -13,6 +13,7 @@
 #include "ui/HealthBar.h"
 #include "ui/HudMath.h"
 #include "ui/Metrics.h"
+#include "ui/PerfCapture.h"
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
 
@@ -98,6 +99,8 @@ using odyssey::client::ui::DamageGhost;
 using odyssey::client::ui::DamageShakeOffset;
 using odyssey::client::ui::Ema;
 using odyssey::client::ui::MetricSeries;
+using odyssey::client::ui::PerfCapture;
+using odyssey::client::ui::PerfSummary;
 using odyssey::client::ui::PredictionErrorEstimator;
 using odyssey::client::ui::RttEstimator;
 using odyssey::client::ui::ServerTickRateEstimator;
@@ -1682,6 +1685,86 @@ void TestMetricSeries() {
     CHECK(series.At(0) == 0.0f);
 }
 
+void TestPerfCapture() {
+    PerfCapture capture;
+    CHECK(!capture.Armed());
+    CHECK(!capture.Sampling());
+    CHECK(!capture.Complete());
+    capture.Add(99.0);  // ignored before the capture is even armed
+    CHECK(capture.Count() == 0);
+
+    capture.Arm(5);
+    CHECK(capture.Armed());
+    CHECK(!capture.Sampling());
+    CHECK(capture.Target() == 5);
+    // Armed but not started: frames before the battle begins must not be counted, or the
+    // budget would be spent on login/matchmaking instead of the scene under test.
+    capture.Add(99.0);
+    CHECK(capture.Count() == 0);
+    CHECK(!capture.Complete());
+
+    CHECK(capture.BeginSampling());
+    CHECK(capture.Sampling());
+    CHECK(!capture.BeginSampling());  // starting again is not a second start
+
+    // The first kWarmupFrames frames are dropped: frame 0 pays for the font atlas upload
+    // and the first draw setup, which the plan says must not be counted.
+    for (std::size_t i = 0; i < PerfCapture::kWarmupFrames; ++i) {
+        capture.Add(50.0);
+    }
+    CHECK(capture.Count() == 0);
+    for (const double ms : {10.0, 12.0, 11.0, 13.0, 14.0}) {
+        capture.Add(ms);
+    }
+    CHECK(capture.Count() == 5);
+    CHECK(capture.Complete());
+    const PerfSummary summary = capture.Summary();
+    CHECK(summary.sampled == 5);
+    CHECK(std::fabs(summary.mean_ms - 12.0) < 1e-6);
+    CHECK(std::fabs(summary.min_ms - 10.0) < 1e-6);
+    CHECK(std::fabs(summary.max_ms - 14.0) < 1e-6);
+    CHECK(std::fabs(summary.median_ms - 12.0) < 1e-6);
+    CHECK(summary.p95_ms >= summary.median_ms);
+    CHECK(summary.p95_ms <= summary.max_ms);
+
+    // The plan's floor for a valid measurement, and the capacity clamp: asking for more
+    // than the fixed buffer holds truncates instead of growing.
+    // Read through a mutable local: comparing two compile-time constants directly trips
+    // MSVC C4127 (constant conditional expression) inside the CHECK macro's `if`.
+    int plan_minimum_frames = PerfCapture::kMinimumFrames;
+    CHECK(plan_minimum_frames == 600);
+    PerfCapture clamped;
+    clamped.Arm(PerfCapture::kCapacity + 500);
+    CHECK(clamped.Target() == PerfCapture::kCapacity);
+    clamped.BeginSampling();
+    for (std::size_t i = 0; i < PerfCapture::kCapacity + 32; ++i) {
+        clamped.Add(1.0);
+    }
+    CHECK(clamped.Count() == PerfCapture::kCapacity);  // truncated, never overflowed
+
+    // An empty capture reports zeros rather than dividing by zero.
+    PerfCapture empty;
+    empty.Arm(3);
+    empty.BeginSampling();
+    const PerfSummary nothing = empty.Summary();
+    CHECK(nothing.sampled == 0);
+    CHECK(nothing.mean_ms == 0.0);
+    CHECK(nothing.max_ms == 0.0);
+
+    // Dumping to a path that cannot be opened fails instead of pretending to work.
+    PerfCapture written;
+    written.Arm(2);
+    written.BeginSampling();
+    for (std::size_t i = 0; i < PerfCapture::kWarmupFrames; ++i) {
+        written.Add(9.0);
+    }
+    written.Add(1.0);
+    written.Add(0.5);
+    written.Add(0.25);
+    CHECK(written.Count() == 3);
+    CHECK(!written.Dump("Z:/definitely/not/a/directory/perf.csv"));
+}
+
 }  // namespace
 
 int main() {
@@ -1740,6 +1823,7 @@ int main() {
     TestServerTickRateEstimator();
     TestPredictionErrorEstimator();
     TestMetricSeries();
+    TestPerfCapture();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

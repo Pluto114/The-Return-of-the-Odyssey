@@ -26,6 +26,7 @@
 #include "ui/HealthBar.h"
 #include "ui/HudMath.h"
 #include "ui/Metrics.h"
+#include "ui/PerfCapture.h"
 #include "ui/PixelFont.h"
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
@@ -81,6 +82,7 @@ using odyssey::client::core::ClientEndpoint;
 using odyssey::client::core::ClientUsageText;
 using odyssey::client::core::ConfigParseResult;
 using odyssey::client::core::ParseClientOptions;
+using odyssey::client::core::PerfTrigger;
 using odyssey::client::core::ToString;
 using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
@@ -152,6 +154,8 @@ using odyssey::client::ui::LoadAccessibility;
 using odyssey::client::ui::MeasureHudText;
 using odyssey::client::ui::MetricSeries;
 using odyssey::client::ui::OnHealthFraction;
+using odyssey::client::ui::PerfCapture;
+using odyssey::client::ui::PerfSummary;
 using odyssey::client::ui::PredictionErrorEstimator;
 using odyssey::client::ui::ReleaseHudFont;
 using odyssey::client::ui::RTToWorld;
@@ -508,6 +512,21 @@ int main(int argc, char** argv) {
     MetricSeries rtt_series;
     MetricSeries tick_series;
     std::uint64_t last_ping_client_time_ms = 0;
+    // Release UI acceptance run: when ODYSSEY_PERF_FRAMES is set the client records
+    // per-frame CPU time, writes it once and exits by itself, so the UI-on and UI-off
+    // runs are automated and comparable.
+    PerfCapture perf;
+    if (config.options.perf_frames > 0) {
+        perf.Arm(config.options.perf_frames);
+        std::printf("main: perf capture %zu frames trigger=%s -> %s\n",
+                    config.options.perf_frames, ToString(config.options.perf_trigger),
+                    config.options.perf_log.empty() ? "(no file; summary only)"
+                                                    : config.options.perf_log.c_str());
+        if (config.options.perf_trigger == PerfTrigger::kImmediate) {
+            perf.BeginSampling();
+        }
+        std::fflush(stdout);
+    }
     // P1b-2 combat feedback: white ghost of the health bar, the direction the last
     // hit came from, and the damage floater pool with its hit de-duplication table.
     DamageGhost damage_ghost;
@@ -643,6 +662,15 @@ int main(int argc, char** argv) {
         // and the HUD can never disagree, and a dropped link reports muted at once.
         input_gate = MakeInputGate(demo, recovery.Active());
         input_enabled = CanSendInput(input_gate);
+        // Perf capture trigger: with trigger=playing the measurement begins at the first
+        // frame of a live battle - the same predicate that opens input - so the UI-on and
+        // UI-off runs cover the same kind of scene instead of login/matchmaking. No-op for
+        // trigger=immediate (already sampling) and for runs without a capture.
+        if (input_enabled && perf.BeginSampling()) {
+            std::printf("main: perf capture started (stage=%s alive=%s)\n",
+                        StageStateName(demo.stage_state), demo.self_alive ? "yes" : "no");
+            std::fflush(stdout);
+        }
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
             if (now - last_input_time >= 1.0 / 30.0) {
@@ -1443,7 +1471,7 @@ int main(int argc, char** argv) {
             // Queue depths, instant and peak, for both directions (plan metric set).
             std::snprintf(line, sizeof(line), "queues in=%zu/%zu peak=%zu  out=%zu/%zu peak=%zu",
                           inbox.Depth(), inbox.Capacity(), inbox.MaxDepth(), client.OutboundDepth(),
-                          client.OutboundMaxDepth());
+                          client.OutboundCapacity(), client.OutboundMaxDepth());
             DrawHudText(line, 500, 166, 18, ToRayColor(theme.text_dim));
             if (rtt.HasValue()) {
                 std::snprintf(line, sizeof(line), "rtt %.1f ms (samples=%llu)", rtt.Milliseconds(),
@@ -2071,6 +2099,26 @@ int main(int argc, char** argv) {
         // Manual frame pacing fallback: hold each frame to ~1/60s even when
         // raylib's built-in timing is not applied by the linked build.
         const double frame_elapsed = GetTime() - frame_start;
+        // Perf capture measures the CPU time of the frame (everything above except the
+        // deliberate sleep), so UI-on and UI-off runs compare the same quantity.
+        if (perf.Sampling()) {
+            perf.Add(frame_elapsed * 1000.0);
+            if (perf.Complete()) {
+                const PerfSummary summary = perf.Summary();
+                if (!config.options.perf_log.empty()) {
+                    const bool wrote = perf.Dump(config.options.perf_log);
+                    std::printf("main: perf capture wrote %s (%s)\n",
+                                config.options.perf_log.c_str(), wrote ? "ok" : "FAILED");
+                }
+                std::printf("main: perf frames=%zu mean=%.3fms median=%.3fms p95=%.3fms "
+                            "max=%.3fms min=%.3fms ui=%s trigger=%s\n",
+                            summary.sampled, summary.mean_ms, summary.median_ms, summary.p95_ms,
+                            summary.max_ms, summary.min_ms, ui_enabled ? "on" : "off",
+                            ToString(config.options.perf_trigger));
+                std::fflush(stdout);
+                break;
+            }
+        }
         if (frame_elapsed < kFrameSeconds) {
             WaitTime(kFrameSeconds - frame_elapsed);
         }

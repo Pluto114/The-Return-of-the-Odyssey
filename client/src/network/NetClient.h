@@ -53,6 +53,8 @@ public:
     // (the debug overlay reads these).
     std::size_t OutboundDepth() const;
     std::size_t OutboundMaxDepth() const;
+    // Fixed bound of the outbound write queue (the denominator for the depth above).
+    std::size_t OutboundCapacity() const;
     void ResetOutboundMaxDepth();
 
     // Enqueues one outbound frame (header derived from message_type/sequence;

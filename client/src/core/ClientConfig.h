@@ -30,6 +30,18 @@ inline constexpr const char* kServerPortEnvVar = "ODYSSEY_SERVER_PORT";
 // Deterministic UI skip used by the performance acceptance run (plan P3): the world
 // and the whole network/game path keep running, only the UI layer is dropped.
 inline constexpr const char* kUiOffEnvVar = "ODYSSEY_UI_OFF";
+// Per-frame timing capture for the same acceptance run: how many frames to record and
+// where to write them. Unset means "do not measure", so a normal run never touches
+// the disk and the render loop stays untouched.
+inline constexpr const char* kPerfFramesEnvVar = "ODYSSEY_PERF_FRAMES";
+inline constexpr const char* kPerfLogEnvVar = "ODYSSEY_PERF_LOG";
+// When counting starts. The acceptance run needs `playing` so both runs measure the
+// same battle scene instead of the login/matchmaking frames; `immediate` counts from
+// process start and is only useful as a smoke test.
+inline constexpr const char* kPerfTriggerEnvVar = "ODYSSEY_PERF_TRIGGER";
+// Matches ui/PerfCapture.h's fixed capacity, so a silly value fails loudly here rather
+// than being silently truncated later.
+inline constexpr std::size_t kMaxPerfFrames = 4096;
 
 // The host name limit is the DNS maximum; hosts longer than this cannot
 // resolve, so they are rejected at parse time rather than at connect time.
@@ -57,11 +69,28 @@ inline const char* ToString(EndpointSource source) {
     return "?";
 }
 
+// When the perf capture starts counting.
+enum class PerfTrigger {
+    kImmediate,  // from the first frame after startup
+    kPlaying,    // from the first frame of a live stage (what the acceptance run uses)
+};
+
+inline const char* ToString(PerfTrigger trigger) {
+    switch (trigger) {
+        case PerfTrigger::kImmediate: return "immediate";
+        case PerfTrigger::kPlaying: return "playing";
+    }
+    return "?";
+}
+
 // Environment values, injected so tests do not depend on the real environment.
 struct EndpointEnv {
     const char* host = nullptr;
     const char* port = nullptr;
     const char* ui_off = nullptr;  // ODYSSEY_UI_OFF: 1/true/yes/on disables the UI
+    const char* perf_frames = nullptr;   // ODYSSEY_PERF_FRAMES: frames to record
+    const char* perf_log = nullptr;      // ODYSSEY_PERF_LOG: CSV destination
+    const char* perf_trigger = nullptr;  // ODYSSEY_PERF_TRIGGER: immediate|playing
 };
 
 struct ClientOptions {
@@ -72,6 +101,12 @@ struct ClientOptions {
     // world but skips the HUD, the panels and (once it exists) the ImGui layer, which
     // is what makes the UI-on/UI-off frame-time comparison reproducible.
     bool ui_enabled = true;
+    // 0 disables capture; otherwise the number of frames to record before the client
+    // dumps perf_log and exits (the Release UI acceptance run).
+    std::size_t perf_frames = 0;
+    std::string perf_log;
+    // Where those frames are counted from (see PerfTrigger).
+    PerfTrigger perf_trigger = PerfTrigger::kImmediate;
 };
 
 struct ConfigParseResult {
@@ -96,6 +131,11 @@ inline const char* ClientUsageText() {
         "\n"
         "Environment (overridden by the options above):\n"
         "  ODYSSEY_SERVER_HOST, ODYSSEY_SERVER_PORT, ODYSSEY_UI_OFF\n"
+        "  ODYSSEY_PERF_FRAMES  frames to time, 1..4096; enables the capture\n"
+        "  ODYSSEY_PERF_LOG     CSV destination (optional; summary on stdout anyway)\n"
+        "  ODYSSEY_PERF_TRIGGER immediate|playing (default immediate). Use `playing`\n"
+        "                       for the acceptance run: counting starts when the\n"
+        "                       battle does, not during login/matchmaking.\n"
         "\n"
         "Examples:\n"
         "  odyssey_client                             connect to 127.0.0.1:7777\n"
@@ -178,6 +218,42 @@ inline bool ParseSwitch(std::string_view text, bool& out) {
     }
     if (text == "0" || text == "false" || text == "no" || text == "off") {
         out = false;
+        return true;
+    }
+    return false;
+}
+
+// Strict positive decimal count in 1..max, used for the perf frame budget.
+inline bool ParseCount(std::string_view text, std::size_t max, std::size_t& out) {
+    if (text.empty() || text.size() > 10) {
+        return false;
+    }
+    std::size_t value = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        value = value * 10 + static_cast<std::size_t>(c - '0');
+        if (value > max) {
+            return false;
+        }
+    }
+    if (value == 0) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+// Trigger selector for the perf capture. Names rather than 0/1 because the two modes
+// measure genuinely different things and a typo would silently measure the wrong one.
+inline bool ParsePerfTrigger(std::string_view text, PerfTrigger& out) {
+    if (text == "immediate") {
+        out = PerfTrigger::kImmediate;
+        return true;
+    }
+    if (text == "playing") {
+        out = PerfTrigger::kPlaying;
         return true;
     }
     return false;
@@ -448,6 +524,46 @@ inline ConfigParseResult ParseClientOptions(int argc,
         }
     }
 
+    // Perf capture (Release UI acceptance run). Both values must be present and sane,
+    // otherwise a measurement could silently produce an empty file.
+    const bool perf_configured = env.perf_frames != nullptr && env.perf_frames[0] != '\0';
+    if (perf_configured) {
+        std::size_t frames = 0;
+        if (!detail::ParseCount(env.perf_frames, kMaxPerfFrames, frames)) {
+            result.ok = false;
+            result.error = std::string("invalid ") + kPerfFramesEnvVar + ": expected 1.." +
+                           std::to_string(kMaxPerfFrames) + ", got '" +
+                           std::string(env.perf_frames) + "'";
+            return result;
+        }
+        result.options.perf_frames = frames;
+        if (env.perf_log != nullptr && env.perf_log[0] != '\0') {
+            result.options.perf_log = env.perf_log;
+        }
+    } else if (env.perf_log != nullptr && env.perf_log[0] != '\0') {
+        // A destination without a frame count is a half-configured measurement.
+        result.ok = false;
+        result.error = std::string(kPerfLogEnvVar) + " requires " + kPerfFramesEnvVar;
+        return result;
+    }
+
+    if (env.perf_trigger != nullptr && env.perf_trigger[0] != '\0') {
+        if (!perf_configured) {
+            result.ok = false;
+            result.error = std::string(kPerfTriggerEnvVar) + " requires " + kPerfFramesEnvVar;
+            return result;
+        }
+        PerfTrigger trigger = PerfTrigger::kImmediate;
+        if (!detail::ParsePerfTrigger(env.perf_trigger, trigger)) {
+            result.ok = false;
+            result.error = std::string("invalid ") + kPerfTriggerEnvVar +
+                           ": expected immediate/playing, got '" + std::string(env.perf_trigger) +
+                           "'";
+            return result;
+        }
+        result.options.perf_trigger = trigger;
+    }
+
     return result;
 }
 
@@ -468,7 +584,8 @@ inline const char* ReadEnv(const char* name) {
 // Command line plus the process environment.
 inline ConfigParseResult ParseClientOptions(int argc, const char* const* argv) {
     const EndpointEnv env{ReadEnv(kServerHostEnvVar), ReadEnv(kServerPortEnvVar),
-                          ReadEnv(kUiOffEnvVar)};
+                          ReadEnv(kUiOffEnvVar), ReadEnv(kPerfFramesEnvVar),
+                          ReadEnv(kPerfLogEnvVar), ReadEnv(kPerfTriggerEnvVar)};
     return ParseClientOptions(argc, argv, env);
 }
 
