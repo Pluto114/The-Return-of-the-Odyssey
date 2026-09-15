@@ -22,6 +22,7 @@
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
 #include "ui/AssetPath.h"
+#include "ui/FloaterPool.h"
 #include "ui/HealthBar.h"
 #include "ui/HudMath.h"
 #include "ui/PixelFont.h"
@@ -309,7 +310,8 @@ bool FindEntityWorld(const GameView& players, const CombatView& monsters, std::u
     return false;
 }
 
-// Short, player-facing label for the transition card (design section 4).const char* TransitionLabel(std::uint32_t wire_stage_state) {
+// Short, player-facing label for the transition card (design section 4).
+const char* TransitionLabel(std::uint32_t wire_stage_state) {
     using odyssey::client::sync::StageState;
     switch (static_cast<StageState>(wire_stage_state)) {
         case StageState::kStageClear: return "STAGE CLEAR";
