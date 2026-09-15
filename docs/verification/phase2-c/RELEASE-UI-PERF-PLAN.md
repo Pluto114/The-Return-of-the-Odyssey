@@ -74,7 +74,7 @@ pwsh -File scripts/build/build.ps1 -Target client-release
 在**独立目录**里配置一份 Release 树，不碰 `build/client-windows`（避免把 Debug 树翻成 Release）：
 
 ```powershell
-cd C:\Users\xunxue\Desktop\The-Return-of-the-Odyssey-main
+cd <repo-root>          # 你本地的仓库根目录
 . .\scripts\env.ps1 -Client
 cmake -S . -B build/client-windows-release -G Ninja `
   -DCMAKE_BUILD_TYPE=Release `

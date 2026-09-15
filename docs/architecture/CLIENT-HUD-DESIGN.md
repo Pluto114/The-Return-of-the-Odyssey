@@ -1,6 +1,6 @@
 # 客户端 HUD / 界面设计（Katana Zero 霓虹风）
 
-状态：**待审设计稿**（成员 C 提交，Reviewer：A）。落地分期见 [CLIENT-PHASE1.md](CLIENT-PHASE1.md) §10 与定稿提示词 `UIprompt/UIprompt.md`。
+状态：**待审设计稿**（成员 C 提交，Reviewer：A）。落地分期见 [CLIENT-PHASE1.md](CLIENT-PHASE1.md) §10 与团队定稿的 UI 分期要求（P0–P3）。
 范围：只描述**画面上的信息架构与视觉规范**；不改协议、不改 stdout 证据链日志、不改游戏逻辑。
 
 ---

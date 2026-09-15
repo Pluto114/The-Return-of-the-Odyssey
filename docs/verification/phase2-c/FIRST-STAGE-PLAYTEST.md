@@ -34,7 +34,7 @@
 ### A. 启动服务器（终端 1）
 
 ```powershell
-cd C:\Users\xunxue\Desktop\The-Return-of-the-Odyssey-main
+cd <repo-root>          # 你本地的仓库根目录
 . .\scripts\env.ps1
 go run ./server/cmd/gameserver
 ```
