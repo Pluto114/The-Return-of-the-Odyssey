@@ -1,12 +1,13 @@
 # The Return of the Odyssey
 
 基于 Go 服务端权威架构的多人 Roguelike 实训项目。
-当前阶段：**第二周统一联调基线（2026-09-14）**。已整合 B 的战斗/奖励/Director/恢复结果核心、C 的客户端增量、A 的可靠队列修复和 D 的战斗 Bot。正式入口仍待接通首关启动、奖励、下一关和恢复；当前不是最终完整玩法版本。
+当前阶段：**D 单关平台集成基线（2026-09-15）**。正式入口已启动首关战斗；D 已接入装备同源配置、战斗 Bot、真实指标与管理看板、Redis 恢复存储和 MySQL 异步结算模块。完整奖励、三关、恢复和终局写入仍需整合 A 的新入口与 C 的兼容修复，当前不是最终完整玩法版本。
 
 远程仓库：[Pluto114/The-Return-of-the-Odyssey](https://github.com/Pluto114/The-Return-of-the-Odyssey)。团队日常开发从 develop 创建功能分支。
 
 团队开工请先阅读 **[环境配置清单与安装步骤](docs/SETUP.md)**，并遵守 [协作约定](CONTRIBUTING.md)。
 **本轮必读：[A / D 收尾需求与最终合并验收](docs/plans/WEEK2-AD-FINALIZATION.md)**。从本次 `main` 同步后继续各自功能分支，A/D 完成接线与共同验收后再合并最终版本；当前检查见 [整合验证记录](docs/verification/week2-main-integration/README.md)。历史与职责入口见 [当前协作说明](docs/plans/CURRENT-COLLABORATION.md)。
+最新检查：[9 月 15 日 D 交付复查与剩余项](docs/verification/phase2-final/D-SYNC-REVIEW-2026-09-15.md)，包含结算关闭修复及真实 Bot 单关结果。
 前三天的角色目标、完成标准和联调测试见 [第一阶段计划](docs/plans/PHASE1-DAYS1-3.md)。角色 B 接入接口及默认参数见 [房间与游戏核心交接文档](docs/architecture/GAME-CORE-PHASE1.md)。
 完整设计保留在 [ARCHITECTURE.md](ARCHITECTURE.md)，本次初始化的具体选择记录在 [环境决策](docs/architecture/ENVIRONMENT.md)。
 
@@ -42,7 +43,7 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 ```
 
 客户端依赖验证与基础设施启动见 [SETUP.md](docs/SETUP.md)。
-当前 gameserver 可运行 Login → Match → Join → 移动快照。客户端与 Bot 已有可执行入口；客户端构建和操作见 [client/README.md](client/README.md)，Bot 见 [bot/README.md](bot/README.md)。正式入口尚未启动首关，因此当前战斗 Bot 的清场成功门槛不会自动满足；奖励、三关、恢复与持久化仍按收尾清单接入。
+当前 gameserver 可运行 Login → Match → Join → 首关战斗 → 清场。客户端构建和操作见 [client/README.md](client/README.md)，Bot 见 [bot/README.md](bot/README.md)。Bot 单关已有真实 TCP 验证；奖励、三关、恢复与终局落库仍按收尾清单整合，不能将已装配的存储模块等同于全流程已完成。
 客户端当前硬编码连接 `10.22.31.251:7777`；本机运行须按客户端说明调整并重建，可配置端点已列入 A/C 收口任务。不要直接运行单个 `main.cpp`，应生成协议后构建整个 CMake 客户端目标。
 角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；战斗、装备奖励、连续关卡和恢复结果接口分别见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)、[装备与奖励领域接口](docs/architecture/EQUIPMENT-REWARD.md)、[Director 接口](docs/architecture/DIRECTOR.md) 和 [恢复与结果接口](docs/architecture/RESUME-GAME-RESULT.md)。
 

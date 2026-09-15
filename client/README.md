@@ -41,7 +41,7 @@ build\client-windows\client\odyssey_client.exe
 
 当前客户端在 `client/src/main.cpp` 顶部将 `kServerHost` 写为 `10.22.31.251`、`kServerPort` 写为 `7777`。本机体验先将 Host 改为 `127.0.0.1` 并重新构建；跨主机体验填写服务端局域网地址，同时配置服务端监听和端口放行。可配置端点属于本轮待收口项，不能假设当前已有命令行参数。
 
-当前主分支正式入口支持匹配和移动，但尚未启动首关；下列战斗/奖励/恢复操作需 A/D 接通入口后联调。完整剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
+当前主分支正式入口已支持匹配、移动和首关战斗，Bot 单关已验证；奖励/下一关/恢复仍待 A/D 入口整合与客户端兼容修复。两个真实客户端的完整流程仍需联调，剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
 
 ## 操作
 

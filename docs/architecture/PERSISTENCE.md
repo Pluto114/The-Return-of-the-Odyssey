@@ -45,6 +45,8 @@ pwsh -File scripts/test/integration.ps1 -Target persistence
 
 `ODYSSEY_RESULTS_ENABLED=false` 时开发入口不连接 MySQL；`production` 强制启用。启动会执行有界 `PING` 和内嵌迁移，失败则在监听端口前停止。退出时先停止接收并在 `ODYSSEY_RESULT_SHUTDOWN_TIMEOUT_SEC` 内排空，再关闭 MySQL 和死信文件。Prometheus 提供 `odyssey_result_queue_depth`、`odyssey_result_writes_in_flight` 以及带固定 `result` 标签的 `odyssey_result_writes_total`。
 
+排空超时会取消数据库尝试和重试等待；正在处理及队列内的已接收结果改用独立 Context 尝试死信存储，共享一个 `AttemptTimeout` 清理预算。Shutdown 等 worker 处理结束再返回，服务随后关闭依赖；未能写入死信的结果计入 `DeadLetterFailures`，并返回可用 `errors.Is` 识别的 `ErrResultDeadLetter`。失败介质不可用时不能报告全部已保存。Context 不能强制中断本地文件 write/Sync，清理预算不是磁盘卡死时的硬墙钟保证。
+
 真实 Redis 与 MySQL 验证统一执行：
 
 ```powershell
