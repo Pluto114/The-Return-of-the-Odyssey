@@ -58,7 +58,7 @@ ctest --test-dir build\client-windows -C Debug -R odyssey_config_tests --output-
 | **Ready 屏障的端到端验收**：`MSG_NEXT_STAGE_REQUEST` 全仓只在 `server/internal/session/session.go` 的合法性表中出现，**没有 handler 消费**；`PreparingNextStage` 由服务器在奖励轮次 `Complete()` 后自行推进 | 需 A 接线；C 侧发送时机（C-a）已按 A5 收敛 |
 | 双客户端同房战斗、清场/团灭、奖励与三关循环的**真实端到端**验收（W01/W03/W05–W09） | 需服务器 D4–D9 路由（A）与平台（D）；C 配合联调 |
 | 难度/全局 Modifier/Director 决策摘要显示 | 需协议先补字段（A/B） |
-| 装备显示表同源（D1/D7） | ✅ 已完成：`scripts/generate-equipment/generate.ps1` 从 `data/equipment/catalog.json` 生成 `client/assets/data/equipment.csv`（6 项，catalog version 1）。实测：`-Check` 一致时退出 0、被改动的副本退出 1 并打印行级差异；占位 ID/重复 ID/缺字段/缺目录分别退出 2；真实表用客户端解析器读出 6 条（1001/1002/2001/2002/3001/3002，名称/槽位/描述无 CSV 引号残留、无 <1000 的占位 ID） |
+| 装备显示表同源（D1/D7） | ✅ 已合并到 D 的方案：`data/equipment/catalog.json` 为唯一手写源，**CMake 配置期**校验 `version == 1` 并生成 `equipment.tsv`，post-build 复制到 `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv`；客户端经资源根解析加载（exe 目录回退）。本次已删除 C 先前的 CSV 生成脚本与 `client/assets/data/equipment.csv`（避免两套并行方案），并把 `EquipmentDisplay::stats` 统一为 `description`、解析器改为 TSV（字段数必须为 4，否则跳过）。logic 套件实测 **589 checks / 0 failures** |
 | 100 Bot / Grafana / MySQL 等 | D |
 | 干净 clone 发布演练（W15）中客户端部分的记录归档 | C（D10 执行时补） |
 

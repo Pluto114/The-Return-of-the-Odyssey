@@ -19,6 +19,12 @@ switch ($Target) {
         $env:ODYSSEY_REDIS_ADDR = "127.0.0.1:$(Get-DotEnvValue 'REDIS_PORT')"
         $env:ODYSSEY_REDIS_PASSWORD = Get-DotEnvValue 'REDIS_PASSWORD'
         $env:ODYSSEY_REDIS_INTEGRATION = '1'
+		$mysqlPort = Get-DotEnvValue 'MYSQL_PORT'
+		$mysqlDatabase = Get-DotEnvValue 'MYSQL_DATABASE'
+		$mysqlUser = Get-DotEnvValue 'MYSQL_USER'
+		$mysqlPassword = Get-DotEnvValue 'MYSQL_PASSWORD'
+		$env:ODYSSEY_MYSQL_DSN = "${mysqlUser}:${mysqlPassword}@tcp(127.0.0.1:${mysqlPort})/${mysqlDatabase}?parseTime=true&charset=utf8mb4&loc=UTC"
+		$env:ODYSSEY_MYSQL_INTEGRATION = '1'
         $env:GOWORK = 'off'
         Push-Location (Join-Path $root 'server')
         try {
@@ -28,6 +34,8 @@ switch ($Target) {
             Pop-Location
             Remove-Item Env:ODYSSEY_REDIS_PASSWORD -ErrorAction SilentlyContinue
             Remove-Item Env:ODYSSEY_REDIS_INTEGRATION -ErrorAction SilentlyContinue
+			Remove-Item Env:ODYSSEY_MYSQL_DSN -ErrorAction SilentlyContinue
+			Remove-Item Env:ODYSSEY_MYSQL_INTEGRATION -ErrorAction SilentlyContinue
         }
     }
 }

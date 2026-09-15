@@ -307,6 +307,217 @@
       ],
       "title": "Room Tick Work Duration",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "odyssey-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 21
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "odyssey_active_monsters",
+          "legendFormat": "monsters",
+          "refId": "A"
+        },
+        {
+          "expr": "odyssey_active_projectiles",
+          "legendFormat": "projectiles",
+          "refId": "B"
+        }
+      ],
+      "title": "Combat Entities",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "odyssey-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 21
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(odyssey_damage_dealt_total[1m])",
+          "legendFormat": "damage / second",
+          "refId": "A"
+        }
+      ],
+      "title": "Damage Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "odyssey-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 21
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (result) (increase(odyssey_stage_results_total[5m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Stage Results",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "odyssey-prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
+      "id": 11,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "sum by (result) (increase(odyssey_rewards_total[5m]))", "legendFormat": "{{result}}", "refId": "A" }
+      ],
+      "title": "Reward Outcomes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "odyssey-prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 29 },
+      "id": 12,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "odyssey_room_control_queue_depth", "legendFormat": "room control", "refId": "A" },
+        { "expr": "odyssey_room_input_queue_depth", "legendFormat": "room input", "refId": "B" },
+        { "expr": "odyssey_network_reliable_queue_depth", "legendFormat": "network reliable", "refId": "C" }
+      ],
+      "title": "Live Queue Depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "odyssey-prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 29 },
+      "id": 13,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "rate(odyssey_room_queue_rejections_total[1m])", "legendFormat": "room admission", "refId": "A" },
+        { "expr": "rate(odyssey_room_rejected_inputs_total[1m])", "legendFormat": "invalid input", "refId": "B" },
+        { "expr": "rate(odyssey_network_reliable_queue_rejections_total[1m])", "legendFormat": "network reliable", "refId": "C" },
+        { "expr": "rate(odyssey_network_snapshot_replacements_total[1m])", "legendFormat": "snapshot replaced", "refId": "D" }
+      ],
+      "title": "Backpressure Signals",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "odyssey-prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 37 },
+      "id": 14,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "odyssey_director_output_difficulty", "legendFormat": "difficulty", "refId": "A" },
+        { "expr": "odyssey_director_output_monster_count", "legendFormat": "monsters", "refId": "B" },
+        { "expr": "odyssey_director_input_average_dps", "legendFormat": "input DPS", "refId": "C" }
+      ],
+      "title": "Latest Director Input / Output",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "odyssey-prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 37 },
+      "id": 15,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(odyssey_director_decision_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(odyssey_director_decision_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "B" }
+      ],
+      "title": "Director Decision Duration",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
@@ -323,6 +534,6 @@
   "timezone": "browser",
   "title": "Odyssey Overview",
   "uid": "odyssey-overview",
-  "version": 1,
+  "version": 3,
   "weekStart": ""
 }

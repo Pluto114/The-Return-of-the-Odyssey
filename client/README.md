@@ -20,12 +20,7 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 产物：`build/client-windows/client/odyssey_client.exe`（另有 `odyssey_window_probe.exe` 纯窗口诊断程序）。
 
-装备显示表由 B 的目录**生成**（客户端不解析 JSON）：
-
-```powershell
-pwsh -File scripts/generate-equipment/generate.ps1          # 目录变更后重新生成
-pwsh -File scripts/generate-equipment/generate.ps1 -Check   # 判表是否过期（不一致退出码 1）；当前未挂进共享 check 脚本，由调用方执行
-```
+装备显示表由 `data/equipment/catalog.json`（唯一手写源）在 **CMake 配置期**生成，客户端不解析 JSON、也没有第二张手维护表：配置阶段校验 `version == 1` 并写出 TSV，post-build 复制到 `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv`。改了目录后重新配置即自动重生成（`CMAKE_CONFIGURE_DEPENDS` 已指向该文件）；字段含制表符/换行会直接报错停止。
 
 ## 资源与设置（UI 重构 P0b）
 
@@ -91,7 +86,7 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 
 跨机还需要服务端监听 `0.0.0.0` 并放行该 TCP 端口（属 A/D 侧）。解析与校验实现见 `client/src/core/ClientConfig.h`，单测 `odyssey_config_tests`。
 
-当前主分支正式入口支持匹配和移动，但尚未启动首关；下列战斗/奖励/恢复操作需 A/D 接通入口后联调。完整剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
+当前主分支正式入口已支持匹配、移动和首关战斗，Bot 单关已验证；奖励/下一关/恢复仍待 A/D 入口整合与客户端兼容修复。两个真实客户端的完整流程仍需联调，剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
 
 ## 操作
 
@@ -132,13 +127,10 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 
 ## 已知限制 / 依赖
 
-- 装备显示表 `client/assets/data/equipment.csv` **由 `data/equipment/catalog.json` 生成**（`scripts/generate-equipment/generate.ps1`），运行期不解析 JSON、也不手改 CSV：
-  - 行格式 `id,"name","slot","stats"`，`stats` 直接取目录里的 `description` 原文（客户端**不**从 `modifiers` 反推数值），解析器会剥掉 CSV 引号
-  - ID 为 B 的版本化编号（当前 1001/1002 武器、2001/2002 遗物、3001/3002 药水）；脚本拒绝 <1000 的旧占位 ID、重复 ID 与缺字段
-  - `-Check` 模式供 CI 判"表是否与目录脱节"；目录改了就重新生成，否则奖励面板会退化成 `equipment#<id> (config pending)`
-- **`NextStageRequest` 服务器侧尚无处理逻辑**：全仓只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**。
-- 药水（C-c）尚未收口。**Token 轮换待 A4**：`LoginResponse` 只发一次 `resume_token`，`ResumeResponse` 没有新 token 字段，所以客户端在二次闪断时仍会用旧 token 尝试 resume，被拒后回落全新登录（不会重放旧输入）；若 A 决定 resume 后令牌单次消费并轮换，请给出新 token 的下发字段。
-- **输入只在权威 `stage.state == playing` 时发送**（C-b）：如果服务器尚未启动首关（状态停在 `waiting`），客户端会如实保持静默并在 HUD 显示 `input=muted:stage is not being played` —— 这是 A1（Match 后提交 `StartStage`）未接线的可见表现，而不是客户端卡死。
+- 装备显示以 `data/equipment/catalog.json` 为**唯一手写数据源**（D 的方案，已并入 main）：CMake 配置阶段校验版本 1 并生成 `equipment.tsv`（制表符分隔 `id/name/slot/description`），再由 post-build 复制到 **`<exe 目录>/assets/equipment.tsv`**；客户端经资源根解析加载，运行期不解析 JSON、也没有第二张手维护的表。字段含制表符/换行时 CMake 直接报错停止
+- **`NextStageRequest` 服务器侧尚无处理逻辑**：main 上它只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**（A 的 `1bfd796` 有 Ready 实现，尚未与 D 的入口整合）。
+- 药水（C-c）客户端侧尚未收口。A 的 `feature/network` 新提交 `4462d21` 已把 `use_potion` 映射到权威 World（解除此前的占位拒绝），合入 main 后即可做真实药水联调。**Token 轮换待 A4**：`LoginResponse` 只发一次 `resume_token`，`ResumeResponse` 没有新 token 字段，所以客户端在二次闪断时仍会用旧 token 尝试 resume，被拒后回落全新登录（不会重放旧输入）；若 A 决定 resume 后令牌单次消费并轮换，请给出新 token 的下发字段。
+- **输入只在权威 `stage.state == playing` 时发送**（C-b）：main 的 `1bcec34` 已让正式入口在匹配完成后启动首关，因此正常流程下进入 playing 即开始发输入。
 - 在途旧输入的**丢弃策略仍需 A 确认**：客户端当前采取保守做法（门控翻转即丢弃意图、不重放、序号继续单调），若服务器在切关时对在途输入另有处理（丢弃窗口/复位期望序号），请同步给 C。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：

@@ -6,20 +6,79 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
 type appPeer struct {
 	conn   net.Conn
 	reader *bufio.Reader
 	id     uint64
+}
+
+func TestApplicationRecordsAuthoritativeCombatMetrics(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metricSet := metrics.New()
+	app, err := newGameApplication(context.Background(), logger, metricSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.mu.Lock()
+	app.rooms[1] = &activeRoom{projectiles: make(map[entity.ID]struct{})}
+	app.mu.Unlock()
+
+	app.recordSnapshotMetrics(1, room.Snapshot{RoomID: 1, Snapshot: game.Snapshot{
+		Monsters: []game.MonsterView{{ID: 7}, {ID: 8}},
+	}})
+	app.recordEventMetrics(1, game.EventBatch{Events: []game.Event{
+		{Kind: game.ProjectileSpawned, EntityID: 9},
+		{Kind: game.ProjectileSpawned, EntityID: 9}, // duplicate must not inflate the Gauge
+		{Kind: game.DamageDealt, Amount: 12.5},
+		{Kind: game.StageCleared, StageIndex: 1},
+	}})
+
+	body := scrapeApplicationMetrics(t, metricSet)
+	for _, sample := range []string{
+		"odyssey_active_monsters 2",
+		"odyssey_active_projectiles 1",
+		"odyssey_damage_dealt_total 12.5",
+		`odyssey_stage_results_total{result="cleared"} 1`,
+	} {
+		if !strings.Contains(body, sample) {
+			t.Errorf("metrics do not contain %q", sample)
+		}
+	}
+
+	app.recordEventMetrics(1, game.EventBatch{Events: []game.Event{
+		{Kind: game.ProjectileDestroyed, EntityID: 9},
+		{Kind: game.TeamDefeated, StageIndex: 2},
+	}})
+	app.mu.Lock()
+	delete(app.rooms, 1)
+	app.publishMetricsLocked()
+	app.mu.Unlock()
+
+	body = scrapeApplicationMetrics(t, metricSet)
+	for _, sample := range []string{
+		"odyssey_active_monsters 0",
+		"odyssey_active_projectiles 0",
+		`odyssey_stage_results_total{result="defeated"} 1`,
+	} {
+		if !strings.Contains(body, sample) {
+			t.Errorf("metrics after cleanup do not contain %q", sample)
+		}
+	}
 }
 
 func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
@@ -161,7 +220,8 @@ func appRead(t *testing.T, peer appPeer, want pb.MessageType, message proto.Mess
 			t.Fatalf("read %s: %v", want, err)
 		}
 		if pb.MessageType(header.MessageType) != want {
-			if pb.MessageType(header.MessageType) == pb.MessageType_MSG_WORLD_SNAPSHOT {
+			if pb.MessageType(header.MessageType) == pb.MessageType_MSG_WORLD_SNAPSHOT ||
+				(header.MessageType >= 320 && header.MessageType <= 327) {
 				continue
 			}
 			t.Fatalf("message type = %d, want %s", header.MessageType, want)
@@ -171,4 +231,15 @@ func appRead(t *testing.T, peer appPeer, want pb.MessageType, message proto.Mess
 		}
 		return
 	}
+}
+
+func scrapeApplicationMetrics(t *testing.T, metricSet *metrics.Metrics) string {
+	t.Helper()
+	request := httptest.NewRequest("GET", "http://metrics.local/metrics", nil)
+	response := httptest.NewRecorder()
+	metricSet.Handler().ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatalf("metrics status = %d, want 200", response.Code)
+	}
+	return response.Body.String()
 }

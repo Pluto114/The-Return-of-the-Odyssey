@@ -23,9 +23,13 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/admin"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/bootstrap"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/config"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/persistence"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
 
@@ -59,29 +63,94 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
-	logger.Info("gameserver starting", "env", cfg.Env, "tcp", cfg.TCPAddr, "tick_hz", cfg.TickHz)
+	gameplay, err := bootstrap.LoadGameplay(cfg, game.DefaultConfig())
+	if err != nil {
+		logger.Error("failed to load gameplay configuration", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("gameserver starting", "env", cfg.Env, "tcp", cfg.TCPAddr, "tick_hz", cfg.TickHz,
+		"equipment_version", gameplay.Catalog().Version(), "reward_ticks", gameplay.RewardDurationTicks(), "stage_limit", gameplay.StageLimit())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	metricSet := metrics.New()
-	app, err := newGameApplication(ctx, logger, metricSet)
+	app, err := newConfiguredGameApplication(ctx, logger, metricSet, gameplay)
 	if err != nil {
 		logger.Error("failed to initialize application", "err", err)
 		os.Exit(1)
+	}
+	app.setEnvironment(cfg.Env)
+	var resumeService *persistence.ResumeService
+	if cfg.ResumeEnabled {
+		resumeTTL := time.Duration(cfg.ResumeTTLSeconds) * time.Second
+		resumeService, err = persistence.OpenResumeService(ctx, persistence.ResumeServiceOptions{
+			Addr: cfg.RedisAddr, Password: cfg.RedisPass, DB: cfg.RedisDB,
+			TokenTTL:         resumeTTL,
+			OperationTimeout: time.Duration(cfg.RedisOperationMS) * time.Millisecond,
+		})
+		if err != nil {
+			logger.Error("failed to initialize Resume storage", "err", err)
+			os.Exit(1)
+		}
+		app.setResumeTokenStore(resumeService.Store(), resumeTTL)
+		logger.Info("Resume storage ready", "ttl_seconds", cfg.ResumeTTLSeconds)
+	}
+	var resultService *persistence.ResultService
+	if cfg.ResultsEnabled {
+		resultService, err = persistence.OpenResultService(ctx, persistence.ResultServiceOptions{
+			Store: persistence.ResultStoreOptions{DSN: cfg.MySQLDSN, OperationTimeout: time.Duration(cfg.ResultAttemptTimeoutMS) * time.Millisecond, ApplyMigrations: true},
+			Writer: persistence.ResultWriterOptions{QueueCapacity: cfg.ResultQueueCapacity, MaxAttempts: cfg.ResultMaxAttempts,
+				AttemptTimeout: time.Duration(cfg.ResultAttemptTimeoutMS) * time.Millisecond, RetryBackoff: time.Duration(cfg.ResultRetryBackoffMS) * time.Millisecond},
+			DeadLetterPath: cfg.ResultDeadLetterPath,
+		})
+		if err != nil {
+			_ = resumeService.Close()
+			logger.Error("failed to initialize result persistence", "err", err)
+			os.Exit(1)
+		}
+		app.setResultWriter(resultService.Writer())
+		logger.Info("result persistence ready", "queue_capacity", cfg.ResultQueueCapacity)
+		go observeResultMetrics(ctx, resultService.Writer(), metricSet)
 	}
 	srv := network.NewServer(app.handle, logger)
 	srv.OnDisconnect(app.disconnected)
 	ln, err := net.Listen("tcp", cfg.TCPAddr)
 	if err != nil {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ResultShutdownTimeoutSec)*time.Second)
+		_ = resultService.Shutdown(shutdownContext)
+		cancel()
+		_ = resumeService.Close()
 		logger.Error("failed to listen", "addr", cfg.TCPAddr, "err", err)
 		os.Exit(1)
 	}
 	logger.Info("listening", "addr", cfg.TCPAddr)
 
 	metricsServer := &http.Server{Addr: cfg.MetricsAddr, Handler: metricSet.Handler(), ReadHeaderTimeout: 2 * time.Second}
+	adminAPI, err := admin.New(admin.ProviderFunc(func() admin.Snapshot {
+		snapshot := app.adminSnapshot()
+		networkStats := srv.Stats()
+		snapshot.Network = admin.NetworkStatus{
+			ActiveConnections: networkStats.ActiveConnections, ReliableQueueDepth: networkStats.ReliableQueueDepth,
+			ReliableQueueCapacity: networkStats.ReliableQueueCapacity, SnapshotsPending: networkStats.SnapshotsPending,
+			ReliableSendRejections: networkStats.ReliableSendRejections, SnapshotReplacements: networkStats.SnapshotReplacements,
+		}
+		return snapshot
+	}), time.Second)
+	if err != nil {
+		_ = ln.Close()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ResultShutdownTimeoutSec)*time.Second)
+		_ = resultService.Shutdown(shutdownContext)
+		cancel()
+		_ = resumeService.Close()
+		logger.Error("failed to initialize Admin API", "err", err)
+		os.Exit(1)
+	}
+	adminHTTPServer := &http.Server{Addr: cfg.AdminAddr, Handler: adminAPI.Handler(), ReadHeaderTimeout: 2 * time.Second}
 	pprofServer := &http.Server{Addr: cfg.PprofAddr, Handler: http.DefaultServeMux, ReadHeaderTimeout: 2 * time.Second}
 	go serveHTTP(metricsServer, "metrics", logger, stop)
+	go serveHTTP(adminHTTPServer, "admin", logger, stop)
 	go serveHTTP(pprofServer, "pprof", logger, stop)
+	go observeNetworkMetrics(ctx, srv, metricSet)
 
 	go func() {
 		if err := srv.Serve(ctx, ln); err != nil {
@@ -93,10 +162,69 @@ func main() {
 	<-ctx.Done()
 	logger.Info("shutting down", "active_conns", srv.ActiveConns())
 	srv.CloseConnections()
+	_ = adminAPI.Close()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = metricsServer.Shutdown(shutdownCtx)
+	_ = adminHTTPServer.Shutdown(shutdownCtx)
 	_ = pprofServer.Shutdown(shutdownCtx)
+	resultShutdownCtx, resultCancel := context.WithTimeout(context.Background(), time.Duration(cfg.ResultShutdownTimeoutSec)*time.Second)
+	if err := resultService.Shutdown(resultShutdownCtx); err != nil {
+		logger.Error("result persistence shutdown incomplete", "err", err, "stats", resultService.Writer().Stats())
+	} else if resultService != nil {
+		logger.Info("result persistence drained", "stats", resultService.Writer().Stats())
+	}
+	resultCancel()
+	_ = resumeService.Close()
+}
+
+func observeResultMetrics(ctx context.Context, writer *persistence.ResultWriter, metricSet *metrics.Metrics) {
+	var previous metrics.ResultWriterSnapshot
+	publish := func() {
+		stats := writer.Stats()
+		current := metrics.ResultWriterSnapshot{QueueDepth: stats.QueueDepth, InFlight: stats.InFlight, Persisted: stats.Persisted,
+			Idempotent: stats.Idempotent, Retries: stats.Retries, Failed: stats.Failed, Rejected: stats.Rejected,
+			DeadLetterFailures: stats.DeadLetterFailures}
+		_ = metricSet.SetResultWriterSnapshot(current, previous)
+		previous = current
+	}
+	publish()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			publish()
+			return
+		case <-ticker.C:
+			publish()
+		}
+	}
+}
+
+func observeNetworkMetrics(ctx context.Context, server *network.Server, metricSet *metrics.Metrics) {
+	var previous network.Stats
+	publish := func() {
+		current := server.Stats()
+		_ = metricSet.SetNetworkQueueDepth(current.ReliableQueueDepth)
+		metricSet.ObserveQueueDelta(metrics.QueueDelta{
+			NetworkReliableRejected: counterDelta(current.ReliableSendRejections, previous.ReliableSendRejections),
+			NetworkSnapshotReplaced: counterDelta(current.SnapshotReplacements, previous.SnapshotReplacements),
+		})
+		previous = current
+	}
+	publish()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			publish()
+			return
+		case <-ticker.C:
+			publish()
+		}
+	}
 }
 
 func serveHTTP(server *http.Server, name string, logger *slog.Logger, stop context.CancelFunc) {

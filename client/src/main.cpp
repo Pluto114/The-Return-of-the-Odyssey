@@ -234,7 +234,7 @@ InputGate MakeInputGate(const DemoState& demo, bool recovery_active) {
     return gate;
 }
 
-// What the screen shows, per docs/architecture/CLIENT-HUD-DESIGN.md 搂4. A lost or
+// What the screen shows, per docs/architecture/CLIENT-HUD-DESIGN.md section 4. A lost or
 // recovering link outranks everything else, then the lobby, then the stage states.
 enum class HudPhase {
     kOffline,     // disconnected / connecting / recovering
@@ -273,7 +273,7 @@ float CenteredTextX(const char* text, float size) {
     return (kScreenWidth - MeasureHudText(text, size).x) * 0.5f;
 }
 
-// Short, player-facing label for the transition card (design 搂4).
+// Short, player-facing label for the transition card (design section 4).
 const char* TransitionLabel(std::uint32_t wire_stage_state) {
     using odyssey::client::sync::StageState;
     switch (static_cast<StageState>(wire_stage_state)) {
@@ -394,25 +394,34 @@ int main(int argc, char** argv) {
     SnapshotInterpolator monster_interp;  // monsters (10Hz -> smooth)
     EquipmentTable equipment_table;
 
-    // Optional local display table (static equipment data is never sent on the
-    // wire). Missing file simply means "equipment#<id>" placeholders. The path is
-    // resolved through the asset root, so the client no longer depends on the
-    // working directory.
+    // Equipment display table: generated from data/equipment/catalog.json by CMake
+    // (the single hand-maintained source) and copied next to the executable. The
+    // asset root is tried first, then the executable directory, so the client works
+    // both from a build tree and from a shipped folder. Missing data degrades to
+    // "equipment#<id>" placeholders instead of failing.
     {
-        const std::string equipment_path = GetAssetPath("data/equipment.csv");
-        std::ifstream file(equipment_path);
-        if (file) {
+        const std::string candidates[] = {GetAssetPath("equipment.tsv"),
+                                          std::string(GetApplicationDirectory()) + "equipment.tsv"};
+        for (const std::string& equipment_path : candidates) {
+            std::ifstream file(equipment_path);
+            if (!file) {
+                continue;
+            }
             std::stringstream buffer;
             buffer << file.rdbuf();
-            const std::size_t loaded = odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
+            const std::size_t loaded =
+                odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
             std::printf("main: loaded %zu equipment entries from %s\n", loaded,
                         equipment_path.c_str());
-        } else {
-            std::printf("main: WARN equipment display table missing at %s "
-                        "(rewards will show raw ids)\n",
-                        equipment_path.c_str());
+            std::fflush(stdout);
+            break;
         }
-        std::fflush(stdout);
+        if (equipment_table.empty()) {
+            std::printf("main: WARN equipment display table missing (%s or %s); "
+                        "rewards will show raw ids\n",
+                        candidates[0].c_str(), candidates[1].c_str());
+            std::fflush(stdout);
+        }
     }
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
@@ -432,7 +441,7 @@ int main(int argc, char** argv) {
     InputGate input_gate;
     bool input_enabled = false;
     bool input_enabled_prev = false;
-    // F1 development overlay (design 搂7): every diagnostic line that used to be
+    // F1 development overlay (design section 7): every diagnostic line that used to be
     // always on screen. stdout evidence logging is unaffected.
     bool debug_overlay = false;
 
@@ -1132,7 +1141,7 @@ int main(int argc, char** argv) {
         const HudPhase hud_phase = CurrentHudPhase(demo, recovery);
         const bool in_stage = hud_phase == HudPhase::kPlaying || hud_phase == HudPhase::kReward ||
                               hud_phase == HudPhase::kTransition;
-        // F1 swaps the whole screen for the diagnostics view (搂7): a long column of
+        // F1 swaps the whole screen for the diagnostics view (section 7): a long column of
         // numbers is easier to read without the world painted over it, and the F2
         // entity view (P3) will be the one that keeps the world visible. stdout
         // evidence logging is unaffected either way.
@@ -1412,7 +1421,7 @@ int main(int argc, char** argv) {
                 DrawHudText(label, px + 12, pz - 8, 16, ToRayColor(theme.text_dim));
             }
 
-            // ---- Game HUD (design 搂3/搂4) ------------------------------------------
+            // ---- Game HUD (design sections 3-4) ------------------------------------------
             if (hud_phase == HudPhase::kOffline) {
                 // Dim the world so the banner reads as an interruption. Kept light:
                 // the ground is already near-black, and a heavy dim measured out to a
@@ -1508,7 +1517,7 @@ int main(int argc, char** argv) {
                         row + used, sizeof(row) - used, "[%zu] %s (%s) %s   ", i + 1,
                         SanitizeAscii(options[i].display.name.c_str(), ascii_b, sizeof(ascii_b)),
                         SanitizeAscii(options[i].display.slot.c_str(), ascii_c, sizeof(ascii_c)),
-                        SanitizeAscii(options[i].display.stats.c_str(), ascii_a, sizeof(ascii_a)));
+                        SanitizeAscii(options[i].display.description.c_str(), ascii_a, sizeof(ascii_a)));
                     if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(row) - used) {
                         break;  // truncated: keep what fits rather than overflowing
                     }

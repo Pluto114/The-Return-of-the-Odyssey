@@ -71,7 +71,7 @@ env.ps1 同时将 npm 缓存指向 .tools/npm-cache，避免继承其他安装�
 开发脚本会自动加载项目工具路径。VS Code/CLion 自己启动的终端或构建工具不一定继承此 PATH，按下一节设置。
 
 bootstrap 自动创建根目录及 server/configs、bot/configs、client、dashboard 下缺失的 .env。
-根目录 .env 被 Compose 读取，dashboard/.env 被 Vite 读取；**server/client/bot 的环境文件目前仅是配置契约，还没有应用加载逻辑**。
+根目录 .env 被 Compose 读取，dashboard/.env 被 Vite 读取；gameserver 使用 `-env server/configs/.env` 加载服务配置，未传 `-env` 时使用内置默认值。client/bot 的环境文件仍是配置契约。
 修改根目录数据库账号、端口或密码时，也同步 server/configs/.env 的连接配置。
 
 ```powershell
@@ -79,6 +79,18 @@ pwsh -File scripts/generate-proto/generate.ps1
 pwsh -File scripts/test/check.ps1
 pwsh -File scripts/doctor.ps1 -Role server
 ```
+
+从仓库根目录启动服务端，确保默认装备目录的相对路径可解析：
+
+```powershell
+go run ./server/cmd/gameserver -env server/configs/.env
+```
+
+`server/configs/.env.example` 提供版本化装备目录、奖励时长、至少三关的终局上限、首关 Seed 基值、Director 参数及 Resume Redis 参数。启动时服务端只读取一次 `data/equipment/catalog.json`，要求版本为 1；路径缺失、JSON 损坏、版本不符或参数非法都会明确报错并在监听端口前退出。C++ 构建从同一 JSON 生成 `equipment.tsv` 并复制到可执行文件旁，不要另建手写装备表。
+
+开发阶段 A4 尚未接线时可保持 `ODYSSEY_RESUME_ENABLED=false`。需要验证 Redis 装配时，先启动 Compose，再设为 `true`；服务端会在监听 TCP 前执行有界 Redis `PING`，失败即停止启动。`production` 环境禁止关闭 Resume 存储。Token TTL 与未来 A4 的断线宽限期共用 `ODYSSEY_RESUME_TTL_SEC`。
+
+终局路由尚未接线时，开发环境可保持 `ODYSSEY_RESULTS_ENABLED=false`。验证 MySQL 结算时设为 `true`；服务端会在监听前连接 MySQL、应用内嵌迁移并启动有界异步队列。`production` 禁止关闭结果持久化。队列、重试、单次写入超时、退出排空时限和 JSONL 死信路径均在 `server/configs/.env.example` 中配置，死信目录默认位于被 Git 忽略的 `var/`。
 
 Go Modules 会下载并验证依赖。首次初始化后生成的 go.sum、npm 锁文件要提交。
 Go 官方代理连通性不足时，可以在自己的终端配置可信 GOPROXY；不要在项目中关闭 GOSUMDB 或硬编码个人代理。
@@ -118,9 +130,9 @@ npm --prefix dashboard run dev
 pwsh -File scripts/build/build.ps1 -Target dashboard
 ```
 
-打开 http://127.0.0.1:5173，当前显示静态环境占位页。src/ 预留 Vue 页面。
-Vite 已预留 /api 与 /ws 到 http://127.0.0.1:8080 的代理，服务端接口尚未实现。
-可在 dashboard/.env 设置 ODYSSEY_ADMIN_PROXY_TARGET。页面打包不代表 Vue/ECharts 业务已经完成。
+先启动 gameserver，再打开 http://127.0.0.1:5173。页面通过 `/api/status` 取得首份真实状态，并通过 `/ws` 每秒更新；WebSocket 断开时自动退回 HTTP 轮询。可查看在线/房间、实体、Tick 预算、Room/网络队列、背压计数与最近 Director 决策。
+
+Vite 将 `/api` 与 `/ws` 代理到 http://127.0.0.1:8080，可在 `dashboard/.env` 设置 `ODYSSEY_ADMIN_PROXY_TARGET`。Admin 当前没有认证，配置只允许回环监听，不要暴露到局域网或公网。接口明细和数据边界见 [ADMIN-OBSERVABILITY.md](architecture/ADMIN-OBSERVABILITY.md)。奖励、Director 与恢复面板要等 A2/A3/A4 正式路由接入后才会出现非零真实数据。
 
 ## 6. Docker 基础设施
 

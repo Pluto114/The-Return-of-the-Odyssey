@@ -1,15 +1,20 @@
 # 恢复令牌持久化约定
 
-状态：Redis 实现已完成，等待成员 A 接入 Session 生命周期。
+状态：Redis Token/路由存储与可选生产装配已完成，等待成员 A 将 A4 Session 生命周期接入该边界。
 
-`server/internal/persistence.ResumeTokenStore` 把 Redis 的命令、键前缀、TTL 和错误语义隐藏在两个操作后面：
+`server/internal/persistence.ResumeTokenStore` 把 Redis 的命令、键前缀、TTL 和错误语义隐藏在一组操作后面：
 
 - `Issue(ctx, token, sessionKey)` 原子写入新令牌，已有令牌不会被覆盖。
 - `Consume(ctx, token)` 原子读取并删除令牌，保证一个令牌最多成功恢复一次。
+- `IssueRoute(ctx, token, route)` 保存版本化的 `session_id/player_id/room_id/generation` 绑定，不保存 World。
+- `ConsumeRoute(ctx, token)` 原子消费后解析并校验绑定；损坏值不能再次使用。
+- `Revoke(ctx, token)` 在永久离开或退出时幂等撤销令牌。
 
-令牌和会话键都是不透明字符串，长度限制为 1–256 字节。持久化模块不定义 Session、Player 或 Room 数据结构，也不生成令牌；令牌必须由成员 A 使用密码学安全随机源生成。Redis 键使用版本化前缀 `odyssey:resume:v1:`，过期清理由 Redis TTL 完成。
+令牌和兼容接口的会话键都是不透明字符串，长度限制为 1–256 字节。持久化模块不生成令牌；令牌必须由成员 A 使用密码学安全随机源生成。Redis 键使用版本化前缀 `odyssey:resume:v1:` 加 Token 的 SHA-256 摘要，避免在 keyspace 中暴露可重放令牌；过期清理由 Redis TTL 完成。
 
-Redis 连接或命令失败会作为包装错误返回；不存在、已消费和已过期统一返回 `ErrResumeTokenNotFound`。调用方不得在日志、指标标签或客户端错误消息中输出原始令牌。
+Redis 连接或命令失败统一包含 `ErrResumeBackend`；不存在、已消费和已过期统一返回 `ErrResumeTokenNotFound`，路由损坏返回 `ErrCorruptResumeRoute`。调用方据此映射固定恢复结果，禁止在日志、指标标签或客户端错误消息中输出原始令牌和密码。
+
+`OpenResumeService` 使用配置的操作超时建立 Redis 客户端并执行有界 `PING`。`ODYSSEY_RESUME_ENABLED=false` 时开发入口不连接 Redis；`production` 配置强制启用。`ODYSSEY_RESUME_TTL_SEC` 同时注入 Token TTL 与 A4 的断线宽限期，避免存储过期和 Room Leave 使用两套时钟。
 
 ## 验证
 
@@ -25,8 +30,29 @@ pwsh -File scripts/test/check.ps1
 pwsh -File scripts/test/integration.ps1 -Target persistence
 ```
 
-## 待成员 A 确认
+## 待成员 A 接线
 
-- `sessionKey` 是进程内 Session ID、跨服路由键，还是版本化序列化记录。
-- 新连接完成绑定与 Full Snapshot 发送失败时，是否允许重新签发令牌。
-- 重连窗口长度和主动退出时的令牌撤销策略。
+- 登录后签发版本化 `ResumeRoute`，恢复成功后轮换新 Token，并在永久 Leave/退出时 `Revoke`。
+- 消费后校验 Session/Player/Room/连接代次，旧 Connection 不得继续提交输入、Ready 或奖励。
+- 绑定新连接后查询 `Room.ResumeState` 并先发完整快照；若绑定或发送失败，由 A 定义是否签发替代 Token。
+- 调用 `ObserveReconnect` 映射 success/invalid_token/expired/backend_error，日志只记录固定原因与 Session/Room ID。
+
+## MySQL 对局结果
+
+`ResultEnvelope` 在 Room 销毁前绑定稳定的 `match_id`、`room_id` 与 B 的 `GameResult`。`ResultWriter.Submit` 只做校验、深拷贝和非阻塞入队，队列有界；Room Tick 不连接 MySQL，也不会等待数据库。队列满会明确返回 `ErrResultQueueFull`，由 A 的终局编排决定暂停销毁或记录处置，不能静默丢弃。
+
+后台单 Worker 使用有界超时和重试写入 `match_results` 与 `match_players`。`match_id` 是主键，版本化结果内容的 SHA-256 用于区分安全重放与同 ID 异内容冲突：相同内容返回 `PersistIdempotent`，不同内容返回 `ErrResultConflict`。耗尽重试和永久冲突写入权限为 `0600` 的 JSONL 死信文件，便于人工核对和补偿。
+
+`ODYSSEY_RESULTS_ENABLED=false` 时开发入口不连接 MySQL；`production` 强制启用。启动会执行有界 `PING` 和内嵌迁移，失败则在监听端口前停止。退出时先停止接收并在 `ODYSSEY_RESULT_SHUTDOWN_TIMEOUT_SEC` 内排空，再关闭 MySQL 和死信文件。Prometheus 提供 `odyssey_result_queue_depth`、`odyssey_result_writes_in_flight` 以及带固定 `result` 标签的 `odyssey_result_writes_total`。
+
+排空超时会取消数据库尝试和重试等待；正在处理及队列内的已接收结果改用独立 Context 尝试死信存储，共享一个 `AttemptTimeout` 清理预算。Shutdown 等 worker 处理结束再返回，服务随后关闭依赖；未能写入死信的结果计入 `DeadLetterFailures`，并返回可用 `errors.Is` 识别的 `ErrResultDeadLetter`。失败介质不可用时不能报告全部已保存。Context 不能强制中断本地文件 write/Sync，清理预算不是磁盘卡死时的硬墙钟保证。
+
+真实 Redis 与 MySQL 验证统一执行：
+
+```powershell
+pwsh -File scripts/test/integration.ps1 -Target persistence
+```
+
+待 A 在唯一终局路由中调用 `Submit`；必须复用同一个 `match_id` 重试，并在确认入队前保留结果信封。当前 D 侧存储完成不代表正式三关流程已经产生结算。
+
+本周最小表保存对局、结算 JSON 与每名玩家的终局属性/装备快照。跨局 `PlayerProgress` 和 `EquipmentOwnership` 暂缓到账号身份与成长规则冻结后实现，避免用临时 Player ID 建立不可迁移的长期数据；这不影响本周 MatchHistory/GameResult 的恰好一次验收。

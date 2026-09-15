@@ -111,7 +111,7 @@ inline std::string SettingsFilePathIn(const std::string& directory) {
 // case GetAssetPath() returns the relative path unchanged.
 const std::string& AssetRoot();
 
-// Absolute path for an asset, e.g. GetAssetPath("data/equipment.csv"). Call it at
+// Absolute path for an asset, e.g. GetAssetPath("equipment.tsv"). Call it at
 // startup only: the render loop must not resolve paths per frame.
 std::string GetAssetPath(const std::string& relative_path);
 

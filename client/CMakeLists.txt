@@ -12,6 +12,41 @@ find_package(Threads REQUIRED)
 # explicitly (harmless for the dynamic case where raylib.dll loads glfw3.dll).
 find_package(glfw3 CONFIG REQUIRED)
 
+# data/equipment/catalog.json is the only hand-maintained equipment display
+# source. Generate a small runtime TSV directly from its version/id/slot/name/
+# description fields so the C++ client cannot drift to a second manual table.
+set(_equipment_catalog "${PROJECT_SOURCE_DIR}/data/equipment/catalog.json")
+if(NOT EXISTS "${_equipment_catalog}")
+    message(FATAL_ERROR "Missing equipment catalog: ${_equipment_catalog}")
+endif()
+# Regenerate when the catalog changes: file(READ) alone does not make CMake
+# re-run, so without this the TSV would silently go stale after a catalog edit.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_equipment_catalog}")
+file(READ "${_equipment_catalog}" _equipment_json)
+string(JSON _equipment_version GET "${_equipment_json}" version)
+if(NOT _equipment_version EQUAL 1)
+    message(FATAL_ERROR "Equipment catalog version ${_equipment_version}; client expects version 1")
+endif()
+string(JSON _equipment_count LENGTH "${_equipment_json}" items)
+if(_equipment_count LESS 1)
+    message(FATAL_ERROR "Equipment catalog contains no display entries")
+endif()
+set(_equipment_display "${CMAKE_CURRENT_BINARY_DIR}/equipment.tsv")
+file(WRITE "${_equipment_display}" "# Generated from data/equipment/catalog.json; do not edit.\n# catalog-version=${_equipment_version}\n")
+math(EXPR _equipment_last "${_equipment_count} - 1")
+foreach(_equipment_index RANGE 0 ${_equipment_last})
+    string(JSON _equipment_id GET "${_equipment_json}" items ${_equipment_index} id)
+    string(JSON _equipment_name GET "${_equipment_json}" items ${_equipment_index} name)
+    string(JSON _equipment_slot GET "${_equipment_json}" items ${_equipment_index} slot)
+    string(JSON _equipment_description GET "${_equipment_json}" items ${_equipment_index} description)
+    foreach(_equipment_value _equipment_name _equipment_slot _equipment_description)
+        if("${${_equipment_value}}" MATCHES "[\t\r\n]")
+            message(FATAL_ERROR "Equipment display fields cannot contain tabs or newlines")
+        endif()
+    endforeach()
+    file(APPEND "${_equipment_display}" "${_equipment_id}\t${_equipment_name}\t${_equipment_slot}\t${_equipment_description}\n")
+endforeach()
+
 add_library(odyssey_client_dependencies INTERFACE)
 target_compile_features(odyssey_client_dependencies INTERFACE cxx_std_20)
 target_compile_definitions(odyssey_client_dependencies INTERFACE ASIO_STANDALONE)
@@ -105,6 +140,15 @@ target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+# The generated table is copied beside the executable, and again into its assets/
+# directory after the assets copy: the client tries the asset root first (its normal
+# resolution path) and keeps the executable directory as a fallback, so a shipped
+# folder and a bare exe both work.
+add_custom_command(TARGET odyssey_client POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${_equipment_display}" "$<TARGET_FILE_DIR:odyssey_client>/equipment.tsv"
+    COMMENT "Copying generated equipment display table"
+    VERBATIM)
 
 # Ship the assets beside the executable: the client resolves its asset root as
 # <exe>/assets first, so it never depends on the working directory.
@@ -112,7 +156,11 @@ add_custom_command(TARGET odyssey_client POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/assets"
             "$<TARGET_FILE_DIR:odyssey_client>/assets"
-    COMMENT "Copying client assets next to odyssey_client")
+    # After the assets copy, so the generated table is not merged over: the client
+    # resolves it through the asset root first.
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${_equipment_display}" "$<TARGET_FILE_DIR:odyssey_client>/assets/equipment.tsv"
+    COMMENT "Copying client assets and the generated equipment table next to odyssey_client")
 
 # Diagnostic: raylib window with no network/protocol (isolates environment
 # issues from client-logic hangs). Prints markers to stdout.

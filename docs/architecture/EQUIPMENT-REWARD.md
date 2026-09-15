@@ -13,7 +13,7 @@ catalog, err := equipment.Parse(file)
 
 `Parse` 拒绝未知 JSON 字段、多个根值、空版本、重复 ID/Key、未知槽位/属性/操作、非有限数值、非正 MULTIPLY，以及同时携带持续修改器和治疗量的 Potion。`Catalog` 保存和返回的切片均已分离，Room Tick 不读取文件。
 
-C 使用同一文件中的 ID、名称和描述构建显示表；线上消息只发送 `equipment_id`，不重复发送完整定义。ID 0 保留为“空槽位”，已发布 ID 不复用。
+CMake 配置阶段直接读取同一 JSON 的版本、ID、名称、槽位和描述，生成 `equipment.tsv` 并复制到 C++ 客户端可执行文件旁；仓库不再维护第二份手写表。线上消息只发送 `equipment_id`，不重复发送完整定义。ID 0 保留为“空槽位”，已发布 ID 不复用。
 
 ## 2. 属性和槽位规则
 
@@ -67,6 +67,6 @@ Player 快照已增加 EquipmentState，包含 WeaponID、RelicID 和 PotionID�
 - B：PerformanceMetrics、Rule-Based Director 和连续关卡核心已完成，见 [Director 接口](DIRECTOR.md)。
 - A：将 RewardOptions/RewardChoice/RewardApplied 路由到上述 Room 命令；为 `RewardUpdates()` 建单播 dispatcher，并将装备 ID 加入协议快照；移除 UsePotion 的占位拒绝。
 - C：从同版本目录显示名称、描述和属性变化；仅在 RewardApplied 成功后更新 UI，最终仍以快照为准。
-- D：在进程启动阶段加载并校验目录，暴露目录版本和 offered/chosen/defaulted/invalid 指标；配置失败时禁止启动正式玩法。
+- D：进程启动阶段已通过 `internal/bootstrap.LoadGameplay` 加载并校验版本 1 目录，同时装配奖励时长、关卡上限、首关 Seed 基值和 Director 参数；缺失、损坏或非法配置会阻止启动。offered/chosen/defaulted/invalid 指标仍在 D3 接入。
 
 当前增量已完成 B 的 World/Room 规则，不宣称 Reward 已进入 gameserver TCP 正式流程。A 仍需调用入口、路由协议和转换快照。

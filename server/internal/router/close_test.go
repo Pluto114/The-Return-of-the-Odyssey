@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -141,6 +143,37 @@ func TestCloseWatcherNoSinkStillFiresCallback(t *testing.T) {
 
 		if !fired {
 			t.Error("onClose callback not fired with zero sinks")
+		}
+	})
+}
+
+// TestCloseWatcherSaturationLogsCorrelation verifies D5 observability: when a
+// player's reliable queue rejects the terminal Disconnect frame, the watcher
+// logs the owning room and the affected player instead of silently dropping it.
+func TestCloseWatcherSaturationLogsCorrelation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r, err := room.Start(context.Background(), 9, room.DefaultConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+
+		var buf bytes.Buffer
+		w := NewCloseWatcher()
+		w.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+		w.Subscribe(101, &eventRecordingSink{}) // healthy
+		w.Subscribe(102, &rejectingSink{})      // saturated -> Send=false
+
+		done := make(chan struct{})
+		go func() { w.Run(r); close(done) }()
+		r.Close()
+		<-done
+
+		out := buf.String()
+		for _, want := range []string{"reliable queue saturated", "room_id=9", "player_id=102"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("log output missing %q; got:\n%s", want, out)
+			}
 		}
 	})
 }

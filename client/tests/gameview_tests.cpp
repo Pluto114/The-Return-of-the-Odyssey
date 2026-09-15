@@ -70,7 +70,6 @@ using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StageState;
 using odyssey::client::sync::StageStateName;
 using odyssey::client::sync::StepMovement;
-using odyssey::client::sync::UnquoteField;
 using odyssey::client::ui::AccessibilityConfig;
 using odyssey::client::ui::AssetRootCandidates;
 using odyssey::client::ui::ChooseAssetRoot;
@@ -335,70 +334,57 @@ void TestCombatViewFeedback() {
 
 void TestParseEquipmentTable() {
     EquipmentTable table;
-    // Generated-table shape: quoted fields, comment header, blank lines.
+    // Shape of the CMake-generated table: tab-separated, comment header, blanks.
     const std::string text =
-        "# Client-side DISPLAY table for equipment\n"
-        "# Generated from data/equipment/catalog.json (version 1)\n"
-        "1001,\"Iron Sidearm\",\"weapon\",\"Attack +5\"\n"
+        "# Generated from data/equipment/catalog.json; do not edit.\n"
+        "# catalog-version=1\n"
+        "1001\tIron Sidearm\tweapon\tAttack +5\n"
         "\n"
-        "2002,\"Wind Relic\",\"relic\",\"Move speed x1.1, stacks with relics\"\n"
-        "3001,\"Healing \"\"Potion\"\"\",\"potion\",\"Restore 30 health\"\n"
-        "bogus line without id,name\n"
-        // Legacy unquoted rows must keep working (hand-written tables, B exports).
-        "4001,Plain Blade,weapon,+7 Attack\n";
+        "2002\tWind Relic\trelic\tMove speed x1.1, stacks with relics\n"
+        "3001\tHealing Potion\tpotion\tRestore 30 health\n"
+        // Malformed rows are skipped rather than guessed at: too few fields, too
+        // many, a non-numeric id, and a line with no tabs at all.
+        "4001\tPlain Blade\tweapon\n"
+        "5001\tToo Many\tweapon\tdescription\textra\n"
+        "not-a-number\tBroken\tweapon\tnothing\n"
+        "no tabs here\n";
     const std::size_t loaded = ParseEquipmentTable(text, table);
-    CHECK(loaded == 4);
-    CHECK(table.size() == 4);
+    CHECK(loaded == 3);
+    CHECK(table.size() == 3);
 
     const auto first = table.find(1001);
     CHECK(first != table.end());
     if (first != table.end()) {
-        // Quoting is CSV syntax, not display text: the panel must not show it.
         CHECK(first->second.name == "Iron Sidearm");
         CHECK(first->second.slot == "weapon");
-        CHECK(first->second.stats == "Attack +5");
+        CHECK(first->second.description == "Attack +5");
     }
 
     const auto with_comma = table.find(2002);
     CHECK(with_comma != table.end());
     if (with_comma != table.end()) {
-        // The stats column is the rest of the line, so commas inside it survive.
-        CHECK(with_comma->second.stats == "Move speed x1.1, stacks with relics");
+        // Tabs are the separator, so commas inside the description are literal.
+        CHECK(with_comma->second.description == "Move speed x1.1, stacks with relics");
     }
 
-    const auto escaped = table.find(3001);
-    CHECK(escaped != table.end());
-    if (escaped != table.end()) {
-        CHECK(escaped->second.name == "Healing \"Potion\"");
+    const auto potion = table.find(3001);
+    CHECK(potion != table.end());
+    if (potion != table.end()) {
+        CHECK(potion->second.name == "Healing Potion");
+        CHECK(potion->second.description == "Restore 30 health");
     }
 
-    const auto legacy = table.find(4001);
-    CHECK(legacy != table.end());
-    if (legacy != table.end()) {
-        CHECK(legacy->second.name == "Plain Blade");
-        CHECK(legacy->second.slot == "weapon");
-        CHECK(legacy->second.stats == "+7 Attack");
-    }
-}
-
-void TestUnquoteField() {
-    CHECK(UnquoteField("\"Attack +5\"") == "Attack +5");
-    CHECK(UnquoteField("plain") == "plain");
-    CHECK(UnquoteField("") == "");
-    CHECK(UnquoteField("\"") == "\"");
-    CHECK(UnquoteField("\"\"") == "");
-    CHECK(UnquoteField("\"a\"\"b\"") == "a\"b");
-    // Only one layer is removed, and only when both ends are quoted.
-    CHECK(UnquoteField("\"\"\"x\"\"\"") == "\"x\"");
-    CHECK(UnquoteField("\"unbalanced") == "\"unbalanced");
+    // The malformed rows contributed nothing.
+    CHECK(table.find(4001) == table.end());
+    CHECK(table.find(5001) == table.end());
 }
 
 void TestRewardViewFlow() {
     EquipmentTable table;
-    ParseEquipmentTable("5,Vitality Relic,Relic,\"+25 Max HP\"\n", table);
+    ParseEquipmentTable("2001\tVitality Relic\trelic\tMax health +25\n", table);
 
     RewardView view;
-    view.SetOptions({5, 99}, 4000, table);
+    view.SetOptions({2001, 99}, 4000, table);
     CHECK(view.State() == RewardState::kOffered);
     CHECK(view.Active());
     CHECK(view.Options().size() == 2);
@@ -412,7 +398,7 @@ void TestRewardViewFlow() {
     CHECK(!view.ChooseByIndex(2, chosen));  // out of range: still offered
     CHECK(view.State() == RewardState::kOffered);
     CHECK(view.ChooseByIndex(0, chosen));
-    CHECK(chosen == 5);
+    CHECK(chosen == 2001u);
     CHECK(view.State() == RewardState::kChosen);
     // A second choice is refused locally (single-shot).
     CHECK(!view.ChooseByIndex(1, chosen));
@@ -1610,7 +1596,6 @@ int main() {
     TestGameViewCombatFields();
     TestCombatViewFeedback();
     TestParseEquipmentTable();
-    TestUnquoteField();
     TestRewardViewFlow();
     TestRecoveryStateFlow();
     TestRecoveryHandshakeTimeout();

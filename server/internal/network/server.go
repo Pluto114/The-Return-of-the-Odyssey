@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +34,24 @@ type Server struct {
 	mu           sync.Mutex
 	conns        map[*Connection]struct{}
 	onDisconnect DisconnectHandler
+	counters     serverCounters
+}
+
+type serverCounters struct {
+	reliableRejected atomic.Uint64
+	snapshotReplaced atomic.Uint64
+}
+
+// Stats is a point-in-time, process-wide network queue sample. Queue depths
+// include live connections only; counters remain monotonic after connections
+// close so a metrics sampler cannot lose their final values.
+type Stats struct {
+	ActiveConnections      int
+	ReliableQueueDepth     int
+	ReliableQueueCapacity  int
+	SnapshotsPending       int
+	ReliableSendRejections uint64
+	SnapshotReplacements   uint64
 }
 
 // OnDisconnect installs the application lifecycle callback. Configure it
@@ -91,6 +110,7 @@ func (s *Server) newConnection(conn net.Conn) *Connection {
 		out:      make(chan []byte, 256),
 		snapshot: make(chan []byte, 1),
 		closed:   make(chan struct{}),
+		counters: &s.counters,
 	}
 	c.onClose = func() {
 		s.untrack(c)
@@ -102,6 +122,23 @@ func (s *Server) newConnection(conn net.Conn) *Connection {
 		}
 	}
 	return c
+}
+
+// Stats returns queue depths and monotonic rejection/replacement counters.
+func (s *Server) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stats := Stats{
+		ActiveConnections:      len(s.conns),
+		ReliableSendRejections: s.counters.reliableRejected.Load(),
+		SnapshotReplacements:   s.counters.snapshotReplaced.Load(),
+	}
+	for connection := range s.conns {
+		stats.ReliableQueueDepth += len(connection.out)
+		stats.ReliableQueueCapacity += cap(connection.out)
+		stats.SnapshotsPending += len(connection.snapshot)
+	}
+	return stats
 }
 
 func (s *Server) track(c *Connection) {
@@ -167,6 +204,7 @@ type Connection struct {
 	deadOnce  sync.Once // protects close(c.closed)
 	closed    chan struct{}
 	onClose   func()
+	counters  *serverCounters
 
 	// ctx is opaque per-connection context owned by the caller (the session
 	// router). The network layer stores it without interpreting it, keeping
@@ -212,6 +250,7 @@ func (c *Connection) Send(frame []byte) bool {
 	defer c.sendMu.Unlock()
 	select {
 	case <-c.closed:
+		c.recordReliableRejection()
 		return false
 	default:
 	}
@@ -219,6 +258,7 @@ func (c *Connection) Send(frame []byte) bool {
 	case c.out <- frame:
 		return true
 	default:
+		c.recordReliableRejection()
 		return false
 	}
 }
@@ -245,9 +285,18 @@ func (c *Connection) SendSnapshot(frame []byte) bool {
 			// eviction loop is bounded by capacity 1, so this never spins.
 			select {
 			case <-c.snapshot:
+				if c.counters != nil {
+					c.counters.snapshotReplaced.Add(1)
+				}
 			default:
 			}
 		}
+	}
+}
+
+func (c *Connection) recordReliableRejection() {
+	if c.counters != nil {
+		c.counters.reliableRejected.Add(1)
 	}
 }
 

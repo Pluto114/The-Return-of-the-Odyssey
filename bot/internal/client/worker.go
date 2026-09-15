@@ -38,6 +38,7 @@ type combatProgress struct {
 	lastAcknowledged    uint32
 	firstCombatInputSeq uint32
 	stageIndex          uint32
+	lastServerTick      uint64
 	stageCleared        bool
 	aimX                float32
 	aimY                float32
@@ -50,109 +51,10 @@ type combatProgress struct {
 	stageStarts        uint64
 }
 
-// Run connects one bot, logs in, matches, sends 30Hz movement/combat intent,
-// and succeeds only after an acknowledged snapshot and StageCleared event.
+// Run executes the default three-stage functional lifecycle.
 func Run(ctx context.Context, address string, clientID int) error {
-	dialer := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	var frameSequence uint32
-	send := func(messageType pb.MessageType, message proto.Message) error {
-		frameSequence++
-		return sendMessage(conn, messageType, frameSequence, message)
-	}
-
-	if err := send(pb.MessageType_MSG_LOGIN_REQUEST, &pb.LoginRequest{
-		ProtocolVersion: 1,
-		Token:           "dev",
-		DisplayName:     fmt.Sprintf("bot-%d", clientID),
-	}); err != nil {
-		return err
-	}
-	var login pb.LoginResponse
-	if err := readUntil(ctx, conn, reader, pb.MessageType_MSG_LOGIN_RESPONSE, &login); err != nil {
-		return err
-	}
-	if login.Reason != pb.ReasonCode_REASON_OK {
-		return fmt.Errorf("login rejected: %s", login.Reason)
-	}
-	if err := send(pb.MessageType_MSG_MATCH_REQUEST, &pb.MatchRequest{}); err != nil {
-		return err
-	}
-	var found pb.MatchFound
-	if err := readUntil(ctx, conn, reader, pb.MessageType_MSG_MATCH_FOUND, &found); err != nil {
-		return err
-	}
-	if found.RoomId == 0 {
-		return errors.New("match returned zero room id")
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-
-	inputTicker := time.NewTicker(time.Second / 30)
-	defer inputTicker.Stop()
-	readErrors := make(chan error, 1)
-	stateChanges := make(chan struct{}, 1)
-	progress := &combatProgress{aimX: 1}
-	go func() {
-		for {
-			messageType, body, err := readFrame(reader)
-			if err != nil {
-				readErrors <- err
-				return
-			}
-			if err := progress.observe(messageType, body); err != nil {
-				readErrors <- err
-				return
-			}
-			select {
-			case stateChanges <- struct{}{}:
-			default:
-			}
-		}
-	}()
-	var inputSequence uint32
-	for {
-		select {
-		case <-ctx.Done():
-			if progress.complete() {
-				return nil
-			}
-			if !progress.hasAcknowledgedCombat() {
-				return fmt.Errorf("%w before shutdown: %v", ErrCombatNotAcknowledged, ctx.Err())
-			}
-			return fmt.Errorf("%w before shutdown: %v", ErrStageNotCleared, ctx.Err())
-		case err := <-readErrors:
-			return err
-		case <-stateChanges:
-			if progress.complete() {
-				return nil
-			}
-		case now := <-inputTicker.C:
-			inputSequence++
-			direction := float32(1)
-			if clientID%2 != 0 {
-				direction = -1
-			}
-			aim, shoot := progress.combatIntent()
-			if err := send(pb.MessageType_MSG_PLAYER_INPUT, &pb.PlayerInput{
-				InputSeq:     inputSequence,
-				ClientTickMs: uint64(now.UnixMilli()),
-				Move:         &pb.Vec2{X: direction},
-				Aim:          aim,
-				Shoot:        shoot,
-			}); err != nil {
-				return err
-			}
-			progress.recordInput(inputSequence, shoot)
-			if progress.complete() {
-				return nil
-			}
-		}
-	}
+	_, err := RunMatch(ctx, address, clientID, DefaultMatchConfig())
+	return err
 }
 
 func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error {
@@ -162,7 +64,7 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 		if err := proto.Unmarshal(body, &disconnect); err != nil {
 			return err
 		}
-		return fmt.Errorf("server disconnected: %s (%s)", disconnect.Reason, disconnect.Message)
+		return &serverDisconnectError{message: fmt.Sprintf("server disconnected: %s (%s)", disconnect.Reason, disconnect.Message)}
 	case pb.MessageType_MSG_WORLD_SNAPSHOT:
 		var snapshot pb.WorldSnapshot
 		if err := proto.Unmarshal(body, &snapshot); err != nil {
@@ -176,6 +78,7 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 		}
 		p.mu.Lock()
 		p.projectileSpawns++
+		p.recordServerTickLocked(event.ServerTick)
 		p.mu.Unlock()
 	case pb.MessageType_MSG_PROJECTILE_DESTROY:
 		var event pb.ProjectileDestroyEvent
@@ -184,6 +87,7 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 		}
 		p.mu.Lock()
 		p.projectileDestroys++
+		p.recordServerTickLocked(event.ServerTick)
 		p.mu.Unlock()
 	case pb.MessageType_MSG_DAMAGE_EVENT:
 		var event pb.DamageEvent
@@ -193,6 +97,7 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 		}
 		p.mu.Lock()
 		p.damageEvents++
+		p.recordServerTickLocked(event.ServerTick)
 		p.mu.Unlock()
 	case pb.MessageType_MSG_DEATH_EVENT:
 		var event pb.DeathEvent
@@ -201,6 +106,7 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 		}
 		p.mu.Lock()
 		p.deathEvents++
+		p.recordServerTickLocked(event.ServerTick)
 		p.mu.Unlock()
 	case pb.MessageType_MSG_STAGE_STARTED_EVENT:
 		var event pb.StageStartedEvent
@@ -208,7 +114,10 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 			return errors.New("invalid stage started event")
 		}
 		p.mu.Lock()
+		p.firstCombatInputSeq = 0
+		p.stageCleared = false
 		p.stageIndex = event.StageIndex
+		p.recordServerTickLocked(event.ServerTick)
 		p.stageStarts++
 		p.mu.Unlock()
 	case pb.MessageType_MSG_STAGE_CLEARED_EVENT:
@@ -226,6 +135,7 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 			return fmt.Errorf("stage cleared index %d does not match observed stage %d", event.StageIndex, p.stageIndex)
 		}
 		p.stageIndex = event.StageIndex
+		p.recordServerTickLocked(event.ServerTick)
 		p.stageCleared = true
 		p.shoot = false
 		p.mu.Unlock()
@@ -234,6 +144,9 @@ func (p *combatProgress) observe(messageType pb.MessageType, body []byte) error 
 		if err := proto.Unmarshal(body, &event); err != nil || event.StageIndex == 0 {
 			return errors.New("invalid team defeated event")
 		}
+		p.mu.Lock()
+		p.recordServerTickLocked(event.ServerTick)
+		p.mu.Unlock()
 		return fmt.Errorf("%w at stage %d tick %d", ErrTeamDefeated, event.StageIndex, event.ServerTick)
 	}
 	return nil
@@ -281,6 +194,7 @@ func (p *combatProgress) observeSnapshot(snapshot *pb.WorldSnapshot) error {
 
 	p.mu.Lock()
 	p.snapshots++
+	p.recordServerTickLocked(snapshot.ServerTick)
 	if snapshot.LastProcessedInput > p.lastAcknowledged {
 		p.lastAcknowledged = snapshot.LastProcessedInput
 	}
@@ -323,6 +237,18 @@ func (p *combatProgress) complete() bool {
 	return p.snapshots > 0 && p.firstCombatInputSeq > 0 && p.lastAcknowledged >= p.firstCombatInputSeq && p.stageCleared
 }
 
+func (p *combatProgress) position() (uint32, uint64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.stageIndex, p.lastServerTick
+}
+
+func (p *combatProgress) recordServerTickLocked(serverTick uint64) {
+	if serverTick > p.lastServerTick {
+		p.lastServerTick = serverTick
+	}
+}
+
 func finiteVec(vector *pb.Vec2) bool {
 	return vector != nil && finite(vector.X) && finite(vector.Y)
 }
@@ -347,7 +273,10 @@ func sendMessage(conn net.Conn, messageType pb.MessageType, sequence uint32, mes
 	binary.BigEndian.PutUint32(frame[12:16], sequence)
 	copy(frame[headerSize:], body)
 	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Write(frame)
+	written, err := conn.Write(frame)
+	if err == nil && written != len(frame) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 
