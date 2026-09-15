@@ -8,6 +8,7 @@
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
+#include "sync/StageSummary.h"
 #include "ui/AssetPath.h"
 #include "ui/FloaterPool.h"
 #include "ui/HealthBar.h"
@@ -20,6 +21,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace {
@@ -53,6 +55,14 @@ using odyssey::client::sync::InputSeqFloor;
 using odyssey::client::sync::InputBlockReason;
 using odyssey::client::sync::IsPreparingNextStage;
 using odyssey::client::sync::kArenaMax;
+using odyssey::client::sync::kModOpAdd;
+using odyssey::client::sync::kModOpMultiply;
+using odyssey::client::sync::kModStatAttack;
+using odyssey::client::sync::kModStatDefense;
+using odyssey::client::sync::kModStatMaxHealth;
+using odyssey::client::sync::kModStatMoveSpeed;
+using odyssey::client::sync::kModTargetMonster;
+using odyssey::client::sync::kModTargetPlayer;
 using odyssey::client::sync::kMoveSpeedUnitsPerSecond;
 using odyssey::client::sync::kSimulationStepSeconds;
 using odyssey::client::sync::MonsterEntity;
@@ -71,6 +81,7 @@ using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StageState;
 using odyssey::client::sync::StageStateName;
+using odyssey::client::sync::StageSummary;
 using odyssey::client::sync::StepMovement;
 using odyssey::client::ui::AccessibilityConfig;
 using odyssey::client::ui::AssetRootCandidates;
@@ -1765,6 +1776,143 @@ void TestPerfCapture() {
     CHECK(!written.Dump("Z:/definitely/not/a/directory/perf.csv"));
 }
 
+void TestStageSummary() {
+    // Helpers: format into a fresh buffer and hand back a string, so the expectations read
+    // as the exact text the HUD would draw.
+    const auto modifier_text = [](const StageSummary& summary, std::size_t index,
+                                  bool with_target = false) {
+        char buffer[128] = {0};
+        summary.FormatModifier(index, buffer, sizeof(buffer), with_target);
+        return std::string(buffer);
+    };
+    const auto modifiers_text = [](const StageSummary& summary) {
+        char buffer[256] = {0};
+        summary.FormatModifiers(buffer, sizeof(buffer));
+        return std::string(buffer);
+    };
+    const auto cleared_text = [](const StageSummary& summary) {
+        char buffer[128] = {0};
+        summary.FormatCleared(buffer, sizeof(buffer));
+        return std::string(buffer);
+    };
+    const auto line_text = [](const StageSummary& summary) {
+        char buffer[256] = {0};
+        summary.FormatLine(buffer, sizeof(buffer));
+        return std::string(buffer);
+    };
+
+    StageSummary summary;
+    // Nothing has arrived: every formatter reports "nothing to show" so the HUD can skip the
+    // draw, and no line renders a zero that was never sent.
+    char text[256] = {0};
+    CHECK(!summary.has_index());
+    CHECK(!summary.has_seed());
+    CHECK(!summary.HasDetail());
+    CHECK(summary.modifier_count() == 0);
+    CHECK(summary.FormatLine(text, sizeof(text)) == 0);
+    CHECK(text[0] == '\0');
+    CHECK(summary.FormatModifiers(text, sizeof(text)) == 0);
+    CHECK(summary.FormatCleared(text, sizeof(text)) == 0);
+    CHECK(summary.FormatModifier(0, text, sizeof(text)) == 0);
+
+    summary.BeginStage(2);
+    CHECK(summary.has_index());
+    CHECK(summary.index() == 2);
+    CHECK(!summary.HasDetail());
+
+    // Detail is wiped when the stage index changes...
+    summary.AddModifier(kModTargetPlayer, kModOpMultiply, kModStatAttack, 1.2f);
+    summary.SetMonsterCount(6);
+    summary.SetSeed(4242);
+    summary.SetCleared(3, 42500);
+    CHECK(summary.HasDetail());
+    summary.BeginStage(2);  // same stage: what already arrived for it must survive
+    CHECK(summary.modifier_count() == 1);
+    CHECK(summary.has_difficulty());
+    CHECK(summary.has_monster_count());
+    CHECK(summary.has_seed());
+    CHECK(summary.seed() == 4242);
+    summary.BeginStage(3);  // next stage: the previous stage's detail is gone
+    CHECK(summary.index() == 3);
+    CHECK(!summary.HasDetail());
+    CHECK(!summary.has_monster_count());
+    CHECK(!summary.has_difficulty());
+    CHECK(!summary.has_clear_time());
+    CHECK(summary.seed() == 4242);  // the seed survives (a stage's seed is stable)
+
+    // Formatting follows the server's semantics: add = signed delta, multiply = factor, so
+    // 1.2 reads as +20% and 0.9 as -10%.
+    StageSummary formatted;
+    formatted.AddModifier(kModTargetPlayer, kModOpAdd, kModStatAttack, 5.0f);
+    formatted.AddModifier(kModTargetMonster, kModOpMultiply, kModStatMoveSpeed, 1.2f);
+    formatted.AddModifier(kModTargetPlayer, kModOpMultiply, kModStatMoveSpeed, 0.9f);
+    formatted.AddModifier(kModTargetPlayer, kModOpAdd, kModStatDefense, -3.0f);
+    CHECK(formatted.modifier_count() == 4);
+    CHECK(modifier_text(formatted, 0) == "ATK +5");
+    CHECK(modifier_text(formatted, 1) == "SPD +20%");
+    CHECK(modifier_text(formatted, 2) == "SPD -10%");
+    CHECK(modifier_text(formatted, 3) == "DEF -3");
+    CHECK(modifier_text(formatted, 1, true) == "MONSTER SPD +20%");
+    CHECK(modifier_text(formatted, 4).empty());  // out of range formats nothing
+
+    // An unknown stat keeps its raw id and an unknown operation falls back to the plain value,
+    // so a newer server stays readable instead of being dropped.
+    StageSummary unknown;
+    unknown.AddModifier(kModTargetPlayer, kModOpAdd, 7, 2.0f);
+    CHECK(modifier_text(unknown, 0) == "STAT7 +2");
+    StageSummary unknown_op;
+    unknown_op.AddModifier(9, 99, kModStatAttack, 2.0f);
+    CHECK(modifier_text(unknown_op, 0) == "ATK +2");
+    CHECK(modifier_text(unknown_op, 0, true) == "ATK +2");  // unknown target: no prefix
+
+    // Overflow is reported, not silently dropped: the HUD shows kMaxShown and a count.
+    StageSummary many;
+    for (int i = 0; i < 6; ++i) {
+        many.AddModifier(kModTargetPlayer, kModOpAdd, kModStatAttack, 1.0f);
+    }
+    CHECK(many.modifier_count() == StageSummary::kMaxShown);
+    CHECK(many.modifier_overflow() == 2);
+    CHECK(modifiers_text(many) == "ATK +1, ATK +1, ATK +1, ATK +1 (+2 more)");
+
+    // A clipped line reports nothing rather than a truncated label.
+    char tiny[4] = {0};
+    CHECK(formatted.FormatModifier(0, tiny, sizeof(tiny)) == 0);
+    CHECK(tiny[0] == '\0');
+    CHECK(formatted.FormatModifiers(tiny, sizeof(tiny)) == 0);
+
+    // Clear summary: only the parts the server actually filled.
+    StageSummary cleared;
+    cleared.SetCleared(0, 0);  // an unpopulated message must not render as DIFF 0
+    CHECK(!cleared.has_difficulty());
+    CHECK(!cleared.has_clear_time());
+    CHECK(!cleared.HasDetail());
+    cleared.SetCleared(3, 0);
+    CHECK(cleared.has_difficulty());
+    CHECK(!cleared.has_clear_time());
+    CHECK(cleared_text(cleared) == "DIFF 3");
+    cleared.SetCleared(0, 42500);
+    CHECK(cleared.has_difficulty());  // still there: SetCleared only ever adds
+    CHECK(cleared.has_clear_time());
+    CHECK(cleared_text(cleared) == "DIFF 3   CLEAR 42.5s");
+
+    // The single HUD line joins the cleared summary and the modifier list.
+    StageSummary line;
+    line.SetCleared(3, 42500);
+    line.AddModifier(kModTargetPlayer, kModOpMultiply, kModStatAttack, 1.2f);
+    line.AddModifier(kModTargetPlayer, kModOpMultiply, kModStatMoveSpeed, 1.1f);
+    CHECK(line_text(line) == "DIFF 3   CLEAR 42.5s   ATK +20%, SPD +10%");
+    CHECK(line.FormatLine(tiny, sizeof(tiny)) == 0);
+    StageSummary modifiers_only;
+    modifiers_only.AddModifier(kModTargetPlayer, kModOpAdd, kModStatMaxHealth, 25.0f);
+    CHECK(line_text(modifiers_only) == "HP +25");
+
+    // A new session wipes everything, including the index and the seed.
+    line.Clear();
+    CHECK(!line.has_index());
+    CHECK(!line.has_seed());
+    CHECK(!line.HasDetail());
+}
+
 }  // namespace
 
 int main() {
@@ -1801,6 +1949,7 @@ int main() {
     TestCanReportReadyGating();
     TestReadyBlockReasons();
     TestInputSeqFloor();
+    TestStageSummary();
     TestEnsureGreaterThan();
     TestSettleAfterAuthoritativeEnd();
     TestViewportLayoutScaleOne();

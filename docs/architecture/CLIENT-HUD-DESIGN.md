@@ -182,4 +182,16 @@ P3 在此之上新增：RTT EMA(α=0.1)、Server Tick 频率（Δ server_tick/Δ
 | Q1 | 世界几何 | ✅ **布局 A**：`480×480 @ (240,30)` 居中放大（2026-09-11 拍板） |
 | Q2 | A3 到位前的装备槽 | ✅ 先显示快照 `SPD`/`DMG`（A3 携带 WeaponID/RelicID/PotionID 后再换成真实槽位） |
 | Q3 | P2 前的奖励选择 UI | ⏳ 暂用现有 Raylib 文本托盘（已知观感一般，P2 换 ImGui 卡后与旧面板互斥）；若希望 P1b 就做卡片式 Raylib 托盘可提出 |
-| Q4 | 难度/Modifier/Director 摘要（A4） | ⏳ 待 A4 字段到位再定；在此之前放 F1 的 World 分组 |
+| Q4 | 难度/Modifier/Director 摘要（A4） | ✅ **客户端侧已实现**（`sync/StageSummary.h`）：顶部目标行下方一行 `DIFF n   CLEAR x.xs   ATK +20%, SPD +10%`（有才画），过关卡内追加结果行，F1 的 WORLD 组增加 `stage spawned=.. diff=.. clear=.. detail=..` 与完整 Modifier 列表。**数据依赖未解除**：字段在 A 的 `stage.proto` 域消息 `StageStarted`/`StageCleared` 上，对应消息类型 `MSG_STAGE_STARTED=400`/`MSG_STAGE_CLEARED=401`，而服务端目前只发可靠事件 `MSG_STAGE_STARTED_EVENT=325`/`MSG_STAGE_CLEARED_EVENT=326`（只有 index+tick），因此界面按"空摘要不绘制"处理，A 接上线即自动生效（见 §10） |
+
+---
+
+## 10. D7 阶段摘要的数据来源（给 A 的对接说明）
+
+| 内容 | 今天的来源 | 缺口 |
+| --- | --- | --- |
+| 关卡号 / 阶段状态 / 剩余怪物 / **seed** | `WorldSnapshot.stage`（`StageState`） | 无（seed 已在 F1 显示） |
+| 全局 Modifier 列表（`StatModifier`: target/op/stat/value） | `stage.proto::StageStarted.modifiers`（field 6） | 服务端 `convert/event.go` 的 `StageStarted` 只填 `stage_index`+`server_tick`，且发的是 325 事件而非 400 域消息 |
+| 难度分 / 清关耗时 | `stage.proto::StageCleared.difficulty_score`(3) / `clear_time_ms`(2) | 同上：`StageCleared` 域消息（401）没人发；且事件消息 326 里放不下 |
+
+客户端已完成的部分：`network/PayloadCodec.h` 的 `DecodeStageStartedDetail` / `DecodeStageClearedDetail`（固定 8 条上限、溢出计数、独立消息类型解析），`sync/StageSummary.h` 的存储与 ASCII 格式化（`add` → 有符号增量、`multiply` → 百分比，未知 stat/op 保留原值），以及 HUD/F1 的绘制与"空则不画"规则。**服务端侧需要**：把域消息 400/401 发出去（或把字段并入事件消息并同步改协议），并填入 Director 的真实数值。

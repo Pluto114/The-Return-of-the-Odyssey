@@ -104,7 +104,7 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 | `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | 报告“准备下一关”：仅当权威状态已是 `PreparingNextStage` 且自身奖励已结清；提前按会显示被拦截原因 |
 | `R` | 失败后手动重连 |
-| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS），含双向队列深度（瞬时/峰值）、RTT EMA、Server Tick 频率、Prediction Error，以及 RTT 与 Tick 的历史折线图 |
+| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS），含双向队列深度（瞬时/峰值）、RTT EMA、Server Tick 频率、Prediction Error、RTT 与 Tick 的历史折线图，以及 `stage spawned/diff/clear/detail` 与完整 Modifier 列表 |
 | `F2` | 实体调试：包围盒、发送中的瞄准锥、自身权威位姿与预测位姿的误差线、远端/怪物的插值延迟线 |
 | `F3` | 无障碍菜单（↑/↓ 选择、ENTER/SPACE 切换）：glitch 效果 / 屏幕抖动 / 伤害飘字；改动**立即写入** `settings.ini` |
 | `ESC` | 优先关闭当前面板（F3 → F2 → F1），都没有打开时才退出游戏 |
@@ -121,7 +121,7 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 - D4 战斗：Aim/Shoot 发送；`MonsterSnapshot` 与七类可靠事件消费；几何图形表现
 - D5 表现：玩家/怪物血条、受击闪环、死亡标记、关卡 HUD、实体全量移除、切关清空子弹
 - D6 奖励：宝箱面板（名称/槽位/属性）、1–3 选择、超时、`RewardApplied` 如实显示
-- D7（部分）：关卡号/状态/剩余怪物与 Ready 发送（难度/全局 Modifier/Director 摘要**等待协议字段**）
+- D7：关卡号/状态/剩余怪物、Ready 发送，以及**难度 / 全局 Modifier / 关卡摘要的显示（客户端侧已实现，见下）**
 - D8 恢复：有界退避自动重连、`ResumeRequest` 单次发送、令牌被拒后回退全新登录、**不重放旧会话输入**
 - D9 同步质量：tick 驱动的本地预测 + 服务器校正（每 30Hz 边界一步、按 tick 而非按包重放）、远端玩家/怪物 10Hz 插值
 
@@ -134,6 +134,12 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 - **C-b 输入门控**：意图只在「已入房 + 本会话已收到权威快照 + 无恢复进行中 + 自己存活 + 关卡正在 `playing`」时发送；任一条件不满足即静默（不消耗 InputSeq、不发包），并在门控翻转时丢弃已记住的方向，避免阶段切换/死亡/恢复后残留旧意图再走一步。HUD 与日志直接给出被拦截原因
 - **C-f 有界等待**：重连尝试用尽后进入**终止态** `kExhausted`（HUD 显示 `exhausted (press R)`、日志提示按 R），不再无声停摆；`ResumeRequest`/`LoginRequest` 若 5 秒无响应即判超时——丢弃令牌、回落全新登录，HUD 显示 `handshake_left=<秒>` 倒计时；超时与连接失败共用同一份尝试预算（最多 5 次）后终止；恢复成功后再次闪断会重置尝试次数与退避（可反复恢复）
 - 待办：C-c 药水（阻塞于 A2/A3）；Token 轮换语义待 A4（`ResumeResponse` 目前无新 token 字段）
+
+- **D7 阶段摘要（难度 / 全局 Modifier / 清关耗时）**：客户端这半边已完成并**等 A 接线即生效**。
+  - 数据来源：字段在 `stage.proto` 的域消息 `StageStarted`（`modifiers`，`StatModifier{target,op,stat,value}`）、`StageCleared`（`difficulty_score`、`clear_time_ms`）上，对应消息类型 `MSG_STAGE_STARTED=400` / `MSG_STAGE_CLEARED=401`；而服务端**目前只发**可靠事件 `msg 325/326`（仅 `stage_index`+`server_tick`），400/401 从未发送、字段也未被填值。
+  - 客户端实现：`network/PayloadCodec.h` 的 `DecodeStageStartedDetail`/`DecodeStageClearedDetail`（固定 8 条上限 + 溢出计数，独立消息类型解析——两个域消息字段号不重合，混用会串值）；`sync/StageSummary.h` 负责存储与格式化（`add` 显示为有符号增量、`multiply` 显示为百分比即 `1.2 → +20%`、未知 stat 保留 `STAT<id>`、未知 op 退回原值、最多显示 4 条并附 `(+N more)`）。
+  - 显示：顶部目标行下方一行 `DIFF 3   CLEAR 42.5s   ATK +20%, SPD +10%`（**空摘要不绘制**，绝不显示未经服务器下发的 0）；阶段过渡卡内追加难度/清关结果行；F1 的 WORLD 组显示 `stage spawned=.. diff=.. clear=.. detail=ok|none(400/401)` 与完整列表。
+  - 因此现在正常游玩会看到 `detail=none(400/401)`：这是**服务端未发域消息**的如实反映，不是客户端缺陷。`StageState.seed` 已在 F1 显示（它本来就在快照里）。
 
 ## 已知限制 / 依赖
 

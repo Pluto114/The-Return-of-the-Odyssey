@@ -21,6 +21,7 @@
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
+#include "sync/StageSummary.h"
 #include "ui/AssetPath.h"
 #include "ui/FloaterPool.h"
 #include "ui/HealthBar.h"
@@ -107,7 +108,10 @@ using odyssey::client::network::payload::ProjectileSpawnData;
 using odyssey::client::network::payload::RewardAppliedData;
 using odyssey::client::network::payload::RewardOptionsData;
 using odyssey::client::network::payload::ResumeResponseData;
+using odyssey::client::network::payload::StageClearedDetail;
 using odyssey::client::network::payload::StageEventData;
+using odyssey::client::network::payload::StageModifierData;
+using odyssey::client::network::payload::StageStartedDetail;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
 using odyssey::client::sync::CombatView;
@@ -131,6 +135,7 @@ using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StageStateName;
+using odyssey::client::sync::StageSummary;
 using odyssey::client::ui::AccessibilityConfig;
 using odyssey::client::ui::AssetRoot;
 using odyssey::client::ui::ComputeHealthSegments;
@@ -537,6 +542,11 @@ int main(int argc, char** argv) {
     bool self_fraction_known = false;
     double hint_shown_at = -1.0;  // control hint fades a few seconds into play
 
+    // D7 stage summary: difficulty, clear time and the stage's global modifiers. Stays
+    // empty (and every line below stays hidden) until the server sends A's domain stage
+    // messages - see sync/StageSummary.h for why the reliable events cannot carry them.
+    StageSummary stage_summary;
+
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
         client.SendFrame(message_type, ++demo.frame_seq, payload.data(), payload.size());
@@ -614,6 +624,7 @@ int main(int argc, char** argv) {
             game_view = GameView{};
             combat_view.Clear();
             reward_view.Clear();
+            stage_summary.Clear();
             demo.prev_stage_index = 0;
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
@@ -779,6 +790,7 @@ int main(int argc, char** argv) {
                         game_view = GameView{};
                         combat_view.Clear();
                         reward_view.Clear();
+                        stage_summary.Clear();
                         demo.prev_stage_index = 0;
                         demo.banner.clear();
                         demo.banner_ttl = 0.0f;
@@ -1007,12 +1019,19 @@ int main(int argc, char** argv) {
                             stage.monsters_remaining = snap.stage.monsters_remaining;
                             combat_view.SetStage(stage);
                             // New stage: old projectiles must not leak across
-                            // the transition (they are event-driven only).
+                            // the transition (they are event-driven only). The stage
+                            // summary resets on the same edge: last stage's modifiers,
+                            // difficulty and clear time must not survive into this one.
                             if (demo.prev_stage_index != 0 &&
                                 snap.stage.index != demo.prev_stage_index) {
                                 combat_view.ClearProjectiles();
+                                stage_summary.BeginStage(snap.stage.index);
                                 demo.last_event_note = "stage index changed -> projectiles cleared";
                             }
+                            // Seed and index are on the wire today (StageState), so the
+                            // F1 STAGE row works before A's detail messages land.
+                            stage_summary.BeginStage(snap.stage.index);
+                            stage_summary.SetSeed(snap.stage.seed);
                             demo.prev_stage_index = snap.stage.index;
                             demo.stage_index = snap.stage.index;
                             demo.stage_state = snap.stage.state;
@@ -1184,11 +1203,54 @@ int main(int argc, char** argv) {
                                 reward_view.Clear();
                                 predictor.ClearIntent();
                                 demo.ready_sent = false;
+                                // Per-stage detail (modifiers/difficulty/clear time) belongs
+                                // to one stage only. Idempotent by index, so it does not
+                                // matter whether this event or A's detail message arrives
+                                // first (see StageSummary::BeginStage). The seed is not part
+                                // of this event; it arrives with the snapshots.
+                                stage_summary.BeginStage(stage_event.stage_index);
                             }
                             std::printf("main: %s stage=%u tick=%llu\n", kind,
                                         stage_event.stage_index,
                                         static_cast<unsigned long long>(stage_event.server_tick));
                             std::fflush(stdout);
+                        }
+                    } else if (event->message.message_type == kStageStarted ||
+                               event->message.message_type == kStageCleared) {
+                        // A's domain stage messages (MSG_STAGE_STARTED 400 / MSG_STAGE_CLEARED
+                        // 401): the only carriers of the global modifiers and the difficulty /
+                        // clear-time summary. The reliable events above cannot carry them, and
+                        // the server does not send these yet - when it does, the HUD lines and
+                        // the F1 STAGE row light up with no further client change.
+                        if (event->message.message_type == kStageStarted) {
+                            StageStartedDetail detail;
+                            if (payload::DecodeStageStartedDetail(event->message.payload, detail)) {
+                                stage_summary.BeginStage(detail.stage_index);
+                                stage_summary.SetSeed(detail.seed);
+                                stage_summary.SetMonsterCount(detail.monster_count);
+                                for (std::size_t i = 0; i < detail.modifier_count; ++i) {
+                                    const StageModifierData& modifier = detail.modifiers[i];
+                                    stage_summary.AddModifier(modifier.target, modifier.op,
+                                                              modifier.stat, modifier.value);
+                                }
+                                std::printf("main: stage detail stage=%u monsters=%u seed=%u "
+                                            "modifiers=%zu (+%zu) difficulty=%s\n",
+                                            detail.stage_index, detail.monster_count, detail.seed,
+                                            detail.modifier_count, detail.modifier_overflow,
+                                            stage_summary.has_difficulty() ? "yes" : "no");
+                                std::fflush(stdout);
+                            }
+                        } else {
+                            StageClearedDetail detail;
+                            if (payload::DecodeStageClearedDetail(event->message.payload, detail)) {
+                                stage_summary.SetCleared(detail.difficulty_score,
+                                                         detail.clear_time_ms);
+                                std::printf("main: stage cleared detail stage=%u difficulty=%u "
+                                            "clear_ms=%llu\n",
+                                            detail.stage_index, detail.difficulty_score,
+                                            static_cast<unsigned long long>(detail.clear_time_ms));
+                                std::fflush(stdout);
+                            }
                         }
                     } else if (event->message.message_type == kRewardOptions) {
                         RewardOptionsData options;
@@ -1529,6 +1591,43 @@ int main(int argc, char** argv) {
                           combat_view.ProjectileCount());
             DrawHudText(line, 28, 364, 18, ToRayColor(theme.text_dim));
 
+            // D7 stage detail: the global modifiers plus the difficulty / clear-time summary
+            // and the spawn count the server announced. Only A's domain stage messages
+            // (MSG_STAGE_STARTED 400 / MSG_STAGE_CLEARED 401) carry these, and the server does
+            // not send them yet, so the row says "none" instead of rendering zeros.
+            {
+                char modifiers[224] = {0};
+                const bool has_modifiers =
+                    stage_summary.FormatModifiers(modifiers, sizeof(modifiers)) > 0;
+                const bool has_detail = stage_summary.HasDetail();
+                char spawned[16] = "-";
+                if (stage_summary.has_monster_count()) {
+                    std::snprintf(spawned, sizeof(spawned), "%u", stage_summary.monster_count());
+                }
+                char difficulty[16] = "-";
+                if (stage_summary.has_difficulty()) {
+                    std::snprintf(difficulty, sizeof(difficulty), "%u",
+                                  stage_summary.difficulty_score());
+                }
+                char clear_time[24] = "-";
+                if (stage_summary.has_clear_time()) {
+                    std::snprintf(clear_time, sizeof(clear_time), "%.1fs",
+                                  static_cast<double>(stage_summary.clear_time_ms()) / 1000.0);
+                }
+                std::snprintf(line, sizeof(line), "stage spawned=%s diff=%s clear=%s detail=%s",
+                              spawned, difficulty, clear_time,
+                              (has_detail || stage_summary.has_monster_count())
+                                  ? "ok"
+                                  : "none(400/401)");
+                DrawHudText(line, 28, 430, 18,
+                            (has_detail || stage_summary.has_monster_count())
+                                ? ToRayColor(theme.neon_yellow)
+                                : ToRayColor(theme.text_dim));
+                if (has_modifiers) {
+                    DrawHudText(modifiers, 28, 452, 18, ToRayColor(theme.neon_yellow));
+                }
+            }
+
             // Ready is gated on the authoritative preparing state (A5 C-a): show why
             // ENTER is unavailable instead of leaving the operator guessing.
             char ready_text[96] = {0};
@@ -1827,6 +1926,15 @@ int main(int argc, char** argv) {
                                   demo.monsters_remaining);
                     DrawHudText(line, CenteredTextX(line, 20), 24, 20, ToRayColor(theme.text));
 
+                    // D7 difficulty / global modifiers, one quiet line under the objective.
+                    // Hidden while the summary is empty: the server does not send the detail
+                    // messages yet, and an invented "DIFF 0" would be worse than nothing.
+                    char stage_line[256] = {0};
+                    if (stage_summary.FormatLine(stage_line, sizeof(stage_line)) > 0) {
+                        DrawHudText(stage_line, CenteredTextX(stage_line, 16), 46, 16,
+                                    ToRayColor(theme.neon_yellow));
+                    }
+
                     if (hud_phase == HudPhase::kTransition) {
                         // Clear / preparing / failed / closed: one centred card, no HUD.
                         const char* transition = TransitionLabel(demo.stage_state);
@@ -1839,6 +1947,12 @@ int main(int argc, char** argv) {
                                            static_cast<int>(width) + 56, 60,
                                            ToRayColor(theme.panel_edge));
                         DrawHudText(transition, card_x, 252, 28, ToRayColor(theme.neon_magenta));
+                        // Clear-time / difficulty result line inside the card, when known.
+                        char cleared_line[96] = {0};
+                        if (stage_summary.FormatCleared(cleared_line, sizeof(cleared_line)) > 0) {
+                            DrawHudText(cleared_line, CenteredTextX(cleared_line, 16), 276, 16,
+                                        ToRayColor(theme.text_dim));
+                        }
                     }
                 } else if (hud_phase == HudPhase::kLobby) {
                     // Lobby card: the identity line only belongs on this screen.
