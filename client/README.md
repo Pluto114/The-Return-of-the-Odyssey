@@ -22,6 +22,12 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 装备显示表由 `data/equipment/catalog.json`（唯一手写源）在 **CMake 配置期**生成，客户端不解析 JSON、也没有第二张手维护表：配置阶段校验 `version == 1` 并写出 TSV，post-build 复制到 `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv`。改了目录后重新配置即自动重生成（`CMAKE_CONFIGURE_DEPENDS` 已指向该文件）；字段含制表符/换行会直接报错停止。
 
+## 画面上/性能测量开关（P3）
+
+- `--no-ui` 或 `ODYSSEY_UI_OFF=1`：**跳过整个 UI 层**（HUD 文字、血条/残影、准星、受击弧、飘字、提示、F1/F2/F3 面板），但**保留** RT 管线、世界（网格与玩家/怪物/投射物）与全部网络/游戏逻辑——这样"同一场景 UI 开 vs 关"的整帧 CPU 时间差才有意义
+- 启动日志会打印 `main: UI layer enabled (...)` 或 `main: UI layer disabled (--no-ui / ODYSSEY_UI_OFF)`
+- 指标口径（与 D 的 Grafana 命名/语义对齐，客户端不接 Prometheus）：RTT = Ping 回显 EMA(α=0.1)；Server Tick = Δ`server_tick`/Δt（**不是** 10Hz 快照率）；Prediction Error = 校正距离 EMA，仅快照到达时更新；队列深度 = 入站/出站瞬时 + 峰值
+
 ## 资源与设置（UI 重构 P0b）
 
 - 构建后 `client/assets/` 会被复制到 `<exe 目录>/assets`；客户端启动时按 `<exe>/assets` → `<CWD>/assets` → `<CWD>/client/assets` 的顺序解析**并缓存**一次资源根（渲染循环内不做路径解析），因此可以从任意工作目录启动
@@ -68,8 +74,8 @@ build\client-windows\client\odyssey_client.exe
 
 | 方式 | 写法 |
 | --- | --- |
-| 命令行 | `--host <addr>`、`--port <n>`、`--server <host[:port]>`（均支持 `--opt=value` 形式）；`--help` / `-h` 打印用法 |
-| 环境变量 | `ODYSSEY_SERVER_HOST`、`ODYSSEY_SERVER_PORT` |
+| 命令行 | `--host <addr>`、`--port <n>`、`--server <host[:port]>`（均支持 `--opt=value` 形式）；`--no-ui` 关闭 UI 层；`--help` / `-h` 打印用法 |
+| 环境变量 | `ODYSSEY_SERVER_HOST`、`ODYSSEY_SERVER_PORT`、`ODYSSEY_UI_OFF`（1/true/yes/on 关闭 UI 层） |
 
 ```powershell
 build\client-windows\client\odyssey_client.exe                              # 127.0.0.1:7777
@@ -98,7 +104,7 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 | `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | 报告“准备下一关”：仅当权威状态已是 `PreparingNextStage` 且自身奖励已结清；提前按会显示被拦截原因 |
 | `R` | 失败后手动重连 |
-| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS） |
+| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS），含双向队列深度（瞬时/峰值）、RTT EMA、Server Tick 频率、Prediction Error，以及 RTT 与 Tick 的历史折线图 |
 | `F2` | 实体调试：包围盒、发送中的瞄准锥、自身权威位姿与预测位姿的误差线、远端/怪物的插值延迟线 |
 | `F3` | 无障碍菜单（↑/↓ 选择、ENTER/SPACE 切换）：glitch 效果 / 屏幕抖动 / 伤害飘字；改动**立即写入** `settings.ini` |
 | `ESC` | 优先关闭当前面板（F3 → F2 → F1），都没有打开时才退出游戏 |

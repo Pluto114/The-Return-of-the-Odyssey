@@ -12,6 +12,7 @@
 #include "ui/FloaterPool.h"
 #include "ui/HealthBar.h"
 #include "ui/HudMath.h"
+#include "ui/Metrics.h"
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
 
@@ -95,6 +96,11 @@ using odyssey::client::ui::SettingsFilePathIn;
 using odyssey::client::ui::Theme;
 using odyssey::client::ui::DamageGhost;
 using odyssey::client::ui::DamageShakeOffset;
+using odyssey::client::ui::Ema;
+using odyssey::client::ui::MetricSeries;
+using odyssey::client::ui::PredictionErrorEstimator;
+using odyssey::client::ui::RttEstimator;
+using odyssey::client::ui::ServerTickRateEstimator;
 using odyssey::client::ui::HexagonCrosshair;
 using odyssey::client::ui::HitMarker;
 using odyssey::client::ui::HitMarkerFade;
@@ -1581,6 +1587,101 @@ void TestHexagonCrosshair() {
     CHECK(HexagonCrosshair(0.0f, 0.0f, 1.0f, 0.0f, nullptr, kCrosshairPoints * 2) == 0);
 }
 
+void TestEmaAndRtt() {
+    Ema ema(0.5f);
+    CHECK(!ema.HasValue());
+    ema.Add(100.0f);
+    // The first sample seeds the average instead of starting from zero.
+    CHECK(std::fabs(ema.Value() - 100.0f) < kEps);
+    CHECK(ema.HasValue());
+    ema.Add(200.0f);
+    CHECK(std::fabs(ema.Value() - 150.0f) < kEps);
+    ema.Add(200.0f);
+    CHECK(std::fabs(ema.Value() - 175.0f) < kEps);
+    // NaN must not poison the average.
+    ema.Add(std::nanf(""));
+    CHECK(std::fabs(ema.Value() - 175.0f) < kEps);
+    ema.Reset();
+    CHECK(!ema.HasValue());
+
+    RttEstimator rtt;
+    CHECK(!rtt.HasValue());
+    rtt.OnPong(1000, 1042);  // 42 ms
+    CHECK(std::fabs(rtt.Milliseconds() - 42.0f) < kEps);
+    rtt.OnPong(2000, 2058);  // 58 ms, EMA(0.1) -> 42 + 0.1*16 = 43.6
+    CHECK(std::fabs(rtt.Milliseconds() - 43.6f) < 1e-3f);
+    // A pong that claims to predate its ping is ignored, not reported as negative.
+    const float before = rtt.Milliseconds();
+    rtt.OnPong(5000, 4000);
+    CHECK(std::fabs(rtt.Milliseconds() - before) < kEps);
+}
+
+void TestServerTickRateEstimator() {
+    // Snapshots arrive at 10Hz but carry the 30Hz tick: the reported rate must be the
+    // TICK rate (30), not the snapshot rate (10). This is the exact confusion the
+    // plan calls out.
+    ServerTickRateEstimator rate(0.5f);
+    CHECK(!rate.HasValue());
+    rate.OnSnapshot(1000, 0.0);
+    CHECK(!rate.HasValue());  // a single snapshot cannot yield a rate
+    rate.OnSnapshot(1003, 0.1);  // 3 ticks in 0.1 s
+    CHECK(std::fabs(rate.Hertz() - 30.0f) < 1e-3f);
+    rate.OnSnapshot(1006, 0.2);  // 3 ticks in 0.1 s again; EMA stays at 30
+    CHECK(std::fabs(rate.Hertz() - 30.0f) < 1e-3f);
+
+    // A zero-length interval (duplicate arrival time) is skipped rather than dividing
+    // by zero, and a server restart (tick going backwards) adds no sample.
+    const float before = rate.Hertz();
+    rate.OnSnapshot(1009, 0.2);
+    CHECK(std::fabs(rate.Hertz() - before) < kEps);
+    rate.OnSnapshot(5, 0.3);
+    CHECK(std::fabs(rate.Hertz() - before) < kEps);
+
+    // A slower tick rate is reported as such.
+    ServerTickRateEstimator slow(1.0f);
+    slow.OnSnapshot(100, 0.0);
+    slow.OnSnapshot(102, 0.1);  // 20 Hz
+    CHECK(std::fabs(slow.Hertz() - 20.0f) < 1e-3f);
+}
+
+void TestPredictionErrorEstimator() {
+    PredictionErrorEstimator error(0.5f);
+    CHECK(!error.HasValue());
+    error.OnSnapshotCorrection(0.0f);
+    CHECK(error.HasValue());
+    CHECK(error.Distance() == 0.0f);
+    error.OnSnapshotCorrection(2.0f);
+    CHECK(std::fabs(error.Distance() - 1.0f) < kEps);
+    error.Reset();
+    CHECK(!error.HasValue());
+}
+
+void TestMetricSeries() {
+    MetricSeries series;
+    CHECK(series.Count() == 0);
+    for (int i = 0; i < 5; ++i) {
+        series.Add(static_cast<float>(i));
+    }
+    CHECK(series.Count() == 5);
+    CHECK(std::fabs(series.MaxValue() - 4.0f) < kEps);
+    CHECK(series.At(0) == 0.0f);  // oldest first, so index 0 is the leftmost point
+    CHECK(series.At(4) == 4.0f);
+    CHECK(series.At(5) == 0.0f);  // out of range reads as zero, never out of bounds
+    series.Add(std::nanf(""));    // a NaN sample is ignored, not plotted
+    CHECK(series.Count() == 5);
+
+    // Wrapping past capacity keeps exactly kCapacity samples and drops the oldest.
+    for (std::size_t i = 0; i < MetricSeries::kCapacity + 10; ++i) {
+        series.Add(static_cast<float>(i));
+    }
+    CHECK(series.Count() == MetricSeries::kCapacity);
+    CHECK(series.At(0) <= series.At(MetricSeries::kCapacity - 1));
+    series.Reset();
+    CHECK(series.Count() == 0);
+    CHECK(series.MaxValue() == 0.0f);
+    CHECK(series.At(0) == 0.0f);
+}
+
 }  // namespace
 
 int main() {
@@ -1635,6 +1736,10 @@ int main() {
     TestHitMarkerDirection();
     TestDamageGhost();
     TestHexagonCrosshair();
+    TestEmaAndRtt();
+    TestServerTickRateEstimator();
+    TestPredictionErrorEstimator();
+    TestMetricSeries();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

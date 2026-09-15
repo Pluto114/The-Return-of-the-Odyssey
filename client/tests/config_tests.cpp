@@ -32,6 +32,7 @@ using odyssey::client::core::kDefaultServerHost;
 using odyssey::client::core::kDefaultServerPort;
 using odyssey::client::core::kServerHostEnvVar;
 using odyssey::client::core::kServerPortEnvVar;
+using odyssey::client::core::kUiOffEnvVar;
 using odyssey::client::core::ParseClientOptions;
 using odyssey::client::core::ToString;
 
@@ -263,6 +264,39 @@ void TestHelp() {
     CHECK(std::string(ClientUsageText()).find("--server") != std::string::npos);
 }
 
+void TestUiSwitch() {
+    // Default: UI on.
+    const auto defaults = OK(Parse({}));
+    CHECK(defaults.ui_enabled);
+
+    // --no-ui is a pure flag.
+    const auto cli_off = OK(Parse({"--no-ui"}));
+    CHECK(!cli_off.ui_enabled);
+    // ... and combines with an endpoint.
+    const auto combined = OK(Parse({"--no-ui", "--server", "10.0.0.5:9000"}));
+    CHECK(!combined.ui_enabled);
+    CHECK(combined.endpoint.host == "10.0.0.5");
+    CHECK(combined.endpoint.port == 9000);
+    // A value attached to it is a mistake, not something to interpret.
+    EXPECT_ERROR(Parse({"--no-ui=1"}));
+
+    // Environment switch; an explicit "off" keeps the UI on.
+    const auto env_off = OK(Parse({}, EndpointEnv{nullptr, nullptr, "1"}));
+    CHECK(!env_off.ui_enabled);
+    const auto env_truthy = OK(Parse({}, EndpointEnv{nullptr, nullptr, "true"}));
+    CHECK(!env_truthy.ui_enabled);
+    const auto env_explicit_on = OK(Parse({}, EndpointEnv{nullptr, nullptr, "off"}));
+    CHECK(env_explicit_on.ui_enabled);
+    const auto env_empty = OK(Parse({}, EndpointEnv{nullptr, nullptr, ""}));
+    CHECK(env_empty.ui_enabled);
+    // A malformed value is reported rather than silently ignored.
+    const auto env_bad = Parse({}, EndpointEnv{nullptr, nullptr, "maybe"});
+    EXPECT_ERROR(env_bad);
+    CHECK(env_bad.error.find(kUiOffEnvVar) != std::string::npos);
+
+    CHECK(std::string(ClientUsageText()).find("--no-ui") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -277,6 +311,7 @@ int main() {
     TestCommandLineOverridesEnvironment();
     TestInvalidEnvironmentIsRejected();
     TestHelp();
+    TestUiSwitch();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -41,6 +41,7 @@ public:
             result = QueuePushResult::kDroppedOldest;
         }
         queue_.push_back(std::move(item));
+        TrackPeak();
         not_empty_.notify_one();
         return result;
     }
@@ -53,6 +54,7 @@ public:
             return QueuePushResult::kRejected;
         }
         queue_.push_back(std::move(item));
+        TrackPeak();
         not_empty_.notify_one();
         return QueuePushResult::kAccepted;
     }
@@ -102,12 +104,37 @@ public:
 
     std::size_t Capacity() const { return capacity_; }
 
+    // Queue depth metrics (plan: the debug overlay shows the instant and peak
+    // watermark of both directions). Depth() is Size() under the plan's name; the
+    // peak is a high-water mark that only ResetMaxDepth() lowers.
+    std::size_t Depth() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+    std::size_t MaxDepth() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return max_depth_;
+    }
+
+    void ResetMaxDepth() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        max_depth_ = queue_.size();
+    }
+
 private:
+    void TrackPeak() {
+        if (queue_.size() > max_depth_) {
+            max_depth_ = queue_.size();
+        }
+    }
+
     const std::size_t capacity_;
     std::deque<T> queue_;
     mutable std::mutex mutex_;
     std::condition_variable not_empty_;
     bool closed_ = false;
+    std::size_t max_depth_ = 0;
 };
 
 }  // namespace odyssey::client::core

@@ -25,6 +25,7 @@
 #include "ui/FloaterPool.h"
 #include "ui/HealthBar.h"
 #include "ui/HudMath.h"
+#include "ui/Metrics.h"
 #include "ui/PixelFont.h"
 #include "ui/Theme.h"
 #include "ui/UiGeometry.h"
@@ -149,12 +150,16 @@ using odyssey::client::ui::kCrosshairPoints;
 using odyssey::client::ui::kDefaultTheme;
 using odyssey::client::ui::LoadAccessibility;
 using odyssey::client::ui::MeasureHudText;
+using odyssey::client::ui::MetricSeries;
 using odyssey::client::ui::OnHealthFraction;
+using odyssey::client::ui::PredictionErrorEstimator;
 using odyssey::client::ui::ReleaseHudFont;
 using odyssey::client::ui::RTToWorld;
+using odyssey::client::ui::RttEstimator;
 using odyssey::client::ui::SanitizeAscii;
 using odyssey::client::ui::SaveAccessibility;
 using odyssey::client::ui::SegmentWidth;
+using odyssey::client::ui::ServerTickRateEstimator;
 using odyssey::client::ui::SetHitDirection;
 using odyssey::client::ui::SettingsFileExists;
 using odyssey::client::ui::SettingsFilePath;
@@ -342,6 +347,10 @@ int main(int argc, char** argv) {
         return 0;
     }
     const ClientEndpoint endpoint = config.options.endpoint;
+    // --no-ui / ODYSSEY_UI_OFF=1: keep the world rendering and every gameplay/network
+    // path, drop the UI layer. This is the switch the performance acceptance run uses
+    // to compare UI-on vs UI-off frame time in the same scene.
+    const bool ui_enabled = config.options.ui_enabled;
 
     // Window contract (UI refactor P0b): resizable before InitWindow, a 960x540
     // minimum so the integer letterbox never has to shrink, ESC taken over by the
@@ -410,6 +419,8 @@ int main(int argc, char** argv) {
                 accessibility.disable_glitch_fx ? 0 : 1,
                 accessibility.disable_screen_shake ? 0 : 1,
                 accessibility.disable_damage_floaters ? 0 : 1);
+    std::printf("main: UI layer %s\n", ui_enabled ? "enabled (F1 diagnostics, F2 entities, F3 accessibility)"
+                                                  : "disabled (--no-ui / ODYSSEY_UI_OFF)");
     std::fflush(stdout);
 
     BoundedQueue<NetEvent> inbox(256);
@@ -487,6 +498,16 @@ int main(int argc, char** argv) {
     bool entity_debug = false;
     bool accessibility_menu = false;
     int accessibility_cursor = 0;
+    // Metric estimators (plan section on metric semantics): RTT is ping/pong driven
+    // with EMA(0.1), the server tick rate comes from delta(server_tick)/delta(t) so it
+    // reports 30Hz rather than the 10Hz snapshot rate, and prediction error is only
+    // sampled when a snapshot arrives.
+    RttEstimator rtt;
+    ServerTickRateEstimator server_tick_rate;
+    PredictionErrorEstimator prediction_error;
+    MetricSeries rtt_series;
+    MetricSeries tick_series;
+    std::uint64_t last_ping_client_time_ms = 0;
     // P1b-2 combat feedback: white ghost of the health bar, the direction the last
     // hit came from, and the damage floater pool with its hit de-duplication table.
     DamageGhost damage_ghost;
@@ -747,6 +768,14 @@ int main(int argc, char** argv) {
                         hit_marker = HitMarker{};
                         damage_ghost = DamageGhost{};
                         self_fraction_known = false;
+                        // Metrics describe one session; a reconnect starts a new window.
+                        rtt.Reset();
+                        server_tick_rate.Reset();
+                        prediction_error.Reset();
+                        rtt_series.Reset();
+                        tick_series.Reset();
+                        inbox.ResetMaxDepth();
+                        client.ResetOutboundMaxDepth();
                         if (had_session) {
                             recovery.OnDisconnect(GetTime());
                             std::printf("main: connection lost -> recovery (%s)\n",
@@ -845,6 +874,13 @@ int main(int argc, char** argv) {
                         if (payload::DecodePong(event->message.payload, pong)) {
                             demo.pong_server_time_ms = pong.server_time_ms;
                             demo.pong_nonce = pong.nonce;
+                            // RTT from the ping this pong answers (the client clock is
+                            // the only one we can trust end to end), EMA(0.1).
+                            rtt.OnPong(last_ping_client_time_ms,
+                                       static_cast<std::uint64_t>(GetTime() * 1000.0));
+                            if (rtt.HasValue()) {
+                                rtt_series.Add(rtt.Milliseconds());
+                            }
                         }
                     } else if (event->message.message_type == kDisconnect) {
                         DisconnectData disc;
@@ -861,6 +897,13 @@ int main(int argc, char** argv) {
                             ++demo.snapshots_received;
                             const bool first_of_session = demo.session_snapshots == 0;
                             ++demo.session_snapshots;
+                            // Tick rate from the tick the snapshot carries (not the
+                            // snapshot arrival rate), and prediction error sampled here
+                            // because the plan ties it to snapshot arrival.
+                            server_tick_rate.OnSnapshot(snap.server_tick, GetTime());
+                            if (server_tick_rate.HasValue()) {
+                                tick_series.Add(server_tick_rate.Hertz());
+                            }
                             if (demo.snapshots_received == 1) {
                                 std::printf("main: first world snapshot tick=%llu\n",
                                             static_cast<unsigned long long>(snap.server_tick));
@@ -986,6 +1029,10 @@ int main(int argc, char** argv) {
                                                              snap.server_tick,
                                                              snap.self.move_speed,
                                                              snap.self.alive);
+                                // Sampled after reconciliation so it is this
+                                // snapshot's correction distance.
+                                prediction_error.OnSnapshotCorrection(
+                                    predictor.LastCorrectionDistance());
                             }
 
                             // D9: remote entities are rendered from an
@@ -1209,6 +1256,7 @@ int main(int argc, char** argv) {
                 ping.client_time_ms = static_cast<std::uint64_t>(now * 1000.0);
                 ping.nonce = ++demo.ping_nonce;
                 ++demo.pings_sent;
+                last_ping_client_time_ms = ping.client_time_ms;  // for the RTT estimate
                 SendPayload(kPing, payload::EncodePing(ping));
             }
 
@@ -1258,21 +1306,24 @@ int main(int argc, char** argv) {
         // numbers is easier to read without the world painted over it, while F2 keeps
         // the world visible and annotates it. stdout evidence logging is unaffected
         // either way.
-        if (IsKeyPressed(KEY_F1)) {
+        if (!ui_enabled) {
+            debug_overlay = false;  // --no-ui keeps the UI layer off regardless of keys
+        }
+        if (ui_enabled && IsKeyPressed(KEY_F1)) {
             debug_overlay = !debug_overlay;
         }
-        if (IsKeyPressed(KEY_F2)) {
+        if (ui_enabled && IsKeyPressed(KEY_F2)) {
             entity_debug = !entity_debug;
             std::printf("main: entity debug %s\n", entity_debug ? "on" : "off");
             std::fflush(stdout);
         }
-        if (IsKeyPressed(KEY_F3)) {
+        if (ui_enabled && IsKeyPressed(KEY_F3)) {
             accessibility_menu = !accessibility_menu;
             accessibility_cursor = 0;
             std::printf("main: accessibility menu %s\n", accessibility_menu ? "open" : "closed");
             std::fflush(stdout);
         }
-        if (accessibility_menu) {
+        if (ui_enabled && accessibility_menu) {
             // Three switches, keys only: UP/DOWN select, ENTER or SPACE toggles and
             // writes settings.ini (a write failure is a warning, never a crash).
             if (IsKeyPressed(KEY_DOWN)) {
@@ -1389,6 +1440,19 @@ int main(int argc, char** argv) {
                 DrawHudText(SanitizeAscii(demo.server_note.c_str(), ascii_c, sizeof(ascii_c)), 500,
                             144, 18, ToRayColor(theme.text_danger));
             }
+            // Queue depths, instant and peak, for both directions (plan metric set).
+            std::snprintf(line, sizeof(line), "queues in=%zu/%zu peak=%zu  out=%zu/%zu peak=%zu",
+                          inbox.Depth(), inbox.Capacity(), inbox.MaxDepth(), client.OutboundDepth(),
+                          client.OutboundMaxDepth());
+            DrawHudText(line, 500, 166, 18, ToRayColor(theme.text_dim));
+            if (rtt.HasValue()) {
+                std::snprintf(line, sizeof(line), "rtt %.1f ms (samples=%llu)", rtt.Milliseconds(),
+                              static_cast<unsigned long long>(rtt_series.Count()));
+            } else {
+                std::snprintf(line, sizeof(line), "rtt (waiting for a pong)");
+            }
+            DrawHudText(line, 500, 188, 18,
+                        rtt.HasValue() ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_dim));
 
             std::snprintf(line, sizeof(line), "keys(dx=%d, dz=%d) vec(%.2f, %.2f) seq=%u @30Hz",
                           last_sample.dx, last_sample.dz, last_report.vector.x,
@@ -1410,6 +1474,19 @@ int main(int argc, char** argv) {
                           static_cast<int>(remote_interp.DelayTicks()), remote_interp.Count(),
                           monster_interp.Count());
             DrawHudText(line, 500, 258, 18, ToRayColor(theme.text_dim));
+            // Tick rate must read ~30Hz even though snapshots arrive at 10Hz: it comes
+            // from the tick each snapshot carries, not from packet arrival (the plan
+            // calls out that specific confusion).
+            if (server_tick_rate.HasValue()) {
+                std::snprintf(line, sizeof(line), "tick %.1f Hz  predErr %.4f",
+                              server_tick_rate.Hertz(), prediction_error.Distance());
+            } else {
+                std::snprintf(line, sizeof(line), "tick (waiting for two snapshots)  predErr %.4f",
+                              prediction_error.Distance());
+            }
+            DrawHudText(line, 500, 280, 18,
+                        server_tick_rate.HasValue() ? ToRayColor(theme.neon_cyan)
+                                                    : ToRayColor(theme.text_dim));
 
             std::snprintf(line, sizeof(line), "players=%zu room=%llu tick=%llu snaps=%llu",
                           game_view.PlayerCount(),
@@ -1454,6 +1531,35 @@ int main(int argc, char** argv) {
             std::snprintf(line, sizeof(line), "events sp=%u dst=%u dmg=%u dth=%u", demo.spawns,
                           demo.destroys, demo.damages, demo.deaths);
             DrawHudText(line, 500, 364, 18, ToRayColor(theme.text_dim));
+
+            // History graphs (plan asks for line charts next to the numbers). The series
+            // are fixed-capacity rings, so this stays allocation-free; the scale is the
+            // window's own maximum so a quiet link does not look like a flat failure.
+            const auto draw_series = [&](const MetricSeries& series, float x, float y, float w,
+                                         float h, const char* caption, Color colour) {
+                DrawRectangleLines(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w),
+                                   static_cast<int>(h), ToRayColor(theme.panel_edge));
+                DrawHudText(caption, x + 4.0f, y - 20.0f, 16, ToRayColor(theme.text_dim));
+                const std::size_t count = series.Count();
+                if (count < 2) {
+                    return;
+                }
+                const float scale = series.MaxValue() > 1e-6f ? series.MaxValue() : 1.0f;
+                const float step = w / static_cast<float>(MetricSeries::kCapacity - 1);
+                for (std::size_t i = 1; i < count; ++i) {
+                    const float x0 = x + step * static_cast<float>(i - 1);
+                    const float x1 = x + step * static_cast<float>(i);
+                    const float y0 = y + h - (series.At(i - 1) / scale) * h;
+                    const float y1 = y + h - (series.At(i) / scale) * h;
+                    DrawLineV(Vector2{x0, y0}, Vector2{x1, y1}, colour);
+                }
+                std::snprintf(line, sizeof(line), "max %.2f", series.MaxValue());
+                DrawHudText(line, x + w - 90.0f, y - 20.0f, 16, ToRayColor(theme.text_dim));
+            };
+            draw_series(rtt_series, 500.0f, 412.0f, 400.0f, 48.0f, "rtt ms (EMA 0.1)",
+                        ToRayColor(theme.neon_cyan));
+            draw_series(tick_series, 500.0f, 488.0f, 400.0f, 32.0f, "server tick Hz (expect ~30)",
+                        ToRayColor(theme.neon_magenta));
             DrawFPS(860, 22);
         } else {  // !debug_overlay: the game view
             // Arena: world [0,20]^2. Self neon blue, peers red, monsters orange,
@@ -1581,7 +1687,7 @@ int main(int argc, char** argv) {
             // between a raw entity position and its interpolated position is the
             // snapshot delay; the line from our authoritative position to the predicted
             // one is the current prediction error.
-            if (entity_debug) {
+            if (ui_enabled && entity_debug) {
                 const Color box_colour = ToRayColor(theme.neon_cyan);
                 const Color raw_colour = ToRayColor(theme.neon_yellow);
                 for (const auto& player : game_view.Players()) {
@@ -1652,254 +1758,260 @@ int main(int argc, char** argv) {
             if (!in_stage) {
                 hint_shown_at = -1.0;  // re-armed for the next time play starts
             }
-            if (hud_phase == HudPhase::kOffline) {
-                // Dim the world so the banner reads as an interruption. Kept light:
-                // the ground is already near-black, and a heavy dim measured out to a
-                // featureless #050507 across the whole play area.
-                DrawRectangle(0, 0, kScreenWidth, kScreenHeight, Fade(BLACK, 0.20f));
-                // Name the actual state: on a first launch nothing was lost, so
-                // "LINK LOST" would be misleading. The endpoint is included because a
-                // failed connect is the most common playtest symptom.
-                char endpoint_text[96] = {0};
-                std::snprintf(endpoint_text, sizeof(endpoint_text), "%s:%u", endpoint.host.c_str(),
-                              static_cast<unsigned>(endpoint.port));
-                if (recovery.Active()) {
-                    std::snprintf(line, sizeof(line), "LINK LOST  -  %s  (%s)",
-                                  SanitizeAscii(recovery.Note().c_str(), ascii_a, sizeof(ascii_a)),
-                                  endpoint_text);
-                } else if (demo.state == ConnectionState::kFailed) {
-                    std::snprintf(line, sizeof(line), "CONNECTION FAILED  -  %s", endpoint_text);
-                } else if (demo.state == ConnectionState::kConnecting) {
-                    std::snprintf(line, sizeof(line), "CONNECTING  -  %s", endpoint_text);
-                } else {
-                    std::snprintf(line, sizeof(line), "NOT CONNECTED  -  %s", endpoint_text);
-                }
-                DrawRectangle(0, 12, kScreenWidth, 34, Fade(ToRayColor(theme.neon_red), 0.45f));
-                DrawRectangleLines(0, 12, kScreenWidth, 34, ToRayColor(theme.neon_red));
-                DrawHudText(line, CenteredTextX(line, 20), 18, 20, ToRayColor(theme.text));
-                if (recovery.Phase() == RecoveryPhase::kExhausted ||
-                    recovery.Phase() == RecoveryPhase::kFailed) {
-                    DrawHudText("press R to reconnect", CenteredTextX("press R to reconnect", 18), 54,
-                                18, ToRayColor(theme.text_warn));
-                }
-            } else if (in_stage) {
-                // Objective, top centre: stage number and hostiles still standing.
-                std::snprintf(line, sizeof(line), "STAGE %02u   HOSTILES %u", demo.stage_index,
-                              demo.monsters_remaining);
-                DrawHudText(line, CenteredTextX(line, 20), 24, 20, ToRayColor(theme.text));
 
-                if (hud_phase == HudPhase::kTransition) {
-                    // Clear / preparing / failed / closed: one centred card, no HUD.
-                    const char* transition = TransitionLabel(demo.stage_state);
-                    const float width = MeasureHudText(transition, 28).x;
-                    const float card_x = (kScreenWidth - width) * 0.5f;
-                    DrawRectangle(static_cast<int>(card_x) - 28, 236,
-                                  static_cast<int>(width) + 56, 60,
-                                  Fade(ToRayColor(theme.panel), 0.92f));
-                    DrawRectangleLines(static_cast<int>(card_x) - 28, 236,
-                                       static_cast<int>(width) + 56, 60,
-                                       ToRayColor(theme.panel_edge));
-                    DrawHudText(transition, card_x, 252, 28, ToRayColor(theme.neon_magenta));
-                }
-            } else if (hud_phase == HudPhase::kLobby) {
-                // Lobby card: the identity line only belongs on this screen.
-                const char* headline = !demo.login_ok ? "LOGGING IN"
-                                       : (!demo.in_room ? "MATCHMAKING" : "WAITING FOR STAGE");
-                DrawHudText("THE RETURN OF THE ODYSSEY",
-                            CenteredTextX("THE RETURN OF THE ODYSSEY", 24), 180, 24,
-                            ToRayColor(theme.neon_cyan));
-                DrawHudText(headline, CenteredTextX(headline, 32), 226, 32, ToRayColor(theme.text));
-                std::snprintf(line, sizeof(line), "%s   %s",
-                              SanitizeAscii(demo.login_note.c_str(), ascii_a, sizeof(ascii_a)),
-                              SanitizeAscii(demo.match_note.c_str(), ascii_b, sizeof(ascii_b)));
-                DrawHudText(line, CenteredTextX(line, 18), 274, 18, ToRayColor(theme.text_dim));
-                if (demo.room_id != 0) {
-                    std::snprintf(line, sizeof(line), "room %llu   player %llu",
-                                  static_cast<unsigned long long>(demo.room_id),
-                                  static_cast<unsigned long long>(demo.player_id));
-                    DrawHudText(line, CenteredTextX(line, 18), 298, 18, ToRayColor(theme.text_dim));
-                }
-                DrawHudText("ESC quits   R retries", CenteredTextX("ESC quits   R retries", 18), 340, 18,
-                            ToRayColor(theme.text_dim));
-            }
-
-            if (!demo.banner.empty()) {
-                const char* banner = SanitizeAscii(demo.banner.c_str(), ascii_c, sizeof(ascii_c));
-                DrawHudText(banner, CenteredTextX(banner, 28), 64, 28, ToRayColor(theme.neon_magenta));
-            }
-
-            if (reward_view.State() != RewardState::kNone) {
-                // Treasure chest panel: options come from the server; display text
-                // comes from the local static table (ids travel on the wire). P2 replaces
-                // this with the ImGui card tray.
-                DrawRectangle(20, 452, 920, 72, Fade(ToRayColor(theme.panel), 0.92f));
-                DrawRectangleLines(20, 452, 920, 72, ToRayColor(theme.panel_edge));
-                std::snprintf(line, sizeof(line), "REWARD - %s   (keys 1-3 choose)",
-                              SanitizeAscii(reward_view.Note().c_str(), ascii_a, sizeof(ascii_a)));
-                DrawHudText(line, 30, 456, 20, ToRayColor(theme.neon_yellow));
-                // The option row is appended in place: up to three entries with names,
-                // slots and descriptions must not build a std::string per frame.
-                char row[512] = {0};
-                std::size_t used = 0;
-                const auto& options = reward_view.Options();
-                for (std::size_t i = 0; i < options.size(); ++i) {
-                    const int written = std::snprintf(
-                        row + used, sizeof(row) - used, "[%zu] %s (%s) %s   ", i + 1,
-                        SanitizeAscii(options[i].display.name.c_str(), ascii_b, sizeof(ascii_b)),
-                        SanitizeAscii(options[i].display.slot.c_str(), ascii_c, sizeof(ascii_c)),
-                        SanitizeAscii(options[i].display.description.c_str(), ascii_a, sizeof(ascii_a)));
-                    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(row) - used) {
-                        break;  // truncated: keep what fits rather than overflowing
+            // Everything below is the UI layer and only the UI layer: with --no-ui the
+            // world above keeps rendering and every gameplay/network path keeps running,
+            // which is what makes the UI-on/off frame-time comparison meaningful.
+            if (ui_enabled) {
+                if (hud_phase == HudPhase::kOffline) {
+                    // Dim the world so the banner reads as an interruption. Kept light:
+                    // the ground is already near-black, and a heavy dim measured out to a
+                    // featureless #050507 across the whole play area.
+                    DrawRectangle(0, 0, kScreenWidth, kScreenHeight, Fade(BLACK, 0.20f));
+                    // Name the actual state: on a first launch nothing was lost, so
+                    // "LINK LOST" would be misleading. The endpoint is included because a
+                    // failed connect is the most common playtest symptom.
+                    char endpoint_text[96] = {0};
+                    std::snprintf(endpoint_text, sizeof(endpoint_text), "%s:%u", endpoint.host.c_str(),
+                                  static_cast<unsigned>(endpoint.port));
+                    if (recovery.Active()) {
+                        std::snprintf(line, sizeof(line), "LINK LOST  -  %s  (%s)",
+                                      SanitizeAscii(recovery.Note().c_str(), ascii_a, sizeof(ascii_a)),
+                                      endpoint_text);
+                    } else if (demo.state == ConnectionState::kFailed) {
+                        std::snprintf(line, sizeof(line), "CONNECTION FAILED  -  %s", endpoint_text);
+                    } else if (demo.state == ConnectionState::kConnecting) {
+                        std::snprintf(line, sizeof(line), "CONNECTING  -  %s", endpoint_text);
+                    } else {
+                        std::snprintf(line, sizeof(line), "NOT CONNECTED  -  %s", endpoint_text);
                     }
-                    used += static_cast<std::size_t>(written);
-                }
-                DrawHudText(row, 30, 486, 18, ToRayColor(theme.text));
-            }
-
-            if (in_stage) {
-                // ---- Player health: segmented energy blocks (P1b-2) --------------
-                constexpr float kBarX = 24.0f;
-                constexpr float kBarY = 466.0f;
-                constexpr float kBarW = 320.0f;
-                constexpr float kBarH = 22.0f;
-                constexpr float kBarGap = 4.0f;
-                constexpr int kBarSegments = 8;
-                const HealthSegments health =
-                    ComputeHealthSegments(demo.self_hp, demo.self_max_hp, kBarSegments);
-                const float segment_w = SegmentWidth(kBarW, health.segments, kBarGap);
-                if (segment_w > 0.0f) {
-                    const auto segment_x = [&](int index) {
-                        return kBarX + static_cast<float>(index) * (segment_w + kBarGap);
-                    };
-                    // Empty sockets first.
-                    for (int i = 0; i < health.segments; ++i) {
-                        DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
-                                      static_cast<int>(segment_w), static_cast<int>(kBarH),
-                                      ToRayColor(theme.bar_empty));
+                    DrawRectangle(0, 12, kScreenWidth, 34, Fade(ToRayColor(theme.neon_red), 0.45f));
+                    DrawRectangleLines(0, 12, kScreenWidth, 34, ToRayColor(theme.neon_red));
+                    DrawHudText(line, CenteredTextX(line, 20), 18, 20, ToRayColor(theme.text));
+                    if (recovery.Phase() == RecoveryPhase::kExhausted ||
+                        recovery.Phase() == RecoveryPhase::kFailed) {
+                        DrawHudText("press R to reconnect", CenteredTextX("press R to reconnect", 18), 54,
+                                    18, ToRayColor(theme.text_warn));
                     }
-                    // White damage ghost: the level the bar was at before the hit,
-                    // shaken by a deterministic decaying offset. Screen shake can be
-                    // disabled from the accessibility settings.
-                    if (damage_ghost.active) {
-                        const float amplitude = accessibility.disable_screen_shake ? 0.0f : 3.0f;
-                        const float shake = DamageShakeOffset(damage_ghost, amplitude);
-                        const float ghost_blocks = damage_ghost.shown_fraction * kBarSegments;
+                } else if (in_stage) {
+                    // Objective, top centre: stage number and hostiles still standing.
+                    std::snprintf(line, sizeof(line), "STAGE %02u   HOSTILES %u", demo.stage_index,
+                                  demo.monsters_remaining);
+                    DrawHudText(line, CenteredTextX(line, 20), 24, 20, ToRayColor(theme.text));
+
+                    if (hud_phase == HudPhase::kTransition) {
+                        // Clear / preparing / failed / closed: one centred card, no HUD.
+                        const char* transition = TransitionLabel(demo.stage_state);
+                        const float width = MeasureHudText(transition, 28).x;
+                        const float card_x = (kScreenWidth - width) * 0.5f;
+                        DrawRectangle(static_cast<int>(card_x) - 28, 236,
+                                      static_cast<int>(width) + 56, 60,
+                                      Fade(ToRayColor(theme.panel), 0.92f));
+                        DrawRectangleLines(static_cast<int>(card_x) - 28, 236,
+                                           static_cast<int>(width) + 56, 60,
+                                           ToRayColor(theme.panel_edge));
+                        DrawHudText(transition, card_x, 252, 28, ToRayColor(theme.neon_magenta));
+                    }
+                } else if (hud_phase == HudPhase::kLobby) {
+                    // Lobby card: the identity line only belongs on this screen.
+                    const char* headline = !demo.login_ok ? "LOGGING IN"
+                                           : (!demo.in_room ? "MATCHMAKING" : "WAITING FOR STAGE");
+                    DrawHudText("THE RETURN OF THE ODYSSEY",
+                                CenteredTextX("THE RETURN OF THE ODYSSEY", 24), 180, 24,
+                                ToRayColor(theme.neon_cyan));
+                    DrawHudText(headline, CenteredTextX(headline, 32), 226, 32, ToRayColor(theme.text));
+                    std::snprintf(line, sizeof(line), "%s   %s",
+                                  SanitizeAscii(demo.login_note.c_str(), ascii_a, sizeof(ascii_a)),
+                                  SanitizeAscii(demo.match_note.c_str(), ascii_b, sizeof(ascii_b)));
+                    DrawHudText(line, CenteredTextX(line, 18), 274, 18, ToRayColor(theme.text_dim));
+                    if (demo.room_id != 0) {
+                        std::snprintf(line, sizeof(line), "room %llu   player %llu",
+                                      static_cast<unsigned long long>(demo.room_id),
+                                      static_cast<unsigned long long>(demo.player_id));
+                        DrawHudText(line, CenteredTextX(line, 18), 298, 18, ToRayColor(theme.text_dim));
+                    }
+                    DrawHudText("ESC quits   R retries", CenteredTextX("ESC quits   R retries", 18), 340, 18,
+                                ToRayColor(theme.text_dim));
+                }
+
+                if (!demo.banner.empty()) {
+                    const char* banner = SanitizeAscii(demo.banner.c_str(), ascii_c, sizeof(ascii_c));
+                    DrawHudText(banner, CenteredTextX(banner, 28), 64, 28, ToRayColor(theme.neon_magenta));
+                }
+
+                if (reward_view.State() != RewardState::kNone) {
+                    // Treasure chest panel: options come from the server; display text
+                    // comes from the local static table (ids travel on the wire). P2 replaces
+                    // this with the ImGui card tray.
+                    DrawRectangle(20, 452, 920, 72, Fade(ToRayColor(theme.panel), 0.92f));
+                    DrawRectangleLines(20, 452, 920, 72, ToRayColor(theme.panel_edge));
+                    std::snprintf(line, sizeof(line), "REWARD - %s   (keys 1-3 choose)",
+                                  SanitizeAscii(reward_view.Note().c_str(), ascii_a, sizeof(ascii_a)));
+                    DrawHudText(line, 30, 456, 20, ToRayColor(theme.neon_yellow));
+                    // The option row is appended in place: up to three entries with names,
+                    // slots and descriptions must not build a std::string per frame.
+                    char row[512] = {0};
+                    std::size_t used = 0;
+                    const auto& options = reward_view.Options();
+                    for (std::size_t i = 0; i < options.size(); ++i) {
+                        const int written = std::snprintf(
+                            row + used, sizeof(row) - used, "[%zu] %s (%s) %s   ", i + 1,
+                            SanitizeAscii(options[i].display.name.c_str(), ascii_b, sizeof(ascii_b)),
+                            SanitizeAscii(options[i].display.slot.c_str(), ascii_c, sizeof(ascii_c)),
+                            SanitizeAscii(options[i].display.description.c_str(), ascii_a, sizeof(ascii_a)));
+                        if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(row) - used) {
+                            break;  // truncated: keep what fits rather than overflowing
+                        }
+                        used += static_cast<std::size_t>(written);
+                    }
+                    DrawHudText(row, 30, 486, 18, ToRayColor(theme.text));
+                }
+
+                if (in_stage) {
+                    // ---- Player health: segmented energy blocks (P1b-2) --------------
+                    constexpr float kBarX = 24.0f;
+                    constexpr float kBarY = 466.0f;
+                    constexpr float kBarW = 320.0f;
+                    constexpr float kBarH = 22.0f;
+                    constexpr float kBarGap = 4.0f;
+                    constexpr int kBarSegments = 8;
+                    const HealthSegments health =
+                        ComputeHealthSegments(demo.self_hp, demo.self_max_hp, kBarSegments);
+                    const float segment_w = SegmentWidth(kBarW, health.segments, kBarGap);
+                    if (segment_w > 0.0f) {
+                        const auto segment_x = [&](int index) {
+                            return kBarX + static_cast<float>(index) * (segment_w + kBarGap);
+                        };
+                        // Empty sockets first.
                         for (int i = 0; i < health.segments; ++i) {
-                            const float coverage =
-                                std::clamp(ghost_blocks - static_cast<float>(i), 0.0f, 1.0f);
-                            if (coverage <= 0.0f) {
-                                break;
+                            DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
+                                          static_cast<int>(segment_w), static_cast<int>(kBarH),
+                                          ToRayColor(theme.bar_empty));
+                        }
+                        // White damage ghost: the level the bar was at before the hit,
+                        // shaken by a deterministic decaying offset. Screen shake can be
+                        // disabled from the accessibility settings.
+                        if (damage_ghost.active) {
+                            const float amplitude = accessibility.disable_screen_shake ? 0.0f : 3.0f;
+                            const float shake = DamageShakeOffset(damage_ghost, amplitude);
+                            const float ghost_blocks = damage_ghost.shown_fraction * kBarSegments;
+                            for (int i = 0; i < health.segments; ++i) {
+                                const float coverage =
+                                    std::clamp(ghost_blocks - static_cast<float>(i), 0.0f, 1.0f);
+                                if (coverage <= 0.0f) {
+                                    break;
+                                }
+                                DrawRectangle(static_cast<int>(segment_x(i) + shake),
+                                              static_cast<int>(kBarY),
+                                              static_cast<int>(segment_w * coverage),
+                                              static_cast<int>(kBarH),
+                                              ToRayColor(theme.bar_damage));
                             }
-                            DrawRectangle(static_cast<int>(segment_x(i) + shake),
+                        }
+                        // Current health on top, so the ghost only shows what was lost.
+                        for (int i = 0; i < health.filled; ++i) {
+                            DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
+                                          static_cast<int>(segment_w), static_cast<int>(kBarH),
+                                          ToRayColor(theme.bar_fill));
+                        }
+                        if (health.partial > 0.0f && health.filled < health.segments) {
+                            DrawRectangle(static_cast<int>(segment_x(health.filled)),
                                           static_cast<int>(kBarY),
-                                          static_cast<int>(segment_w * coverage),
-                                          static_cast<int>(kBarH),
-                                          ToRayColor(theme.bar_damage));
+                                          static_cast<int>(segment_w * health.partial),
+                                          static_cast<int>(kBarH), ToRayColor(theme.bar_fill));
                         }
                     }
-                    // Current health on top, so the ghost only shows what was lost.
-                    for (int i = 0; i < health.filled; ++i) {
-                        DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
-                                      static_cast<int>(segment_w), static_cast<int>(kBarH),
-                                      ToRayColor(theme.bar_fill));
-                    }
-                    if (health.partial > 0.0f && health.filled < health.segments) {
-                        DrawRectangle(static_cast<int>(segment_x(health.filled)),
-                                      static_cast<int>(kBarY),
-                                      static_cast<int>(segment_w * health.partial),
-                                      static_cast<int>(kBarH), ToRayColor(theme.bar_fill));
-                    }
-                }
-                std::snprintf(line, sizeof(line), "HP %d/%d", static_cast<int>(demo.self_hp),
-                              static_cast<int>(demo.self_max_hp));
-                DrawHudText(line, kBarX + kBarW + 16.0f, kBarY + 2.0f, 18,
-                            demo.self_alive ? ToRayColor(theme.text)
-                                            : ToRayColor(theme.text_danger));
+                    std::snprintf(line, sizeof(line), "HP %d/%d", static_cast<int>(demo.self_hp),
+                                  static_cast<int>(demo.self_max_hp));
+                    DrawHudText(line, kBarX + kBarW + 16.0f, kBarY + 2.0f, 18,
+                                demo.self_alive ? ToRayColor(theme.text)
+                                                : ToRayColor(theme.text_danger));
 
-                // ---- Pixel hexagon crosshair, anchored to the mouse in RT space --
-                const Vector2 mouse = GetMousePosition();
-                const Vec2f mouse_window{mouse.x, mouse.y};
-                const Vec2f crosshair = WindowToRT(mouse_window, layout);
-                float hexagon[kCrosshairPoints * 2] = {0};
-                const float spin = accessibility.disable_glitch_fx
-                                       ? 0.0f
-                                       : now_seconds * 0.6f;  // glitch: slow rotation
-                if (HexagonCrosshair(crosshair.x, crosshair.y, 7.0f, spin, hexagon,
-                                     kCrosshairPoints * 2) == kCrosshairPoints * 2) {
-                    Color crosshair_colour = ToRayColor(theme.neon_cyan);
-                    if (!IsInsideTarget(mouse_window, layout)) {
-                        // Pointer is in a letterbox bar: keep the last aim direction
-                        // but show that it is outside the play area.
-                        crosshair_colour.a = 90;
+                    // ---- Pixel hexagon crosshair, anchored to the mouse in RT space --
+                    const Vector2 mouse = GetMousePosition();
+                    const Vec2f mouse_window{mouse.x, mouse.y};
+                    const Vec2f crosshair = WindowToRT(mouse_window, layout);
+                    float hexagon[kCrosshairPoints * 2] = {0};
+                    const float spin = accessibility.disable_glitch_fx
+                                           ? 0.0f
+                                           : now_seconds * 0.6f;  // glitch: slow rotation
+                    if (HexagonCrosshair(crosshair.x, crosshair.y, 7.0f, spin, hexagon,
+                                         kCrosshairPoints * 2) == kCrosshairPoints * 2) {
+                        Color crosshair_colour = ToRayColor(theme.neon_cyan);
+                        if (!IsInsideTarget(mouse_window, layout)) {
+                            // Pointer is in a letterbox bar: keep the last aim direction
+                            // but show that it is outside the play area.
+                            crosshair_colour.a = 90;
+                        }
+                        for (int i = 0; i < kCrosshairPoints; ++i) {
+                            const int next = (i + 1) % kCrosshairPoints;
+                            DrawLineV(Vector2{hexagon[i * 2], hexagon[i * 2 + 1]},
+                                      Vector2{hexagon[next * 2], hexagon[next * 2 + 1]},
+                                      crosshair_colour);
+                        }
+                        DrawCircleV(Vector2{crosshair.x, crosshair.y}, 1.5f, crosshair_colour);
                     }
-                    for (int i = 0; i < kCrosshairPoints; ++i) {
-                        const int next = (i + 1) % kCrosshairPoints;
-                        DrawLineV(Vector2{hexagon[i * 2], hexagon[i * 2 + 1]},
-                                  Vector2{hexagon[next * 2], hexagon[next * 2 + 1]},
-                                  crosshair_colour);
-                    }
-                    DrawCircleV(Vector2{crosshair.x, crosshair.y}, 1.5f, crosshair_colour);
-                }
 
-                // ---- Damage floaters on top of the world -------------------------
-                for (std::size_t i = 0; i < FloaterPool::kCapacity; ++i) {
-                    Floater floater;
-                    if (!floater_pool.At(i, floater)) {
-                        continue;
+                    // ---- Damage floaters on top of the world -------------------------
+                    for (std::size_t i = 0; i < FloaterPool::kCapacity; ++i) {
+                        Floater floater;
+                        if (!floater_pool.At(i, floater)) {
+                            continue;
+                        }
+                        const float progress =
+                            floater.lifetime > 0.0f
+                                ? std::clamp((now_seconds - floater.born_seconds) / floater.lifetime,
+                                             0.0f, 1.0f)
+                                : 1.0f;
+                        const Vector2 at = to_screen(floater.world_x, floater.world_z);
+                        std::snprintf(line, sizeof(line), "-%d", static_cast<int>(floater.value));
+                        DrawHudText(line, at.x - 8.0f, at.y - 20.0f - progress * 18.0f, 16,
+                                    Fade(ToRayColor(theme.neon_yellow), 1.0f - progress));
                     }
-                    const float progress =
-                        floater.lifetime > 0.0f
-                            ? std::clamp((now_seconds - floater.born_seconds) / floater.lifetime,
-                                         0.0f, 1.0f)
-                            : 1.0f;
-                    const Vector2 at = to_screen(floater.world_x, floater.world_z);
-                    std::snprintf(line, sizeof(line), "-%d", static_cast<int>(floater.value));
-                    DrawHudText(line, at.x - 8.0f, at.y - 20.0f - progress * 18.0f, 16,
-                                Fade(ToRayColor(theme.neon_yellow), 1.0f - progress));
-                }
 
-                // ---- Hit direction: an arc around the player towards the source --
-                if (hit_marker.active) {
-                    float self_x = 0.0f;
-                    float self_z = 0.0f;
-                    bool have_self = false;
-                    if (predictor.HasPrediction()) {
-                        self_x = predictor.X();
-                        self_z = predictor.Z();
-                        have_self = true;
-                    } else if (const auto* self = game_view.Find(demo.player_id)) {
-                        self_x = self->x;
-                        self_z = self->z;
-                        have_self = true;
+                    // ---- Hit direction: an arc around the player towards the source --
+                    if (hit_marker.active) {
+                        float self_x = 0.0f;
+                        float self_z = 0.0f;
+                        bool have_self = false;
+                        if (predictor.HasPrediction()) {
+                            self_x = predictor.X();
+                            self_z = predictor.Z();
+                            have_self = true;
+                        } else if (const auto* self = game_view.Find(demo.player_id)) {
+                            self_x = self->x;
+                            self_z = self->z;
+                            have_self = true;
+                        }
+                        if (have_self) {
+                            const Vector2 centre = to_screen(self_x, self_z);
+                            const float angle = std::atan2(hit_marker.dir_z, hit_marker.dir_x);
+                            const float fade = HitMarkerFade(hit_marker, now_seconds);
+                            DrawRing(centre, 40.0f, 46.0f, (angle - 0.35f) * RAD2DEG,
+                                     (angle + 0.35f) * RAD2DEG, 16,
+                                     Fade(ToRayColor(theme.neon_red), 0.9f * fade));
+                        }
                     }
-                    if (have_self) {
-                        const Vector2 centre = to_screen(self_x, self_z);
-                        const float angle = std::atan2(hit_marker.dir_z, hit_marker.dir_x);
-                        const float fade = HitMarkerFade(hit_marker, now_seconds);
-                        DrawRing(centre, 40.0f, 46.0f, (angle - 0.35f) * RAD2DEG,
-                                 (angle + 0.35f) * RAD2DEG, 16,
-                                 Fade(ToRayColor(theme.neon_red), 0.9f * fade));
-                    }
-                }
 
-                // ---- Control hint: fades out a few seconds into play -------------
-                if (hint_shown_at < 0.0) {
-                    hint_shown_at = GetTime();
+                    // ---- Control hint: fades out a few seconds into play -------------
+                    if (hint_shown_at < 0.0) {
+                        hint_shown_at = GetTime();
+                    }
+                    const float hint_age = now_seconds - static_cast<float>(hint_shown_at);
+                    const float hint_alpha = std::clamp(1.0f - (hint_age - 5.0f), 0.0f, 1.0f);
+                    if (hint_alpha > 0.01f) {
+                        const char* hint = "WASD move   mouse aim   SPACE shoot   ENTER ready";
+                        DrawHudText(hint, CenteredTextX(hint, 18), 508, 18,
+                                    Fade(ToRayColor(theme.text_dim), hint_alpha));
+                    }
                 }
-                const float hint_age = now_seconds - static_cast<float>(hint_shown_at);
-                const float hint_alpha = std::clamp(1.0f - (hint_age - 5.0f), 0.0f, 1.0f);
-                if (hint_alpha > 0.01f) {
-                    const char* hint = "WASD move   mouse aim   SPACE shoot   ENTER ready";
-                    DrawHudText(hint, CenteredTextX(hint, 18), 508, 18,
-                                Fade(ToRayColor(theme.text_dim), hint_alpha));
-                }
-            }
+            }  // end UI layer
         }  // end game view
 
         // ---- F3: accessibility menu (P3) -----------------------------------------
         // Drawn inside the render target so it scales with everything else. Raylib for
         // now; the same state feeds the ImGui menu once that layer lands.
-        if (accessibility_menu) {
+        if (ui_enabled && accessibility_menu) {
             constexpr float kMenuW = 520.0f;
             constexpr float kMenuH = 210.0f;
             const float menu_x = (kScreenWidth - kMenuW) * 0.5f;

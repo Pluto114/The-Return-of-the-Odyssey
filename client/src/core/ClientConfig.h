@@ -27,6 +27,9 @@ inline constexpr std::uint16_t kDefaultServerPort = 7777;
 
 inline constexpr const char* kServerHostEnvVar = "ODYSSEY_SERVER_HOST";
 inline constexpr const char* kServerPortEnvVar = "ODYSSEY_SERVER_PORT";
+// Deterministic UI skip used by the performance acceptance run (plan P3): the world
+// and the whole network/game path keep running, only the UI layer is dropped.
+inline constexpr const char* kUiOffEnvVar = "ODYSSEY_UI_OFF";
 
 // The host name limit is the DNS maximum; hosts longer than this cannot
 // resolve, so they are rejected at parse time rather than at connect time.
@@ -58,12 +61,17 @@ inline const char* ToString(EndpointSource source) {
 struct EndpointEnv {
     const char* host = nullptr;
     const char* port = nullptr;
+    const char* ui_off = nullptr;  // ODYSSEY_UI_OFF: 1/true/yes/on disables the UI
 };
 
 struct ClientOptions {
     ClientEndpoint endpoint;
     EndpointSource source = EndpointSource::kDefault;
     bool help_requested = false;
+    // False when --no-ui / ODYSSEY_UI_OFF=1 was given: the render loop still draws the
+    // world but skips the HUD, the panels and (once it exists) the ImGui layer, which
+    // is what makes the UI-on/UI-off frame-time comparison reproducible.
+    bool ui_enabled = true;
 };
 
 struct ConfigParseResult {
@@ -83,15 +91,17 @@ inline const char* ClientUsageText() {
         "  --host <addr>        gameserver host (default 127.0.0.1)\n"
         "  --port <n>           gameserver TCP port, 1..65535 (default 7777)\n"
         "  --server <h[:port]>  set --host and --port in one argument\n"
+        "  --no-ui              skip the HUD/panels (performance measurement mode)\n"
         "  --help, -h           print this message and exit\n"
         "\n"
         "Environment (overridden by the options above):\n"
-        "  ODYSSEY_SERVER_HOST, ODYSSEY_SERVER_PORT\n"
+        "  ODYSSEY_SERVER_HOST, ODYSSEY_SERVER_PORT, ODYSSEY_UI_OFF\n"
         "\n"
         "Examples:\n"
         "  odyssey_client                             connect to 127.0.0.1:7777\n"
         "  odyssey_client --server 192.168.1.20:7777  connect to a LAN host\n"
-        "  odyssey_client --host localhost --port 9000\n";
+        "  odyssey_client --host localhost --port 9000\n"
+        "  odyssey_client --no-ui                     same scene, UI layer skipped\n";
 }
 
 namespace detail {
@@ -158,6 +168,19 @@ inline bool IsAllDigits(std::string_view text) {
         }
     }
     return true;
+}
+
+// On/off values accepted for boolean environment switches (ODYSSEY_UI_OFF).
+inline bool ParseSwitch(std::string_view text, bool& out) {
+    if (text == "1" || text == "true" || text == "yes" || text == "on") {
+        out = true;
+        return true;
+    }
+    if (text == "0" || text == "false" || text == "no" || text == "off") {
+        out = false;
+        return true;
+    }
+    return false;
 }
 
 inline std::string UnknownOption(const std::string& option) {
@@ -282,6 +305,17 @@ inline ConfigParseResult ParseClientOptions(int argc,
             continue;
         }
 
+        if (name == "--no-ui") {
+            // Pure flag: --no-ui=1 is a mistake, not a value to guess at.
+            if (has_inline_value) {
+                result.ok = false;
+                result.error = detail::UnknownOption(arg);
+                return result;
+            }
+            result.options.ui_enabled = false;
+            continue;
+        }
+
         if (name != "--host" && name != "--port" && name != "--server") {
             result.ok = false;
             result.error = detail::UnknownOption(arg);
@@ -398,6 +432,22 @@ inline ConfigParseResult ParseClientOptions(int argc,
         result.options.source = EndpointSource::kDefault;
     }
 
+    // UI switch: the environment can only add to what the command line asked for
+    // (--no-ui always wins), and a malformed value is reported instead of ignored.
+    if (env.ui_off != nullptr && env.ui_off[0] != '\0') {
+        bool ui_off = false;
+        if (!detail::ParseSwitch(env.ui_off, ui_off)) {
+            result.ok = false;
+            result.error = std::string("invalid ") + kUiOffEnvVar +
+                           ": expected 1/0 (true/false, yes/no, on/off), got '" +
+                           std::string(env.ui_off) + "'";
+            return result;
+        }
+        if (ui_off) {
+            result.options.ui_enabled = false;
+        }
+    }
+
     return result;
 }
 
@@ -417,7 +467,8 @@ inline const char* ReadEnv(const char* name) {
 
 // Command line plus the process environment.
 inline ConfigParseResult ParseClientOptions(int argc, const char* const* argv) {
-    const EndpointEnv env{ReadEnv(kServerHostEnvVar), ReadEnv(kServerPortEnvVar)};
+    const EndpointEnv env{ReadEnv(kServerHostEnvVar), ReadEnv(kServerPortEnvVar),
+                          ReadEnv(kUiOffEnvVar)};
     return ParseClientOptions(argc, argv, env);
 }
 

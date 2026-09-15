@@ -62,6 +62,21 @@ public:
         return thread_started_ && !stopping_.load();
     }
 
+    // Published outbound queue depth for the debug overlay. The queue itself is
+    // io-thread only, so the Main Thread reads these atomics instead.
+    std::size_t OutboundDepthPublished() const {
+        return outbound_depth_.load(std::memory_order_relaxed);
+    }
+
+    std::size_t OutboundPeakPublished() const {
+        return outbound_peak_.load(std::memory_order_relaxed);
+    }
+
+    void ResetOutboundPeak() {
+        outbound_peak_.store(outbound_depth_.load(std::memory_order_relaxed),
+                             std::memory_order_relaxed);
+    }
+
     // Initiates a connection attempt. No-op while connecting/connected/stopped.
     void Connect(std::string host, std::uint16_t port) {
         if (stopping_.load() || !on_event_) {
@@ -218,7 +233,19 @@ private:
             Emit(std::move(dropped));
         }
         write_queue_.push_back(std::move(bytes));
+        PublishOutboundDepth();
         PumpWrites();
+    }
+
+    // Queue depth for the debug overlay: this runs on the io thread while the Main
+    // Thread reads, so the values are published through atomics rather than exposing
+    // the queue itself.
+    void PublishOutboundDepth() {
+        const std::size_t depth = write_queue_.size();
+        outbound_depth_.store(depth, std::memory_order_relaxed);
+        if (depth > outbound_peak_.load(std::memory_order_relaxed)) {
+            outbound_peak_.store(depth, std::memory_order_relaxed);
+        }
     }
 
     void PumpWrites() {
@@ -227,6 +254,7 @@ private:
         }
         write_buffer_ = std::move(write_queue_.front());
         write_queue_.pop_front();
+        PublishOutboundDepth();
         write_in_flight_ = true;
         const auto self = shared_from_this();
         asio::async_write(socket_, asio::buffer(write_buffer_),
@@ -278,6 +306,10 @@ private:
     std::vector<std::uint8_t> write_buffer_;             // io-thread only
     bool write_in_flight_ = false;                       // io-thread only
     const std::size_t outbound_capacity_;
+    // Published to the Main Thread for the debug overlay (plan: instant + peak queue
+    // depth for both directions).
+    std::atomic<std::size_t> outbound_depth_{0};
+    std::atomic<std::size_t> outbound_peak_{0};
 };
 
 const char* ToString(ConnectionState state) {
@@ -310,6 +342,18 @@ void NetClient::Connect(std::string host, std::uint16_t port) {
 
 bool NetClient::IsRunning() const {
     return impl_->IsRunning();
+}
+
+std::size_t NetClient::OutboundDepth() const {
+    return impl_->OutboundDepthPublished();
+}
+
+std::size_t NetClient::OutboundMaxDepth() const {
+    return impl_->OutboundPeakPublished();
+}
+
+void NetClient::ResetOutboundMaxDepth() {
+    impl_->ResetOutboundPeak();
 }
 
 void NetClient::SendFrame(std::uint16_t message_type, std::uint32_t sequence,
