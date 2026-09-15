@@ -58,6 +58,7 @@ ctest --test-dir build\client-windows -C Debug -R odyssey_config_tests --output-
 | **Ready 屏障的端到端验收**：`MSG_NEXT_STAGE_REQUEST` 全仓只在 `server/internal/session/session.go` 的合法性表中出现，**没有 handler 消费**；`PreparingNextStage` 由服务器在奖励轮次 `Complete()` 后自行推进 | 需 A 接线；C 侧发送时机（C-a）已按 A5 收敛 |
 | 双客户端同房战斗、清场/团灭、奖励与三关循环的**真实端到端**验收（W01/W03/W05–W09） | 需服务器 D4–D9 路由（A）与平台（D）；C 配合联调 |
 | 难度/全局 Modifier/Director 决策摘要显示 | 需协议先补字段（A/B） |
+| P1b-2 战斗 HUD（Katana Zero 重构） | ✅ 已实现代码侧：左下 **8 段能量血条** + 白色 Damaged Shake 残影（残影持旧值→追赶，抖动为确定性函数）；**像素六边形准星**（RT 锚定、慢速自转属 glitch、指针落黑边变淡）；**受击方向弧**（`kDamageEvent` 目标为自己时按来源实体位置定方向）；**伤害飘字**（去重键 `(server_tick, source, target)` → 128 槽池 → `WorldToRT` 投影，受 `disable_damage_floaters` 控制）；**操作提示 6s 淡出**（每次进入 play 重新计时）。跨会话断开时清空去重表/飘字池/受击标记/血条残影。接线点：`OnHealthFraction` 在快照自我 HP 更新前喂残影；logic 套件仍 589 checks / 0 failures；渲染块内无 `std::string`/`std::vector` 构造。**待本地构建目视** |
 | 装备显示表同源（D1/D7） | ✅ 已合并到 D 的方案：`data/equipment/catalog.json` 为唯一手写源，**CMake 配置期**校验 `version == 1` 并生成 `equipment.tsv`，post-build 复制到 `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv`；客户端经资源根解析加载（exe 目录回退）。本次已删除 C 先前的 CSV 生成脚本与 `client/assets/data/equipment.csv`（避免两套并行方案），并把 `EquipmentDisplay::stats` 统一为 `description`、解析器改为 TSV（字段数必须为 4，否则跳过）。logic 套件实测 **589 checks / 0 failures** |
 | 100 Bot / Grafana / MySQL 等 | D |
 | 干净 clone 发布演练（W15）中客户端部分的记录归档 | C（D10 执行时补） |

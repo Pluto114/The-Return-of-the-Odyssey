@@ -154,13 +154,13 @@ P3 在此之上新增：RTT EMA(α=0.1)、Server Tick 频率（Δ server_tick/Δ
 5. ✅ 断线态：世界压暗 45% + 顶部红色横幅（含重连说明与 `press R to reconnect`）
 6. ✅ 竞技场几何改为 `480×480 @ (240,30)` 居中放大
 
-**P1b-2（待做）**
+**P1b-2（已完成）**
 
-7. 左下分段能量血条（`HealthBar.h`）+ 白色 Damaged Shake 残影（`HudMath.h::DamageGhost`）
-8. 世界锚定像素准星（`HexagonCrosshair`）
-9. 受击方向弧（`HudMath.h::HitMarker`，来源位置取 `CombatView::FindMonster` / `GameView::Find`）
-10. 伤害飘字上屏（`DamageDedupeTable` → `FloaterPool` → `WorldToRT`），受 `disable_damage_floaters` 控制
-11. 操作提示 6s 后淡出（现在为常显）
+7. ✅ 左下分段能量血条（`HealthBar.h`，8 段）+ 白色 Damaged Shake 残影（`HudMath.h::DamageGhost`，抖动幅度受 `disable_screen_shake` 控制）
+8. ✅ 世界锚定像素准星（`HexagonCrosshair`；慢速自转属 glitch 效果，受 `disable_glitch_fx` 控制；指针落黑边时变淡）
+9. ✅ 受击方向弧（`HudMath.h::HitMarker`，来源位置取 `CombatView::FindMonster` / `GameView::Find`）
+10. ✅ 伤害飘字上屏（`DamageDedupeTable` → `FloaterPool` → `WorldToRT`），受 `disable_damage_floaters` 控制；跨会话断开时清空去重表与飘字池
+11. ✅ 操作提示 6s 后淡出（每次进入 play 重新计时）
 
 **验收**：`ctest` 5/5 与 logic 套件全绿；P1b 结束后按提示词 §四.3 每期回归门禁执行；无操作时屏幕只剩游戏 HUD。
 

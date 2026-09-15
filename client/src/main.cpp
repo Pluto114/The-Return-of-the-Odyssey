@@ -22,6 +22,7 @@
 #include "sync/RewardView.h"
 #include "sync/SessionGate.h"
 #include "ui/AssetPath.h"
+#include "ui/HealthBar.h"
 #include "ui/HudMath.h"
 #include "ui/PixelFont.h"
 #include "ui/Theme.h"
@@ -128,18 +129,36 @@ using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StageStateName;
 using odyssey::client::ui::AccessibilityConfig;
 using odyssey::client::ui::AssetRoot;
+using odyssey::client::ui::ComputeHealthSegments;
 using odyssey::client::ui::ComputeViewportLayout;
+using odyssey::client::ui::DamageGhost;
+using odyssey::client::ui::DamageDedupeTable;
+using odyssey::client::ui::DamageShakeOffset;
 using odyssey::client::ui::DrawHudText;
+using odyssey::client::ui::Floater;
+using odyssey::client::ui::FloaterKey;
+using odyssey::client::ui::FloaterPool;
 using odyssey::client::ui::GetAssetPath;
+using odyssey::client::ui::HexagonCrosshair;
+using odyssey::client::ui::HealthSegments;
+using odyssey::client::ui::HitMarker;
+using odyssey::client::ui::HitMarkerFade;
+using odyssey::client::ui::IsInsideTarget;
+using odyssey::client::ui::kCrosshairPoints;
 using odyssey::client::ui::kDefaultTheme;
 using odyssey::client::ui::LoadAccessibility;
 using odyssey::client::ui::MeasureHudText;
+using odyssey::client::ui::OnHealthFraction;
 using odyssey::client::ui::ReleaseHudFont;
 using odyssey::client::ui::RTToWorld;
 using odyssey::client::ui::SanitizeAscii;
+using odyssey::client::ui::SegmentWidth;
+using odyssey::client::ui::SetHitDirection;
 using odyssey::client::ui::SettingsFileExists;
 using odyssey::client::ui::SettingsFilePath;
 using odyssey::client::ui::Theme;
+using odyssey::client::ui::UpdateDamageGhost;
+using odyssey::client::ui::UpdateHitMarker;
 using odyssey::client::ui::Vec2f;
 using odyssey::client::ui::ViewportLayout;
 using odyssey::client::ui::WindowToRT;
@@ -273,8 +292,24 @@ float CenteredTextX(const char* text, float size) {
     return (kScreenWidth - MeasureHudText(text, size).x) * 0.5f;
 }
 
-// Short, player-facing label for the transition card (design section 4).
-const char* TransitionLabel(std::uint32_t wire_stage_state) {
+// World position of whatever entity an id refers to: players first, then monsters.
+// Used to anchor damage floaters and to work out where a hit came from.
+bool FindEntityWorld(const GameView& players, const CombatView& monsters, std::uint64_t id,
+                     float& x, float& z) {
+    if (const auto* player = players.Find(id)) {
+        x = player->x;
+        z = player->z;
+        return true;
+    }
+    if (const auto* monster = monsters.FindMonster(id)) {
+        x = monster->x;
+        z = monster->z;
+        return true;
+    }
+    return false;
+}
+
+// Short, player-facing label for the transition card (design section 4).const char* TransitionLabel(std::uint32_t wire_stage_state) {
     using odyssey::client::sync::StageState;
     switch (static_cast<StageState>(wire_stage_state)) {
         case StageState::kStageClear: return "STAGE CLEAR";
@@ -444,6 +479,15 @@ int main(int argc, char** argv) {
     // F1 development overlay (design section 7): every diagnostic line that used to be
     // always on screen. stdout evidence logging is unaffected.
     bool debug_overlay = false;
+    // P1b-2 combat feedback: white ghost of the health bar, the direction the last
+    // hit came from, and the damage floater pool with its hit de-duplication table.
+    DamageGhost damage_ghost;
+    HitMarker hit_marker;
+    FloaterPool floater_pool;
+    DamageDedupeTable damage_dedupe;
+    float last_self_fraction = 1.0f;
+    bool self_fraction_known = false;
+    double hint_shown_at = -1.0;  // control hint fades a few seconds into play
 
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
@@ -673,6 +717,14 @@ int main(int argc, char** argv) {
                         demo.session_snapshots = 0;
                         demo.self_known = false;
                         demo.self_alive = false;
+                        // Cross-session cleanup (UI contract): the dedupe table and the
+                        // floater pool are cleared so a reconnect cannot suppress or
+                        // resurrect hit feedback from the previous session.
+                        floater_pool.Clear();
+                        damage_dedupe.Clear();
+                        hit_marker = HitMarker{};
+                        damage_ghost = DamageGhost{};
+                        self_fraction_known = false;
                         if (had_session) {
                             recovery.OnDisconnect(GetTime());
                             std::printf("main: connection lost -> recovery (%s)\n",
@@ -885,6 +937,17 @@ int main(int argc, char** argv) {
                                 std::fflush(stdout);
                             }
                             if (snap.has_self) {
+                                // Health loss feeds the damaged-bar ghost: it holds the
+                                // pre-hit level briefly so the hit reads (P1b-2).
+                                const float new_fraction =
+                                    snap.self.max_hp > 0.0f ? (snap.self.hp / snap.self.max_hp)
+                                                            : 0.0f;
+                                OnHealthFraction(damage_ghost,
+                                                 self_fraction_known ? last_self_fraction
+                                                                     : new_fraction,
+                                                 new_fraction);
+                                last_self_fraction = new_fraction;
+                                self_fraction_known = true;
                                 demo.self_hp = snap.self.hp;
                                 demo.self_max_hp = snap.self.max_hp;
                                 demo.self_attack = snap.self.attack;
@@ -962,6 +1025,34 @@ int main(int argc, char** argv) {
                                                    std::to_string(damage.target_id) + " amount=" +
                                                    std::to_string(damage.amount) + " hp=" +
                                                    std::to_string(damage.remaining_health);
+                            // Presentation feedback (P1b-2). The de-duplication key is
+                            // (server_tick, source, target): the same source hitting the
+                            // same target in one tick is one hit, so a retransmitted or
+                            // double-reported event cannot spawn a second floater.
+                            const FloaterKey key{damage.server_tick,
+                                                 static_cast<std::uint32_t>(damage.source_id),
+                                                 static_cast<std::uint32_t>(damage.target_id)};
+                            if (damage_dedupe.Accept(key)) {
+                                const float now_seconds = static_cast<float>(GetTime());
+                                float target_x = 0.0f;
+                                float target_z = 0.0f;
+                                if (FindEntityWorld(game_view, combat_view, damage.target_id,
+                                                    target_x, target_z)) {
+                                    floater_pool.Spawn(key, target_x, target_z, damage.amount,
+                                                       now_seconds,
+                                                       !accessibility.disable_damage_floaters);
+                                }
+                                // Hit on us: remember which way it came from.
+                                if (damage.target_id == demo.player_id) {
+                                    float source_x = 0.0f;
+                                    float source_z = 0.0f;
+                                    if (FindEntityWorld(game_view, combat_view, damage.source_id,
+                                                        source_x, source_z)) {
+                                        SetHitDirection(hit_marker, target_x, target_z, source_x,
+                                                        source_z, now_seconds);
+                                    }
+                                }
+                            }
                         }
                     } else if (event->message.message_type == kDeathEvent) {
                         DeathEventData death;
@@ -1422,6 +1513,16 @@ int main(int argc, char** argv) {
             }
 
             // ---- Game HUD (design sections 3-4) ------------------------------------------
+            // Per-frame feedback clocks (P1b-2): the hit marker expires, the damage
+            // ghost drains and retired floaters are recycled. All three are pure state
+            // updates driven by the injected clock, so behaviour is reproducible.
+            const float now_seconds = static_cast<float>(GetTime());
+            UpdateHitMarker(hit_marker, now_seconds);
+            UpdateDamageGhost(damage_ghost, frame_dt);
+            floater_pool.Tick(now_seconds);
+            if (!in_stage) {
+                hint_shown_at = -1.0;  // re-armed for the next time play starts
+            }
             if (hud_phase == HudPhase::kOffline) {
                 // Dim the world so the banner reads as an interruption. Kept light:
                 // the ground is already near-black, and a heavy dim measured out to a
@@ -1508,7 +1609,7 @@ int main(int argc, char** argv) {
                               SanitizeAscii(reward_view.Note().c_str(), ascii_a, sizeof(ascii_a)));
                 DrawHudText(line, 30, 456, 20, ToRayColor(theme.neon_yellow));
                 // The option row is appended in place: up to three entries with names,
-                // slots and stats must not build a std::string per frame.
+                // slots and descriptions must not build a std::string per frame.
                 char row[512] = {0};
                 std::size_t used = 0;
                 const auto& options = reward_view.Options();
@@ -1524,10 +1625,145 @@ int main(int argc, char** argv) {
                     used += static_cast<std::size_t>(written);
                 }
                 DrawHudText(row, 30, 486, 18, ToRayColor(theme.text));
-            } else if (in_stage) {
-                DrawHudText("WASD move   mouse aim   SPACE shoot   ENTER ready",
-                            CenteredTextX("WASD move   mouse aim   SPACE shoot   ENTER ready", 18), 508,
-                            18, ToRayColor(theme.text_dim));
+            }
+
+            if (in_stage) {
+                // ---- Player health: segmented energy blocks (P1b-2) --------------
+                constexpr float kBarX = 24.0f;
+                constexpr float kBarY = 466.0f;
+                constexpr float kBarW = 320.0f;
+                constexpr float kBarH = 22.0f;
+                constexpr float kBarGap = 4.0f;
+                constexpr int kBarSegments = 8;
+                const HealthSegments health =
+                    ComputeHealthSegments(demo.self_hp, demo.self_max_hp, kBarSegments);
+                const float segment_w = SegmentWidth(kBarW, health.segments, kBarGap);
+                if (segment_w > 0.0f) {
+                    const auto segment_x = [&](int index) {
+                        return kBarX + static_cast<float>(index) * (segment_w + kBarGap);
+                    };
+                    // Empty sockets first.
+                    for (int i = 0; i < health.segments; ++i) {
+                        DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
+                                      static_cast<int>(segment_w), static_cast<int>(kBarH),
+                                      ToRayColor(theme.bar_empty));
+                    }
+                    // White damage ghost: the level the bar was at before the hit,
+                    // shaken by a deterministic decaying offset. Screen shake can be
+                    // disabled from the accessibility settings.
+                    if (damage_ghost.active) {
+                        const float amplitude = accessibility.disable_screen_shake ? 0.0f : 3.0f;
+                        const float shake = DamageShakeOffset(damage_ghost, amplitude);
+                        const float ghost_blocks = damage_ghost.shown_fraction * kBarSegments;
+                        for (int i = 0; i < health.segments; ++i) {
+                            const float coverage =
+                                std::clamp(ghost_blocks - static_cast<float>(i), 0.0f, 1.0f);
+                            if (coverage <= 0.0f) {
+                                break;
+                            }
+                            DrawRectangle(static_cast<int>(segment_x(i) + shake),
+                                          static_cast<int>(kBarY),
+                                          static_cast<int>(segment_w * coverage),
+                                          static_cast<int>(kBarH),
+                                          ToRayColor(theme.bar_damage));
+                        }
+                    }
+                    // Current health on top, so the ghost only shows what was lost.
+                    for (int i = 0; i < health.filled; ++i) {
+                        DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
+                                      static_cast<int>(segment_w), static_cast<int>(kBarH),
+                                      ToRayColor(theme.bar_fill));
+                    }
+                    if (health.partial > 0.0f && health.filled < health.segments) {
+                        DrawRectangle(static_cast<int>(segment_x(health.filled)),
+                                      static_cast<int>(kBarY),
+                                      static_cast<int>(segment_w * health.partial),
+                                      static_cast<int>(kBarH), ToRayColor(theme.bar_fill));
+                    }
+                }
+                std::snprintf(line, sizeof(line), "HP %d/%d", static_cast<int>(demo.self_hp),
+                              static_cast<int>(demo.self_max_hp));
+                DrawHudText(line, kBarX + kBarW + 16.0f, kBarY + 2.0f, 18,
+                            demo.self_alive ? ToRayColor(theme.text)
+                                            : ToRayColor(theme.text_danger));
+
+                // ---- Pixel hexagon crosshair, anchored to the mouse in RT space --
+                const Vector2 mouse = GetMousePosition();
+                const Vec2f mouse_window{mouse.x, mouse.y};
+                const Vec2f crosshair = WindowToRT(mouse_window, layout);
+                float hexagon[kCrosshairPoints * 2] = {0};
+                const float spin = accessibility.disable_glitch_fx
+                                       ? 0.0f
+                                       : now_seconds * 0.6f;  // glitch: slow rotation
+                if (HexagonCrosshair(crosshair.x, crosshair.y, 7.0f, spin, hexagon,
+                                     kCrosshairPoints * 2) == kCrosshairPoints * 2) {
+                    Color crosshair_colour = ToRayColor(theme.neon_cyan);
+                    if (!IsInsideTarget(mouse_window, layout)) {
+                        // Pointer is in a letterbox bar: keep the last aim direction
+                        // but show that it is outside the play area.
+                        crosshair_colour.a = 90;
+                    }
+                    for (int i = 0; i < kCrosshairPoints; ++i) {
+                        const int next = (i + 1) % kCrosshairPoints;
+                        DrawLineV(Vector2{hexagon[i * 2], hexagon[i * 2 + 1]},
+                                  Vector2{hexagon[next * 2], hexagon[next * 2 + 1]},
+                                  crosshair_colour);
+                    }
+                    DrawCircleV(Vector2{crosshair.x, crosshair.y}, 1.5f, crosshair_colour);
+                }
+
+                // ---- Damage floaters on top of the world -------------------------
+                for (std::size_t i = 0; i < FloaterPool::kCapacity; ++i) {
+                    Floater floater;
+                    if (!floater_pool.At(i, floater)) {
+                        continue;
+                    }
+                    const float progress =
+                        floater.lifetime > 0.0f
+                            ? std::clamp((now_seconds - floater.born_seconds) / floater.lifetime,
+                                         0.0f, 1.0f)
+                            : 1.0f;
+                    const Vector2 at = to_screen(floater.world_x, floater.world_z);
+                    std::snprintf(line, sizeof(line), "-%d", static_cast<int>(floater.value));
+                    DrawHudText(line, at.x - 8.0f, at.y - 20.0f - progress * 18.0f, 16,
+                                Fade(ToRayColor(theme.neon_yellow), 1.0f - progress));
+                }
+
+                // ---- Hit direction: an arc around the player towards the source --
+                if (hit_marker.active) {
+                    float self_x = 0.0f;
+                    float self_z = 0.0f;
+                    bool have_self = false;
+                    if (predictor.HasPrediction()) {
+                        self_x = predictor.X();
+                        self_z = predictor.Z();
+                        have_self = true;
+                    } else if (const auto* self = game_view.Find(demo.player_id)) {
+                        self_x = self->x;
+                        self_z = self->z;
+                        have_self = true;
+                    }
+                    if (have_self) {
+                        const Vector2 centre = to_screen(self_x, self_z);
+                        const float angle = std::atan2(hit_marker.dir_z, hit_marker.dir_x);
+                        const float fade = HitMarkerFade(hit_marker, now_seconds);
+                        DrawRing(centre, 40.0f, 46.0f, (angle - 0.35f) * RAD2DEG,
+                                 (angle + 0.35f) * RAD2DEG, 16,
+                                 Fade(ToRayColor(theme.neon_red), 0.9f * fade));
+                    }
+                }
+
+                // ---- Control hint: fades out a few seconds into play -------------
+                if (hint_shown_at < 0.0) {
+                    hint_shown_at = GetTime();
+                }
+                const float hint_age = now_seconds - static_cast<float>(hint_shown_at);
+                const float hint_alpha = std::clamp(1.0f - (hint_age - 5.0f), 0.0f, 1.0f);
+                if (hint_alpha > 0.01f) {
+                    const char* hint = "WASD move   mouse aim   SPACE shoot   ENTER ready";
+                    DrawHudText(hint, CenteredTextX(hint, 18), 508, 18,
+                                Fade(ToRayColor(theme.text_dim), hint_alpha));
+                }
             }
         }  // end game view
 
