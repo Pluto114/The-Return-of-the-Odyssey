@@ -24,7 +24,7 @@
 > go env -w GOSUMDB=sum.golang.google.cn    # 校验库也要换，否则 sum.golang.org 同样超时
 > ```
 > 撤销：`go env -u GOPROXY GOSUMDB`。只想临时用一次：`$env:GOPROXY='https://goproxy.cn,direct'`（仅当前会话）。
-> 项目自带的另一条路：`. .\scripts\env.ps1 -UseSystemProxy`（把系统代理导出成 `HTTP(S)_PROXY`，Go 会读这两个变量）。
+> 项目自带的另一条路（**需 PowerShell 7**，因为脚本带 `#requires -Version 7.0`；在 PS 5.1 窗口里请用 `pwsh -c ". .\scripts\env.ps1 -UseSystemProxy; go -C server mod download all"`）：`. .\scripts\env.ps1 -UseSystemProxy`（把系统代理导出成 `HTTP(S)_PROXY`，Go 会读这两个变量）。
 > 实测记录：以上配置下 `go -C server mod download all` 与 `go -C bot mod download all` 均 exit 0，且 `gameserver`/`loadbot` 均编译成功 —— 完成后缓存已满，**后续运行不需要网络**。
 
 > 跨机联调：服务器用 `ODYSSEY_TCP_ADDR=0.0.0.0:7777` 起，客户端用 `--server <服务端局域网 IP>:7777`；同时放行该 TCP 端口。
@@ -36,10 +36,11 @@
 ### A. 启动服务器（终端 1）
 
 ```powershell
-cd <repo-root>          # 你本地的仓库根目录
-. .\scripts\env.ps1
+cd <repo-root>          # 你本地的仓库根目录（go.work 在这里，必须在根执行）
 go run ./server/cmd/gameserver
 ```
+
+> 不需要 dot-source `env.ps1`：`go` 已在 PATH，而 `env.ps1` 带 `#requires -Version 7.0`，**在 Windows PowerShell 5.1 窗口里会直接报版本错**（它只提供 vcpkg/MSVC/npm 那套客户端构建环境）。若确实需要那套环境，请在 `pwsh`（PS7）窗口里执行，或用 `pwsh -File <脚本>` 调用仓库里的脚本。
 
 期望看到（D 的日志）：`gameserver starting env=development tcp=127.0.0.1:7777 tick_hz=30 ...` 与 `listening addr=127.0.0.1:7777`。
 

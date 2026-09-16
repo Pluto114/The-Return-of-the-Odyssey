@@ -102,24 +102,31 @@ cmake --build build/client-windows-release --target odyssey_client
 - 两次运行（UI 开 / UI 关）之间**不重启服务器**，场景保持同一关；若中途清场进入下一关，需重跑该轮并在报告中注明。
 - **bot 必须活过整轮测量**：`-mode functional` 打完一局就退出，因此 3 轮（6 次客户端运行）会从第 2 轮起没有对手 → 客户端进不了 `playing` → 没有数据。用 **`-mode sustained`** 并给足 `-duration`（读完一局自动开新会话，直到时限结束）。`-stages 1` 是有意的：奖励/Ready 路由尚未进 main，只要求第一关的战斗与 `StageCleared`。
 
-**目录要点（`go.work` 在仓库根，两个 Go 模块是 `./server` 与 `./bot`）**：`go run ./server/...` 与 `go run ./bot/...` 都**必须在仓库根执行**；`scripts/*.ps1` 自己定位仓库根，可在任意目录执行。
+**目录与终端要点**
+
+- `go.work` 在仓库根，两个 Go 模块是 `./server` 与 `./bot`：`go run ./server/...` 与 `go run ./bot/...` **必须在仓库根执行**。
+- `scripts/*.ps1` 自己定位仓库根，可在任意目录执行；但**必须用 PowerShell 7**（它们与 `env.ps1` 都带 `#requires -Version 7.0`）。**在 Windows PowerShell 5.1 窗口里不要 dot-source `env.ps1`**，会直接报 `#requires` 版本错误 —— 用 `pwsh -File <脚本>` 即可。
+- **服务器与 bot 不需要 `env.ps1`**：`go` 已在 PATH，`env.ps1` 只设置 `GOBIN`/npm 缓存/vcpkg 与 MSVC 环境（那是客户端构建需要的）。若确实要那套环境，请在 `pwsh`（PS7）窗口里执行。
 
 ```powershell
-# 终端 1：服务器（工作目录 = 仓库根）
-cd <repo-root>; . .\scripts\env.ps1; go run ./server/cmd/gameserver
+# 终端 1：服务器（工作目录 = 仓库根；不需要 env.ps1）
+cd <repo-root>
+go run ./server/cmd/gameserver
 
 # 终端 2：第二名玩家（工作目录 = 仓库根；sustained 保证跨全部轮次都有对手）
-cd <repo-root>; . .\scripts\env.ps1
+cd <repo-root>
 go run ./bot/cmd/loadbot -mode sustained -clients 1 -stages 1 -duration 15m -ramp 0s -use-potion=false
 
-# 首次运行前的依赖（每个模块各一次；上游新增了 filippo.io/edwards25519）
-cd <repo-root>\server; go mod download all
-cd <repo-root>\bot;    go mod download all
+# 一次性依赖（已完成，可跳过；每个模块一次，上游新增 filippo.io/edwards25519）
+go -C server mod download all
+go -C bot    mod download all
 # 代理：Go 默认的 proxy.golang.org 在大陆网络不通，且 Go 不读 Windows 系统代理，需显式配置：
 #   go env -w GOPROXY=https://goproxy.cn,direct
-#   go env -w GOSUMDB=sum.golang.google.cn
-# 已实测（2026-09-16）两个模块均下载成功、gameserver 与 loadbot 均编译通过；缓存填满后运行不再需要网络
+#   go env -w GOSUMDB=sum.golang.google.cn      # 校验库也要换，否则 sum.golang.org 同样超时
+# 已实测（2026-09-16）：两个模块下载 exit 0，且 gameserver 与 loadbot 均编译成功；缓存填满后运行不再需要网络
 ```
+
+> 第 ① 步的 Release 构建**不会重编译第三方依赖**：`env.ps1` 把 vcpkg 二进制缓存设到仓库内 `.tools/vcpkg-cache`（已实测 17 个包 / 144 MB），新构建树按 ABI 哈希直接还原。若该目录被清空，vcpkg 会改为从源码构建（可能数十分钟并需要网络）。
 
 ### 2.4 硬件与环境说明模板（报告必须包含）
 
