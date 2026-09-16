@@ -36,7 +36,7 @@
 | 2 | **F1 双向队列深度 EMA 折线图** | 目前只有队列深度**数字**（瞬时/峰值）与 RTT/Tick 两条曲线；分期要求点名"Queue 深度 EMA 折线图" | 1–2h |
 | 3 | 辅助指标 UI 命令记录 | 分期要求"辅助记录 UI 命令 + ImGui 提交耗时供诊断"；ImGui 提交耗时依赖 P2 | 1–2h |
 | 4 | 文档补漏 | `client/README.md` 补 `ODYSSEY_PERF_*` 一段；`CLIENT-PHASE1.md` 的 `[LOCAL_DISPLAY]` 措辞；C-b 在途旧输入按服务端 `ErrStaleInput` 语义收口（§五） | 1–2h |
-| 5 | 截图证据链 | `docs/verification/phase2-c` 目前**无截图**。`disconnected`/`login` 现在可截；`playing`/`reward` 需联调环境。要求：统一分辨率、无个人绝对路径 | 0.5 天（含联调） |
+| 5 | 截图证据链 | `docs/verification/phase2-c` 目前**无截图**。`disconnected`/`login` 与 **`playing`** 现在都能截（main 已有 D 的首关启动 `1bcec34`，`loadbot` 可陪玩补满房间）；**`reward` 截图需 A 的奖励路由**（bot README 明确 A2/A3 奖励与 Ready 路由未进主线）。要求：统一分辨率、无个人绝对路径 | 0.5 天 |
 
 ### B. 卡在其他人接线
 
@@ -48,8 +48,8 @@
 | **Token 轮换（A4）** | A | `ResumeResponse` 至今**没有新 token 字段**；客户端二次闪断仍用旧 token，被拒后回落全新登录 |
 | **装备/药水槽显示（A3）** | A | 快照仍无 Weapon/Relic/Potion 字段，装备槽显示 SPD/DMG |
 | 在途旧输入策略 | A | 服务端 `world.go` 的 `ErrStaleInput`（拒绝过期序号）已是事实答案，需 A 书面确认即可闭合 C-b 尾巴 |
-| **Release 构建预设** | **D** | `CMakePresets.json` 只有 Debug。精确改动（3 处）已写在 `RELEASE-UI-PERF-PLAN.md` §2.1：新增 configure preset `client-windows-release`、对应 build preset、`build.ps1` 的 `ValidateSet` 加 `client-release`。**这是 Release ≤1.5ms 验收的唯一阻塞** |
-| 性能验收的第二名玩家 | B | `loadbot` 功能模式命令（房间满 2 人才 `StartStage`；用 bot 陪玩可让被测客户端成为唯一 GUI 进程） |
+| **Release 构建预设** | **D** | `CMakePresets.json` 只有 Debug，且**三个远端（main、D 的 `feature/week2-platform`、A 的 `feature/network`）都没有 Release 预设**。精确改动（3 处）见 `RELEASE-UI-PERF-PLAN.md` §2.1。**注意：这只阻塞"仓库共享预设"本身，不阻塞测量** —— C 可按 §2.2 的临时 configure 自建一棵 Release 树完成验收，判定口径完全一致 |
+| 性能验收的第二名玩家 | **无需等待** | `loadbot` **已在 main 内**（`bot/cmd/loadbot`，`-mode functional -clients 1 -stages 1 -use-potion=false -duration 3m -ramp 0s`，输出 JSON、失败非零退出，见 `bot/README.md`）。房间容量 2，1 个 bot + 1 个 GUI 客户端即开局，被测客户端仍是唯一 GUI 进程 |
 | HUD 像素字体 | B/D | `client/assets/fonts/pixel_hud.ttf`（缺失时回退默认字体，不崩，但分期要求的是点阵字体） |
 
 ### C. 结构性偏差（需你或 A 拍板，不紧急）
@@ -114,6 +114,8 @@ pwsh -File scripts/verify/client-release-ui-perf.ps1 -Rounds 3 -Frames 600
 5. **字体缺失即回退**：`client/assets/fonts/pixel_hud.ttf` 不在仓库里，缺省走 `GetFontDefault()` 并打印 `main: WARN HUD font ...`，不会崩。
 6. **测试进程不得弹模态框**：`protocol_tests.cpp` 在 Debug 下把 CRT 报告改到 stderr —— 默认模式会弹模态对话框，会把无头 `ctest` 变成挂起而不是失败（F08/D10 回归会遇到）。
 7. **设置文件位置**：`settings.ini` 写系统配置目录（Windows `%APPDATA%\Odyssey\`，POSIX `$XDG_CONFIG_HOME/odyssey/` 或 `~/.config/odyssey/`，都不行才落 exe 目录），**绝不写入源码树**。
+8. **不要把 A 的 `feature/network` 直接并进客户端分支**。实测（`git merge-tree` 预演）：它比 main 落后 30 个提交、领先 7 个，合并会在 **8 个文件**上冲突 —— `README.md`、`server/cmd/gameserver/{application,application_test,main}.go`、`server/configs/.env.example`、`server/internal/{config/config,metrics/metrics,network/server}.go`，**全部在服务端/仓库根，没有一个 client 文件**。那 7 个提交（D4 首关启动、D5 观测、D6 奖励路由、D7–D9 循环与恢复、文档、药水映射）对客户端零收益，却要求客户端侧替 A 解决它与 D 平台改动的冲突。按 `WEEK2-AD-FINALIZATION.md` §3 A5，**这属于 A 的收口工作**：让 A 自己整合进 main，再从 main 合并。
+9. **写日志与证据链时的口径**：客户端不发送坐标/命中/伤害结果（权威在服务器）；HUD 与 stdout 的判据都来自快照与可靠事件，不要用客户端预测值充当验收证据。
 
 ---
 
@@ -129,5 +131,5 @@ pwsh -File scripts/verify/client-release-ui-perf.ps1 -Rounds 3 -Frames 600
 | --- | --- | --- |
 | A | 审 rlImGui；合 `feature/network`（A7 Ready + `4462d21` 药水映射）；发 400/401 并填值；`ResumeResponse` 补 token；快照补装备/药水字段 | P2、A7 验收、D7 数字、Token 轮换、A3 装备槽 |
 | D | 加 Release 预设（`RELEASE-UI-PERF-PLAN.md` §2.1 补丁） | Release ≤1.5ms 性能验收 |
-| B | `loadbot` 功能模式命令；`pixel_hud.ttf` | 性能验收场景、P1a 点阵字体 |
+| B | `pixel_hud.ttf`（`loadbot` 已在 main，不再是依赖） | P1a 点阵字体 |
 | C | §二.A 五项 + §二.C 决策 | — |
