@@ -50,6 +50,9 @@ param(
     [int]$ServerWaitSeconds = 30,
     # Bring your own second player instead of letting the script start one per run.
     [switch]$NoBot,
+    # Server Prometheus port, used to read odyssey_match_queue_players so the counterpart bot
+    # starts exactly when the client has queued (0 disables the metrics signal).
+    [int]$MetricsPort = 19091,
     # Allow a non-Release binary to run (smoke test only; the report is marked invalid).
     [switch]$AllowNonRelease,
     # Do not stop on the first failed run; keep collecting what is collectable.
@@ -165,10 +168,32 @@ if ($stray) {
 $env:ODYSSEY_PERF_FRAMES = "$Frames"
 $env:ODYSSEY_PERF_TRIGGER = 'playing'
 
-# Waits until the measured client has actually queued for a match, keyed on its own log
-# line rather than a fixed sleep. The counterpart bot dies after 5 seconds of waiting for a
-# message, so it has to start when the client is already queued - a client that is merely
-# launched is not enough, and its startup time varies with the machine's load.
+# Waits until the measured client has actually queued for a match. The counterpart bot dies
+# after 5 seconds of waiting for a message, so it has to start when the client is already
+# queued - a client that is merely launched is not enough, and its startup time varies with
+# the machine's load.
+#
+# Two signals, either is enough:
+#   * the client's own "match request sent (queued)" line (present in current builds), and
+#   * the server's odyssey_match_queue_players gauge (works with any client build, so the
+#     measurement does not depend on the client binary being the newest one).
+function Get-MatchQueuePlayers {
+    if ($MetricsPort -le 0) {
+        return -1
+    }
+    try {
+        $text = (Invoke-WebRequest -Uri "http://${ServerHost}:${MetricsPort}/metrics" `
+                    -TimeoutSec 3 -UseBasicParsing).Content
+    } catch {
+        return -1
+    }
+    $found = [regex]::Match($text, '(?m)^odyssey_match_queue_players\s+(\d+)')
+    if ($found.Success) {
+        return [int]$found.Groups[1].Value
+    }
+    return -1
+}
+
 function Wait-ForClientQueued {
     param($Client, [string]$Log, [int]$TimeoutMs = 60000)
 
@@ -181,6 +206,9 @@ function Wait-ForClientQueued {
             if (Select-String -LiteralPath $Log -Pattern 'match request sent' -Quiet -ErrorAction SilentlyContinue) {
                 return $true
             }
+        }
+        if ((Get-MatchQueuePlayers) -ge 1) {
+            return $true
         }
         Start-Sleep -Milliseconds 200
     }
