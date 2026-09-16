@@ -47,9 +47,11 @@ if (-not $NoServer) {
     $moduleCache = (& go env GOMODCACHE) 2>$null
     if ($moduleCache -and -not (Test-Path (Join-Path $moduleCache 'filippo.io'))) {
         Write-Host 'Go modules look incomplete (filippo.io/edwards25519 missing).' -ForegroundColor Yellow
-        Write-Host 'Run once, with network/proxy access:' -ForegroundColor Yellow
-        Write-Host '  cd server; go mod download all' -ForegroundColor Yellow
-        Write-Host '  (# if the proxy times out: $env:GOPROXY = ''https://goproxy.cn,direct'')' -ForegroundColor Yellow
+        Write-Host 'Run once, with network access:' -ForegroundColor Yellow
+        Write-Host '  go env -w GOPROXY=https://goproxy.cn,direct' -ForegroundColor Yellow
+        Write-Host '  go env -w GOSUMDB=sum.golang.google.cn' -ForegroundColor Yellow
+        Write-Host '  go -C server mod download all ; go -C bot mod download all' -ForegroundColor Yellow
+        Write-Host '  (Go ignores the Windows system proxy, so the default proxy.golang.org times out.)' -ForegroundColor Yellow
     }
 }
 

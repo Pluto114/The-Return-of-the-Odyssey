@@ -13,17 +13,19 @@
 | 项 | 要求 | 检查命令 |
 | --- | --- | --- |
 | 客户端 | 已构建 | `Test-Path build\client-windows\client\odyssey_client.exe` |
-| **Go 依赖** | **必须先下载**：本次合并新增了 `filippo.io/edwards25519 v1.2.0`（间接依赖），本地模块缓存里没有，缺它会直接编译失败 | `cd server; go mod download all` |
+| **Go 依赖** | **必须先下载**：本次合并新增了 `filippo.io/edwards25519 v1.2.0`（间接依赖），本地模块缓存里没有，缺它会直接编译失败 | 每模块一次：`cd server; go mod download all`、`cd bot; go mod download all`（`go.work` 在仓库根，但下载按模块缓存解析） |
 | Go 工具链 | `go` 在 PATH | `go version`（本项目实测 go1.26.8） |
 | 端口 | `7777`(TCP) 空闲，`8080`(Admin) / `19091`(Metrics) 未被占用 | `netstat -ano \| findstr :7777` |
 | 服务器配置 | **可缺省**：`config.Load` 在无 `.env` 时使用内置默认值（与 `configs/.env.example` 一致），`ODYSSEY_RESUME_ENABLED=false`、`ODYSSEY_RESULTS_ENABLED=false`，因此**不需要 Redis/MySQL** | 需要覆盖时：`Copy-Item server\configs\.env.example server\configs\.env` 后改（该文件已被 `.gitignore` 忽略） |
 
-> **下载依赖需要网络/代理**。若 `go mod download` 报 `dial tcp ... proxy.golang.org ... timed out`，先接通代理/VPN，或改用国内镜像：
+> **下载依赖需要网络/代理。实测结论（2026-09-16）**：大陆网络下 Go 默认的 `proxy.golang.org` **连不通**，而 **Go 不读取 Windows 系统代理**（即使 `Internet Settings` 里 `ProxyEnable=1`、`ProxyServer=127.0.0.1:7890`），所以必须显式配置。已实测可用且**持久化**（写入 `%APPDATA%\go\env`，之后每个终端都生效）：
 > ```powershell
-> $env:GOPROXY = 'https://goproxy.cn,direct'
-> cd server; go mod download all
+> go env -w GOPROXY=https://goproxy.cn,direct
+> go env -w GOSUMDB=sum.golang.google.cn    # 校验库也要换，否则 sum.golang.org 同样超时
 > ```
-> 注意：仓库里的 `VCPKG_ROOT`（用户级）与 Go 无关，不影响这一步。
+> 撤销：`go env -u GOPROXY GOSUMDB`。只想临时用一次：`$env:GOPROXY='https://goproxy.cn,direct'`（仅当前会话）。
+> 项目自带的另一条路：`. .\scripts\env.ps1 -UseSystemProxy`（把系统代理导出成 `HTTP(S)_PROXY`，Go 会读这两个变量）。
+> 实测记录：以上配置下 `go -C server mod download all` 与 `go -C bot mod download all` 均 exit 0，且 `gameserver`/`loadbot` 均编译成功 —— 完成后缓存已满，**后续运行不需要网络**。
 
 > 跨机联调：服务器用 `ODYSSEY_TCP_ADDR=0.0.0.0:7777` 起，客户端用 `--server <服务端局域网 IP>:7777`；同时放行该 TCP 端口。
 

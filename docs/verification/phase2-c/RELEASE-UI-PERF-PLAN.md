@@ -115,7 +115,10 @@ go run ./bot/cmd/loadbot -mode sustained -clients 1 -stages 1 -duration 15m -ram
 # 首次运行前的依赖（每个模块各一次；上游新增了 filippo.io/edwards25519）
 cd <repo-root>\server; go mod download all
 cd <repo-root>\bot;    go mod download all
-# 代理超时：$env:GOPROXY = 'https://goproxy.cn,direct'
+# 代理：Go 默认的 proxy.golang.org 在大陆网络不通，且 Go 不读 Windows 系统代理，需显式配置：
+#   go env -w GOPROXY=https://goproxy.cn,direct
+#   go env -w GOSUMDB=sum.golang.google.cn
+# 已实测（2026-09-16）两个模块均下载成功、gameserver 与 loadbot 均编译通过；缓存填满后运行不再需要网络
 ```
 
 ### 2.4 硬件与环境说明模板（报告必须包含）
