@@ -83,23 +83,29 @@ func (s State) ToProto() protocol.SessionState {
 // Accept to avoid repeating them in every row.
 var legalityMatrix = map[State]map[protocol.MessageType]bool{
 	StateConnected: {
-		protocol.MessageType_MSG_LOGIN_REQUEST: true,
+		protocol.MessageType_MSG_LOGIN_REQUEST:  true,
 		protocol.MessageType_MSG_RESUME_REQUEST: true,
 	},
 	StateLobby: {
 		protocol.MessageType_MSG_MATCH_REQUEST: true,
-		protocol.MessageType_MSG_MATCH_CANCEL: true,
+		protocol.MessageType_MSG_MATCH_CANCEL:  true,
 	},
 	StateMatching: {
 		protocol.MessageType_MSG_MATCH_REQUEST: true, // no-op (idempotent)
-		protocol.MessageType_MSG_MATCH_CANCEL: true,
+		protocol.MessageType_MSG_MATCH_CANCEL:  true,
 	},
 	StateInRoom: {
-		protocol.MessageType_MSG_PLAYER_INPUT:   true,
+		protocol.MessageType_MSG_MATCH_REQUEST:      true, // rematch only after the room has failed
+		protocol.MessageType_MSG_PLAYER_INPUT:       true,
 		protocol.MessageType_MSG_NEXT_STAGE_REQUEST: true,
 	},
 	StateReward: {
-		protocol.MessageType_MSG_REWARD_CHOICE:  true,
+		// A client can have one or two 30 Hz inputs already in flight when the
+		// authoritative room crosses StageClear -> Reward. The application
+		// decodes and drops them; treating that normal hand-off as a protocol
+		// violation would disconnect healthy players.
+		protocol.MessageType_MSG_PLAYER_INPUT:       true,
+		protocol.MessageType_MSG_REWARD_CHOICE:      true,
 		protocol.MessageType_MSG_NEXT_STAGE_REQUEST: true,
 	},
 	StateDisconnected: {},

@@ -20,6 +20,10 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 产物：`build/client-windows/client/odyssey_client.exe`（另有 `odyssey_window_probe.exe` 纯窗口诊断程序）。
 
+本机若仍开着旧的 `build/client-windows` 客户端，不要将旧窗口当作已更新的新版本，也不要覆盖正在使用的 exe；请先关闭它们再使用下方独立中文联调目录。
+
+中文联调推荐用单独目录构建：`cmake --preset client-windows -B build/client-zh`，然后 `cmake --build build/client-zh --target odyssey_client`。双击 `build/client-zh/client/odyssey_client.exe` 可识别“奥德赛归途 · 中文测试版”的窗口标题。客户端从 Windows 已安装的黑体加载显示所需的中文字形，不复制或分发系统字体；中文装备名称从 `client/assets/equipment.zh-CN.json` 按权威装备 ID 生成并放在 exe 同目录。
+
 ## 测试
 
 ```powershell
@@ -35,25 +39,33 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 # 终端 1：服务器（默认 127.0.0.1:7777）
 . ./scripts/env.ps1
 go run ./server/cmd/gameserver
-# 终端 2：客户端
-build\client-windows\client\odyssey_client.exe
+# 终端 2：中文客户端；另开一个终端再次执行以双开
+build\client-zh\client\odyssey_client.exe
 ```
 
-当前客户端在 `client/src/main.cpp` 顶部将 `kServerHost` 写为 `10.22.31.251`、`kServerPort` 写为 `7777`。本机体验先将 Host 改为 `127.0.0.1` 并重新构建；跨主机体验填写服务端局域网地址，同时配置服务端监听和端口放行。可配置端点属于本轮待收口项，不能假设当前已有命令行参数。
+客户端默认连接 `127.0.0.1:7777`，无需修改源码。跨主机体验可在启动终端设置 `ODYSSEY_SERVER_HOST` 和 `ODYSSEY_SERVER_PORT` 环境变量（端口须为 1–65535）；同时配置服务端监听和端口放行。`client/.env.example` 是配置示例，不会自动加载。
 
-当前主分支正式入口已支持匹配、移动和首关战斗，Bot 单关已验证；奖励/下一关/恢复仍待 A/D 入口整合与客户端兼容修复。两个真实客户端的完整流程仍需联调，剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
+当前功能分支正式入口已支持匹配、战斗、按玩家发放奖励、双人 Ready 和 Director 下一关，自动化 TCP 回归已走通第 1 关到第 2 关。两个真实客户端的三关流程、恢复和最终结算仍需联调，剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
 
 ## 操作
+
+给实际游玩的同学看 [玩家操作指南](../docs/PLAYER-GUIDE.md)，其中包含失败后重开、断线和窗口无响应的处理方式。
 
 | 输入 | 作用 |
 | --- | --- |
 | `WASD` | 移动意图（30Hz 发送，只发意图不发坐标） |
 | 鼠标 | 瞄准方向（相对自身权威位置归一化） |
 | `SPACE` | 射击（按住持续开火，冷却由服务器决定） |
-| `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
+| 点击奖励卡片，或主键盘/小键盘 `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | Reward 状态下“准备下一关”（Ready 屏障归服务器） |
-| `R` | 失败后手动重连 |
+| `R` | 连接失败或断开后重新尝试连接，不能在团灭后重开本局 |
+| 点击“重新开局”或按 `N` | 团灭后为当前两名在线队友创建新房间，重置战斗与血量；无需重启服务器 |
+| `F3` | 显示或隐藏开发诊断面板；普通玩家无需打开 |
 | `ESC` / 关闭按钮 | 停止网络线程并退出 |
+
+Windows 玩家版默认以普通窗口程序启动，不再显示开发控制台。每个进程分别把事件诊断写入工作目录下的 `odyssey-client-<PID>.log` 和 `odyssey-client-error-<PID>.log`，因此两个客户端可以从同一目录启动。开发时若确实需要控制台，可在 CMake 配置阶段设置 `-DODYSSEY_CLIENT_CONSOLE=ON` 后重新构建。
+
+窗口可以拖动边框或使用最大化按钮调整大小。界面会按 16:9 战术画布等比例缩放并居中，额外区域使用深色留边，鼠标瞄准坐标也会同步换算。
 
 ## 线程与边界（校验用）
 
@@ -73,7 +85,7 @@ build\client-windows\client\odyssey_client.exe
 ## 已知限制 / 依赖
 
 - 装备显示以 `data/equipment/catalog.json` 为唯一手写数据源；CMake 配置阶段校验版本 1，并生成、复制 `equipment.tsv` 到客户端可执行文件旁。客户端不从显示表推导战斗效果。
-- Ready 当前只在 Reward=3 发送，与 B 奖励完成后的 PreparingNextStage=4 不匹配；阶段输入门控、恢复后匹配门控/续号、药水与装备移速预测均按收尾清单修正，尚未宣称真实三关/恢复通过。
+- Ready 在奖励已应用且阶段处于 Reward=3 或 PreparingNextStage=4 时发送，阶段外停止战斗输入。两名真实玩家的三关完整验收与恢复、结算仍待联调。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：
   `EndDrawing()` 只提交绘制，需要显式 `SwapScreenBuffer()`（已在 main/probe 中调用）。

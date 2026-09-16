@@ -44,10 +44,10 @@ Session 是协议层之上、业务层之下的唯一上下文。**任何消息�
 | LoginResponse (S→C) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | ResumeRequest | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | ResumeResponse (S→C) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| MatchRequest | ❌ | ✅ | (no-op) | ❌ | ❌ | ❌ | ❌ |
-| MatchFound (S→C) | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| MatchRequest | ❌ | ✅ | (no-op) | ✅ (only after failed) | ❌ | ❌ | ❌ |
+| MatchFound (S→C) | ❌ | ✅ | ✅ | ✅ (new room after failed) | ❌ | ❌ | ❌ |
 | MatchCancel | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| PlayerInput | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| PlayerInput | ❌ | ❌ | ❌ | ✅ | ⚠️ 仅解码后丢弃在途包 | ❌ | ❌ |
 | WorldSnapshot (S→C) | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | Event\* | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | StageStarted (S→C) | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
@@ -58,6 +58,8 @@ Session 是协议层之上、业务层之下的唯一上下文。**任何消息�
 | NextStageRequest | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 
 > "❌" ≠ 静默丢弃；一律回复 `REASON_INVALID_STATE`（若是状态机拒绝）或断连（若是协议层伪消息）。
+
+`PlayerInput` 在 `REWARD` 是唯一的阶段切换例外：客户端可能在收到权威 Reward 快照前已有 30Hz 输入在 TCP 中排队。服务端仍校验消息可解码，但不把它提交给 Room，也不因此断开正常玩家；客户端看到 Reward/Preparing 状态后必须停止继续发送战斗输入。
 
 ## 拒绝语义
 

@@ -3,7 +3,8 @@
 // Flow: connect -> auto LoginRequest(dev) -> show Session/Player ID ->
 // 1Hz Ping with real payload (Pong echo displayed) -> auto matchmaking ->
 // 30Hz PlayerInput -> authoritative WorldSnapshot. ESC / close
-// stops the Network Thread cleanly. 'R' retries a failed connect.
+// stops the Network Thread cleanly. 'R' retries a failed connect; a failed
+// match can be restarted with the on-screen button (or N).
 #include "core/BoundedQueue.h"
 #include "input/InputSample.h"
 #include "input/InputSampler.h"
@@ -12,40 +13,122 @@
 #include "network/PayloadCodec.h"
 #include "network/ProtocolIds.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
 #include "sync/Interpolation.h"
 #include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
+#include "ui/ChineseLabels.h"
+#include "ui/RewardChoiceInput.h"
 
 #include <cmath>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#endif
+
 namespace {
 
-constexpr int kScreenWidth = 960;
-constexpr int kScreenHeight = 540;
+constexpr int kScreenWidth = 1280;
+constexpr int kScreenHeight = 720;
 constexpr int kFps = 60;
 
 // World [0,20]^2 arena mapped into this screen rectangle (shared by the aim
 // inverse mapping and the drawing code).
 constexpr float kWorldSize = 20.0f;
-constexpr float kArenaX = 560.0f;
-constexpr float kArenaY = 190.0f;
-constexpr float kArenaW = 340.0f;
-constexpr float kArenaH = 280.0f;
+constexpr float kArenaX = 28.0f;
+constexpr float kArenaY = 112.0f;
+constexpr float kArenaW = 1224.0f;
+constexpr float kArenaH = 508.0f;
+constexpr Rectangle kNewRunButton{490.0f, 390.0f, 300.0f, 54.0f};
 
-// Gameserver endpoint reserved in the infra docs; read from config later.
-constexpr const char* kServerHost = "10.22.31.251";
-constexpr std::uint16_t kServerPort = 7777;
+// "Tactical viewport" palette: a quiet deep-space frame with navigation-cyan
+// information, solar-gold actions and coral danger. Debug telemetry uses its
+// own neutral overlay and never competes with the player HUD.
+constexpr Color kVoid{7, 12, 24, 255};
+constexpr Color kPanel{15, 27, 49, 255};
+constexpr Color kPanelRaised{23, 39, 67, 255};
+constexpr Color kGrid{37, 65, 94, 255};
+constexpr Color kStarlight{232, 241, 255, 255};
+constexpr Color kMuted{133, 155, 181, 255};
+constexpr Color kCyan{84, 214, 232, 255};
+constexpr Color kGold{244, 201, 93, 255};
+namespace ui = odyssey::client::ui;
+Font gChineseFont{};
+
+bool HasChinese(const char* text) {
+    for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text); *cursor; ++cursor) {
+        if (*cursor >= 0x80) return true;
+    }
+    return false;
+}
+
+void DrawUiText(const char* text, int x, int y, int size, Color color) {
+    if (HasChinese(text) && IsFontValid(gChineseFont)) {
+        DrawTextEx(gChineseFont, text, Vector2{static_cast<float>(x), static_cast<float>(y)},
+                   static_cast<float>(size), 1.0f, color);
+    } else {
+        DrawText(text, x, y, size, color);
+    }
+}
+
+int MeasureUiText(const char* text, int size) {
+    if (HasChinese(text) && IsFontValid(gChineseFont)) {
+        return static_cast<int>(MeasureTextEx(gChineseFont, text, static_cast<float>(size), 1.0f).x);
+    }
+    return MeasureText(text, size);
+}
+
+void LoadChineseFont(const odyssey::client::sync::EquipmentTable& equipment_table) {
+    std::string corpus;
+    for (const char* label : ui::kPlayerLabels) { corpus += label; }
+    for (const auto& [id, display] : equipment_table) {
+        (void)id;
+        corpus += display.name + display.slot + display.description;
+    }
+    int count = 0;
+    int* decoded = LoadCodepoints(corpus.c_str(), &count);
+    std::set<int> glyphs;
+    glyphs.insert(' ');
+    glyphs.insert('?');  // Fallback for an unanticipated server-provided label.
+    for (int codepoint = '0'; codepoint <= '9'; ++codepoint) { glyphs.insert(codepoint); }
+    for (int index = 0; index < count; ++index) { glyphs.insert(decoded[index]); }
+    UnloadCodepoints(decoded);
+    const std::vector<int> codepoints(glyphs.begin(), glyphs.end());
+    for (const char* candidate : {"C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/msyh.ttf",
+                                  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttf"}) {
+        if (!FileExists(candidate)) continue;
+        gChineseFont = LoadFontEx(candidate, 48, codepoints.data(),
+                                  static_cast<int>(codepoints.size()));
+        if (IsFontValid(gChineseFont)) {
+            SetTextureFilter(gChineseFont.texture, TEXTURE_FILTER_BILINEAR);
+            std::printf("main: Chinese UI font loaded %s glyphs=%zu\n", candidate, codepoints.size());
+            std::fflush(stdout);
+            return;
+        }
+    }
+    std::fprintf(stderr, "main: no Chinese UI font found; install SimHei on Windows\n");
+}
+constexpr Color kDanger{255, 107, 114, 255};
+constexpr Color kAlly{145, 126, 255, 255};
+
+// The development server listens on loopback. Override for LAN testing via
+// ODYSSEY_SERVER_HOST/ODYSSEY_SERVER_PORT; never embed a teammate's IP.
+constexpr const char* kDefaultServerHost = "127.0.0.1";
+constexpr std::uint16_t kDefaultServerPort = 7777;
 
 // Development-mode login (Phase 1 has no real auth; server assigns identity).
 constexpr const char* kDevToken = "dev";
@@ -54,6 +137,30 @@ constexpr std::uint32_t kClientProtocolVersion = 1;
 
 constexpr float kPingIntervalSeconds = 1.0f;
 constexpr double kFrameSeconds = 1.0 / 60.0;
+
+struct CanvasViewport {
+    float scale = 1.0f;
+    float offset_x = 0.0f;
+    float offset_y = 0.0f;
+};
+
+CanvasViewport CurrentCanvasViewport() {
+    const float screen_width = static_cast<float>(GetScreenWidth());
+    const float screen_height = static_cast<float>(GetScreenHeight());
+    const float horizontal = screen_width / static_cast<float>(kScreenWidth);
+    const float vertical = screen_height / static_cast<float>(kScreenHeight);
+    const float scale = horizontal < vertical ? horizontal : vertical;
+    if (scale <= 0.0f) return {};
+    return CanvasViewport{scale,
+                          (screen_width - static_cast<float>(kScreenWidth) * scale) * 0.5f,
+                          (screen_height - static_cast<float>(kScreenHeight) * scale) * 0.5f};
+}
+
+Vector2 CanvasMousePosition(const CanvasViewport& viewport) {
+    const Vector2 mouse = GetMousePosition();
+    return Vector2{(mouse.x - viewport.offset_x) / viewport.scale,
+                   (mouse.y - viewport.offset_y) / viewport.scale};
+}
 
 const char* StageStateName(std::uint32_t state) {
     switch (state) {
@@ -66,6 +173,61 @@ const char* StageStateName(std::uint32_t state) {
         case 6: return "closed";
         default: return "?";
     }
+}
+
+const char* PlayerStageName(std::uint32_t state) {
+    switch (state) {
+        case 0: return ui::kStageWaiting;
+        case 1: return ui::kStagePlaying;
+        case 2: return ui::kStageClear;
+        case 3: return ui::kStageReward;
+        case 4: return ui::kStagePreparing;
+        case 5: return ui::kStageFailed;
+        case 6: return ui::kStageClosed;
+        default: return ui::kStageStandby;
+    }
+}
+
+float Clamp01(float value) {
+    if (value < 0.0f) return 0.0f;
+    if (value > 1.0f) return 1.0f;
+    return value;
+}
+
+void DrawPanel(Rectangle bounds, Color fill, Color border) {
+    DrawRectangleRec(bounds, fill);
+    DrawRectangleLinesEx(bounds, 1.0f, border);
+}
+
+void DrawCentered(const std::string& text, float center_x, int y, int size, Color color) {
+    DrawUiText(text.c_str(), static_cast<int>(center_x) - MeasureUiText(text.c_str(), size) / 2,
+               y, size, color);
+}
+
+void DrawMeter(Rectangle bounds, float ratio, Color fill) {
+    DrawRectangleRec(bounds, Fade(kStarlight, 0.12f));
+    const Rectangle value{bounds.x, bounds.y, bounds.width * Clamp01(ratio), bounds.height};
+    DrawRectangleRec(value, fill);
+}
+
+std::string ShortText(const std::string& value, std::size_t limit) {
+    if (value.size() <= limit) return value;
+    return value.substr(0, limit - 3) + "...";
+}
+
+void ConfigureDiagnostics() {
+#if defined(_WIN32) && defined(ODYSSEY_PLAYER_CLIENT)
+    // A player build has no console. Preserve diagnostics beside the
+    // executable for bug reports without putting protocol logs on screen.
+    // Each process owns its files so two clients may share one working folder.
+    FILE* output = nullptr;
+    FILE* errors = nullptr;
+    const std::string process_id = std::to_string(_getpid());
+    const std::string output_path = "odyssey-client-" + process_id + ".log";
+    const std::string error_path = "odyssey-client-error-" + process_id + ".log";
+    (void)freopen_s(&output, output_path.c_str(), "a", stdout);
+    (void)freopen_s(&errors, error_path.c_str(), "a", stderr);
+#endif
 }
 
 using namespace odyssey::client::network::ids;
@@ -103,6 +265,7 @@ using odyssey::client::sync::GameView;
 using odyssey::client::sync::InputCommand;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::MovementPredictor;
+using odyssey::client::sync::PlayerView;
 using odyssey::client::sync::ProjectileVisual;
 using odyssey::client::sync::RecoveryPhase;
 using odyssey::client::sync::RecoveryState;
@@ -175,14 +338,33 @@ struct DemoState {
 
     // D7 readiness (client-side echo; the server owns the ready barrier).
     bool ready_sent = false;
+    double stage_clear_started_at = 0.0;
 };
 
 }  // namespace
 
 int main() {
+    ConfigureDiagnostics();
+    const char* configured_host = std::getenv("ODYSSEY_SERVER_HOST");
+    const std::string server_host = configured_host && *configured_host
+                                        ? configured_host : kDefaultServerHost;
+    std::uint16_t server_port = kDefaultServerPort;
+    if (const char* configured_port = std::getenv("ODYSSEY_SERVER_PORT");
+        configured_port && *configured_port) {
+        unsigned int value = 0;
+        const char* end = configured_port + std::char_traits<char>::length(configured_port);
+        const auto result = std::from_chars(configured_port, end, value);
+        if (result.ec != std::errc{} || result.ptr != end || value == 0 || value > 65535) {
+            std::fprintf(stderr, "main: ODYSSEY_SERVER_PORT must be 1..65535\n");
+            return 1;
+        }
+        server_port = static_cast<std::uint16_t>(value);
+    }
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     std::printf("main: before InitWindow\n"); fflush(stdout);
-    InitWindow(kScreenWidth, kScreenHeight, "The Return of the Odyssey - Client");
+    InitWindow(kScreenWidth, kScreenHeight, "奥德赛归途 · 中文测试版");
     std::printf("main: after InitWindow\n"); fflush(stdout);
+    SetWindowMinSize(800, 450);
     SetTargetFPS(kFps);
 
     BoundedQueue<NetEvent> inbox(256);
@@ -196,6 +378,11 @@ int main() {
     float last_aim_x = 1.0f;      // aim heading sent to the server (for the HUD)
     float last_aim_z = 0.0f;
     bool last_shoot = false;
+    bool rematch_pending = false;
+    bool awaiting_new_stage = false;
+    bool show_debug = false;
+    std::int64_t old_stage_seed = 0;
+    double rematch_requested_at = 0.0;
     double last_input_time = 0.0;
     GameView game_view;           // players from authoritative snapshots
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
@@ -221,15 +408,26 @@ int main() {
             break;
         }
     }
+    const std::string localized_equipment =
+        std::string(GetApplicationDirectory()) + "equipment.zh-CN.tsv";
+    std::ifstream localized_file(localized_equipment);
+    if (localized_file) {
+        std::stringstream buffer;
+        buffer << localized_file.rdbuf();
+        std::printf("main: loaded %zu Chinese equipment labels\n",
+                    odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table));
+    } else {
+        std::fprintf(stderr, "main: missing Chinese equipment labels: %s\n", localized_equipment.c_str());
+    }
+    LoadChineseFont(equipment_table);
+
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
     std::printf("main: starting net thread\n"); fflush(stdout);
-    client.Start(kServerHost, kServerPort);
+    client.Start(server_host, server_port);
     std::printf("main: net thread started, entering loop\n"); fflush(stdout);
 
     double last_ping_sent = 0.0;
-    int frame_counter = 0;
-    const double t_start = GetTime();
 
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
@@ -246,6 +444,8 @@ int main() {
             std::printf("main: window close requested\n"); fflush(stdout);
             break;
         }
+        const CanvasViewport viewport = CurrentCanvasViewport();
+        const Vector2 canvas_mouse = CanvasMousePosition(viewport);
         const double frame_start = GetTime();
         // Decay transient combat feedback (hit flashes, banner).
         const float frame_dt = GetFrameTime();
@@ -256,15 +456,12 @@ int main() {
                 demo.banner.clear();
             }
         }
-        if ((frame_counter % 120) == 0) {
-            std::printf("main: frame %d state=%s elapsed=%.1fs fps=%d\n", frame_counter,
-                        ToString(demo.state), GetTime() - t_start, GetFPS());
-            fflush(stdout);
-        }
-        ++frame_counter;
         if (IsKeyPressed(KEY_ESCAPE)) {
             std::printf("main: ESC pressed, exiting loop\n"); fflush(stdout);
             break;
+        }
+        if (IsKeyPressed(KEY_F3)) {
+            show_debug = !show_debug;
         }
         if (IsKeyPressed(KEY_R)) {
             // Retry after a failed/disconnected connect attempt.
@@ -289,7 +486,27 @@ int main() {
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
             demo.ready_sent = false;
-            client.Connect(kServerHost, kServerPort);
+            client.Connect(server_host, server_port);
+        }
+
+        // This is a new *match*, not a TCP reconnect. The server admits the
+        // request only after defeat and moves both connected players together.
+        if (demo.state == ConnectionState::kConnected && demo.in_room &&
+            demo.stage_state == 5 && !rematch_pending &&
+            (IsKeyPressed(KEY_N) ||
+             (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+              CheckCollisionPointRec(canvas_mouse, kNewRunButton)))) {
+            SendPayload(kMatchRequest, payload::EncodeMatchRequest());
+            rematch_pending = true;
+            rematch_requested_at = GetTime();
+            demo.match_note = "starting new run for both players";
+            std::printf("main: requested a new two-player match\n");
+            std::fflush(stdout);
+        }
+        if (rematch_pending && GetTime() - rematch_requested_at > 6.0) {
+            rematch_pending = false;
+            awaiting_new_stage = false;
+            demo.match_note = "new run timed out; check both players are online";
         }
 
         // Automatic reconnect with bounded backoff after a transient outage.
@@ -300,24 +517,29 @@ int main() {
             demo.state_detail = recovery.Note();
             std::printf("main: %s\n", recovery.Note().c_str());
             std::fflush(stdout);
-            client.Connect(kServerHost, kServerPort);
+            client.Connect(server_host, server_port);
         }
 
-        // Reward choice: keys 1..3 pick one of the offered options. Only a
-        // candidate equipment_id is sent; the server validates and applies it.
+        // Reward choice: click a card or press 1..3 (including the numpad).
+        // Only a candidate equipment_id is sent; the server validates it.
         if (demo.in_room && reward_view.State() == RewardState::kOffered) {
-            const int keys[3] = {KEY_ONE, KEY_TWO, KEY_THREE};
-            for (int index = 0; index < 3 &&
-                                index < static_cast<int>(reward_view.Options().size());
-                 ++index) {
-                if (IsKeyPressed(keys[index])) {
-                    std::uint32_t equipment_id = 0;
-                    if (reward_view.ChooseByIndex(static_cast<std::size_t>(index), equipment_id)) {
-                        SendPayload(kRewardChoice, payload::EncodeRewardChoice(equipment_id));
-                        std::printf("main: reward choice sent id=%u\n", equipment_id);
-                        std::fflush(stdout);
-                    }
+            const int number_keys[3] = {KEY_ONE, KEY_TWO, KEY_THREE};
+            const int numpad_keys[3] = {KEY_KP_1, KEY_KP_2, KEY_KP_3};
+            int pressed_digit = 0;
+            for (int index = 0; index < 3; ++index) {
+                if (IsKeyPressed(number_keys[index]) || IsKeyPressed(numpad_keys[index])) {
+                    pressed_digit = index + 1;
+                    break;
                 }
+            }
+            const auto selected = odyssey::client::ui::SelectRewardOption(
+                pressed_digit, IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
+                canvas_mouse.x, canvas_mouse.y, reward_view.Options().size());
+            std::uint32_t equipment_id = 0;
+            if (selected && reward_view.ChooseByIndex(*selected, equipment_id)) {
+                SendPayload(kRewardChoice, payload::EncodeRewardChoice(equipment_id));
+                std::printf("main: reward choice sent id=%u\n", equipment_id);
+                std::fflush(stdout);
             }
         }
 
@@ -328,14 +550,13 @@ int main() {
             if (now - last_input_time >= 1.0 / 30.0) {
                 last_input_time = now;
                 last_sample = input_sampler.SampleNow();
-                if (demo.in_room) {
+                if (demo.in_room && (demo.stage_state == 0 || demo.stage_state == 1)) {
                     last_report = input_sequencer.Tick(last_sample);
                     // Aim heading: mouse position mapped back to world space,
                     // relative to our own authoritative position. The client
                     // never sends positions or hit results.
-                    const Vector2 mouse = GetMousePosition();
-                    const float mx = (mouse.x - kArenaX) / kArenaW * kWorldSize;
-                    const float mz = (mouse.y - kArenaY) / kArenaH * kWorldSize;
+                    const float mx = (canvas_mouse.x - kArenaX) / kArenaW * kWorldSize;
+                    const float mz = (canvas_mouse.y - kArenaY) / kArenaH * kWorldSize;
                     float aim_x = 1.0f;
                     float aim_z = 0.0f;
                     if (const auto* self = game_view.Find(demo.player_id)) {
@@ -479,6 +700,29 @@ int main() {
                     } else if (event->message.message_type == kMatchFound) {
                         MatchFoundData match;
                         if (payload::DecodeMatchFound(event->message.payload, match)) {
+                            if (demo.room_id != 0 && demo.room_id != match.room_id) {
+                                // Do not display the old defeat or replay old
+                                // prediction after the room changes. Keep the
+                                // InputSeq monotonic within the same session:
+                                // in-flight old inputs may reach the new room.
+                                predictor.Reset();
+                                remote_interp.Clear();
+                                monster_interp.Clear();
+                                old_stage_seed = combat_view.Stage().seed;
+                                game_view = GameView{};
+                                combat_view.Clear();
+                                reward_view.Clear();
+                                demo.stage_index = 0;
+                                demo.stage_state = 0;
+                                demo.prev_stage_index = 0;
+                                demo.monsters_remaining = 0;
+                                demo.self_hp = 0.0f;
+                                demo.banner.clear();
+                                demo.banner_ttl = 0.0f;
+                                demo.ready_sent = false;
+                                awaiting_new_stage = true;
+                            }
+                            rematch_pending = false;
                             demo.in_room = true;
                             demo.room_id = match.room_id;
                             demo.match_note = "room=" + std::to_string(match.room_id);
@@ -507,6 +751,15 @@ int main() {
                         // Authoritative full snapshot: replace the whole view.
                         WorldSnapshotView snap;
                         if (payload::DecodeWorldSnapshot(event->message.payload, snap)) {
+                            // The snapshot wire format has no room ID. A final
+                            // queued snapshot from the failed room can arrive
+                            // after MatchFound; accept only the new Playing
+                            // stage while switching rooms.
+                            if (awaiting_new_stage &&
+                                (snap.stage.state != 1 || snap.stage.seed == old_stage_seed)) {
+                                continue;
+                            }
+                            awaiting_new_stage = false;
                             ++demo.snapshots_received;
                             if (demo.snapshots_received == 1) {
                                 std::printf("main: first world snapshot tick=%llu\n",
@@ -573,6 +826,11 @@ int main() {
                             }
                             demo.prev_stage_index = snap.stage.index;
                             demo.stage_index = snap.stage.index;
+                            if (snap.stage.state == 2 && demo.stage_state != 2) {
+                                demo.stage_clear_started_at = GetTime();
+                            } else if (snap.stage.state != 2) {
+                                demo.stage_clear_started_at = 0.0;
+                            }
                             demo.stage_state = snap.stage.state;
                             demo.monsters_remaining = snap.stage.monsters_remaining;
                             if (snap.has_self) {
@@ -660,6 +918,9 @@ int main() {
                     } else if (event->message.message_type == kStageStartedEvent ||
                                event->message.message_type == kStageClearedEvent ||
                                event->message.message_type == kTeamDefeatedEvent) {
+                        if (awaiting_new_stage && event->message.message_type == kTeamDefeatedEvent) {
+                            continue;
+                        }
                         StageEventData stage_event;
                         if (payload::DecodeStageEvent(event->message.payload, stage_event)) {
                             const char* kind = event->message.message_type == kStageStartedEvent
@@ -669,8 +930,12 @@ int main() {
                                                           : "team defeated");
                             demo.last_event_note = std::string(kind) + " index=" +
                                                    std::to_string(stage_event.stage_index);
-                            demo.banner = std::string(kind) + "  stage " +
-                                          std::to_string(stage_event.stage_index);
+                            demo.banner = event->message.message_type == kTeamDefeatedEvent
+                                              ? ui::kStageDefeatedBanner
+                                              : std::string(ui::kStagePrefix) + " " +
+                                                    std::to_string(stage_event.stage_index) + " " +
+                                                    (event->message.message_type == kStageStartedEvent
+                                                         ? ui::kStageStartedBanner : ui::kStageClearedBanner);
                             demo.banner_ttl = 2.5f;
                             if (event->message.message_type == kStageStartedEvent) {
                                 // A new stage begins: drop event-driven bullets
@@ -758,7 +1023,8 @@ int main() {
             // D7: while in the Reward state, ENTER reports "ready for the next
             // stage". The server applies the ready barrier; repeat presses are
             // idempotent server-side.
-            if (demo.in_room && demo.stage_state == 3 && IsKeyPressed(KEY_ENTER)) {
+            if (demo.in_room && (demo.stage_state == 3 || demo.stage_state == 4) &&
+                reward_view.State() == RewardState::kApplied && IsKeyPressed(KEY_ENTER)) {
                 SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
                 demo.ready_sent = true;
                 demo.last_event_note = "next stage ready sent";
@@ -768,122 +1034,98 @@ int main() {
         }
 
         BeginDrawing();
-        ClearBackground(RAYWHITE);
+        ClearBackground(Color{3, 6, 12, 255});
+        rlPushMatrix();
+        rlTranslatef(viewport.offset_x, viewport.offset_y, 0.0f);
+        rlScalef(viewport.scale, viewport.scale, 1.0f);
+        DrawRectangle(0, 0, kScreenWidth, kScreenHeight, kVoid);
 
-        DrawText("The Return of the Odyssey", 24, 24, 32, DARKGRAY);
-        DrawText("Phase 1 - authoritative two-player movement", 24, 64, 20, GRAY);
+        // The player HUD stays intentionally sparse. Raw transport and world
+        // diagnostics are rendered only in the F3 developer overlay below.
+        DrawRectangle(0, 0, kScreenWidth, 96, kPanel);
+        DrawLine(0, 95, kScreenWidth, 95, Fade(kCyan, 0.35f));
+        DrawUiText(ui::kTitle, 28, 22, 23, kStarlight);
+        DrawUiText(ui::kSubtitle, 29, 55, 14, kMuted);
 
-        const std::string state_line =
-            std::string("Connection: ") + ToString(demo.state) + "  (" + demo.state_detail + ")";
-        DrawText(state_line.c_str(), 24, 100, 20,
-                 demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
+        const Rectangle self_card{340.0f, 18.0f, 215.0f, 60.0f};
+        DrawPanel(self_card, kPanelRaised, Fade(kCyan, 0.3f));
+        DrawUiText(ui::kPilot, 354, 27, 13, kMuted);
+        const std::string self_hp = std::to_string(static_cast<int>(demo.self_hp)) + " / " +
+                                    std::to_string(static_cast<int>(demo.self_max_hp));
+        DrawText(self_hp.c_str(), 354, 45, 19, kStarlight);
+        DrawMeter(Rectangle{438.0f, 49.0f, 100.0f, 7.0f},
+                  demo.self_max_hp > 0.0f ? demo.self_hp / demo.self_max_hp : 0.0f,
+                  demo.self_hp > demo.self_max_hp * 0.3f ? kCyan : kDanger);
 
-        const char* recovery_phase = "idle";
-        switch (recovery.Phase()) {
-            case RecoveryPhase::kIdle: recovery_phase = "idle"; break;
-            case RecoveryPhase::kWaitingToRetry: recovery_phase = "waiting"; break;
-            case RecoveryPhase::kConnecting: recovery_phase = "connecting"; break;
-            case RecoveryPhase::kResuming: recovery_phase = "resuming"; break;
-            case RecoveryPhase::kRestored: recovery_phase = "restored"; break;
-            case RecoveryPhase::kFailed: recovery_phase = "failed"; break;
+        const Rectangle stage_card{570.0f, 18.0f, 198.0f, 60.0f};
+        DrawPanel(stage_card, kPanelRaised, Fade(kGold, 0.3f));
+        DrawUiText((std::string(ui::kStage) + " " + std::to_string(demo.stage_index)).c_str(), 584, 27, 13, kMuted);
+        DrawUiText(PlayerStageName(demo.stage_state), 584, 46, 17,
+                 demo.stage_state == 5 ? kDanger : kGold);
+
+        const std::vector<PlayerView> player_views = game_view.Players();
+        const PlayerView* teammate = nullptr;
+        for (const auto& player : player_views) {
+            if (player.id != demo.player_id) {
+                teammate = &player;
+                break;
+            }
         }
-        const std::string recovery_line =
-            std::string("Recovery: ") + recovery_phase + " attempts=" +
-            std::to_string(recovery.Attempts()) + " token_bytes=" +
-            std::to_string(demo.resume_token.size()) +
-            (demo.resumed ? " (resumed session)" : "") + "  " + recovery.Note();
-        DrawText(recovery_line.c_str(), 24, 115, 18, GRAY);
-
-        const std::string login_line =
-            "Login: " + demo.login_note +
-            (demo.login_ok ? ("  session=" + std::to_string(demo.session_id) +
-                              " player=" + std::to_string(demo.player_id))
-                           : "");
-        DrawText(login_line.c_str(), 24, 130, 20, demo.login_ok ? DARKGREEN : GRAY);
-
-        DrawText(("Match: " + demo.match_note).c_str(), 520, 130, 20,
-                 demo.in_room ? DARKGREEN : GRAY);
-
-        if (demo.received_any) {
-            const std::string msg = "Inbound: type=" + std::to_string(demo.last_type) +
-                                    " seq=" + std::to_string(demo.last_sequence) +
-                                    " bytes=" + std::to_string(demo.last_payload_bytes);
-            DrawText(msg.c_str(), 24, 160, 20, GRAY);
+        const Rectangle team_card{783.0f, 18.0f, 214.0f, 60.0f};
+        DrawPanel(team_card, kPanelRaised, Fade(kAlly, 0.3f));
+        DrawUiText(ui::kAlly, 797, 27, 13, kMuted);
+        if (teammate != nullptr) {
+            const std::string ally_hp = std::to_string(static_cast<int>(teammate->hp)) + " / " +
+                                        std::to_string(static_cast<int>(teammate->max_hp));
+            DrawUiText(teammate->alive ? ally_hp.c_str() : ui::kDown, 797, 45, 19,
+                     teammate->alive ? kStarlight : kDanger);
+            DrawMeter(Rectangle{881.0f, 49.0f, 99.0f, 7.0f},
+                      teammate->max_hp > 0.0f ? teammate->hp / teammate->max_hp : 0.0f,
+                      teammate->alive ? kAlly : kDanger);
         } else {
-            DrawText("Inbound: (none yet)", 24, 160, 20, GRAY);
+            DrawUiText(ui::kWaiting, 797, 45, 19, kMuted);
         }
 
-        const std::string hb_line =
-            "Ping sent: " + std::to_string(demo.pings_sent) +
-            "   Pong: nonce=" + std::to_string(demo.pong_nonce) +
-            " server_time_ms=" + std::to_string(demo.pong_server_time_ms);
-        DrawText(hb_line.c_str(), 24, 190, 20, GRAY);
-        DrawText(("Outbound drops: " + std::to_string(demo.outbound_drops)).c_str(), 24, 220, 20, GRAY);
-        if (!demo.server_note.empty()) {
-            DrawText(demo.server_note.c_str(), 24, 250, 20, MAROON);
+        const Rectangle link_card{1012.0f, 18.0f, 240.0f, 60.0f};
+        DrawPanel(link_card, kPanelRaised, Fade(kCyan, 0.2f));
+        const bool connected = demo.state == ConnectionState::kConnected;
+        DrawCircle(1029, 38, 5.0f, connected ? kCyan : kDanger);
+        DrawUiText(connected ? ui::kOnline : ui::kOffline, 1043, 29, 15,
+                 connected ? kStarlight : kDanger);
+        const std::string hostile_count = std::to_string(demo.monsters_remaining) + " " + ui::kHostiles;
+        DrawUiText(hostile_count.c_str(), 1043, 51, 14, kMuted);
+
+        // The arena is a navigational chart rather than a generic rectangle:
+        // grid, orbital rings and fixed stars establish the Odyssey identity.
+        DrawPanel(Rectangle{kArenaX, kArenaY, kArenaW, kArenaH}, kPanel, Fade(kCyan, 0.4f));
+        for (int index = 1; index < 10; ++index) {
+            const int x = static_cast<int>(kArenaX + kArenaW * index / 10.0f);
+            const int y = static_cast<int>(kArenaY + kArenaH * index / 10.0f);
+            DrawLine(x, static_cast<int>(kArenaY), x, static_cast<int>(kArenaY + kArenaH),
+                     Fade(kGrid, 0.58f));
+            DrawLine(static_cast<int>(kArenaX), y, static_cast<int>(kArenaX + kArenaW), y,
+                     Fade(kGrid, 0.58f));
         }
+        const Vector2 chart_center{kArenaX + kArenaW * 0.5f, kArenaY + kArenaH * 0.5f};
+        DrawCircleLines(static_cast<int>(chart_center.x), static_cast<int>(chart_center.y),
+                        90.0f, Fade(kGrid, 0.62f));
+        DrawCircleLines(static_cast<int>(chart_center.x), static_cast<int>(chart_center.y),
+                        185.0f, Fade(kGrid, 0.48f));
+        for (int index = 0; index < 34; ++index) {
+            const int x = static_cast<int>(kArenaX) + 12 + (index * 97) % 1190;
+            const int y = static_cast<int>(kArenaY) + 12 + (index * 53) % 480;
+            DrawCircle(x, y, index % 5 == 0 ? 1.5f : 1.0f, Fade(kStarlight, 0.28f));
+        }
+        DrawUiText(ui::kMission, 44, 128, 15, kMuted);
 
-        const std::string input_line =
-            "Input intent: keys(dx=" + std::to_string(last_sample.dx) +
-            ", dz=" + std::to_string(last_sample.dz) + ") vec(" +
-            std::to_string(last_report.vector.x) + ", " + std::to_string(last_report.vector.z) +
-            ") seq=" + std::to_string(last_report.sequence) + " @30Hz";
-        DrawText(input_line.c_str(), 24, 280, 20, GRAY);
-
-        const std::string view_line =
-            "View: players=" + std::to_string(game_view.PlayerCount()) +
-            " room=" + std::to_string(game_view.RoomId()) +
-            " tick=" + std::to_string(game_view.ServerTick()) +
-            " snaps=" + std::to_string(demo.snapshots_received);
-        DrawText(view_line.c_str(), 24, 310, 20, GRAY);
-
-        const std::string combat_line =
-            "Stage: idx=" + std::to_string(demo.stage_index) +
-            " state=" + StageStateName(demo.stage_state) +
-            " remain=" + std::to_string(demo.monsters_remaining) +
-            " | monsters=" + std::to_string(combat_view.MonsterCount()) +
-            " bullets=" + std::to_string(combat_view.ProjectileCount());
-        DrawText(combat_line.c_str(), 24, 340, 20, GRAY);
-
-        const std::string hp_line =
-            "HP self=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
-            std::to_string(static_cast<int>(demo.self_max_hp)) +
-            "  shoot=" + std::string(last_shoot ? "yes" : "no") +
-            "  events sp/dst/dmg/dth=" + std::to_string(demo.spawns) + "/" +
-            std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
-            std::to_string(demo.deaths);
-        DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
-
-        const std::string stats_line =
-            "Stats(snapshot): ATK=" + std::to_string(static_cast<int>(demo.self_attack)) +
-            " DEF=" + std::to_string(static_cast<int>(demo.self_defense)) +
-            " SPD=" + std::to_string(static_cast<int>(demo.self_move_speed)) +
-            "  Ready: " + (demo.ready_sent ? "sent" : "no") +
-            "  seed=" + std::to_string(combat_view.Stage().seed);
-        DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
-        DrawText(("Last event: " + demo.last_event_note).c_str(), 470, 400, 18, MAROON);
-
-        char correction_text[32] = {0};
-        std::snprintf(correction_text, sizeof(correction_text), "%.3f",
-                      predictor.LastCorrectionDistance());
-        const std::string netcode_line =
-            "Netcode: pending=" + std::to_string(predictor.PendingCount()) +
-            " corr=" + correction_text +
-            " interpDelay=" + std::to_string(static_cast<int>(remote_interp.DelayTicks())) +
-            "t tracks=" + std::to_string(remote_interp.Count()) + "/" +
-            std::to_string(monster_interp.Count());
-        DrawText(netcode_line.c_str(), 24, 430, 20, GRAY);
-
-        // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
-        // projectiles gold. Projectiles exist only via spawn/destroy events.
-        DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
-                           static_cast<int>(kArenaW), static_cast<int>(kArenaH), LIGHTGRAY);
         const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
         const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
 
         for (const auto& [id, projectile] : combat_view.Projectiles()) {
             (void)id;
-            DrawCircleV(Vector2{to_screen_x(projectile.x), to_screen_y(projectile.z)}, 3.0f, GOLD);
+            const Vector2 point{to_screen_x(projectile.x), to_screen_y(projectile.z)};
+            DrawCircleV(point, 6.0f, Fade(kGold, 0.18f));
+            DrawCircleV(point, 3.0f, kGold);
         }
 
         for (const auto& [id, monster] : combat_view.Monsters()) {
@@ -894,23 +1136,23 @@ int main() {
             const float sx = to_screen_x(mx);
             const float sy = to_screen_y(mz);
             const bool dead = combat_view.IsDead(id);
-            DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
-                          dead ? DARKGRAY : ORANGE);
+            DrawCircleV(Vector2{sx, sy}, 19.0f, Fade(dead ? kMuted : kDanger, 0.10f));
+            DrawPoly(Vector2{sx, sy}, 4, 12.0f, 45.0f, dead ? kMuted : kDanger);
             if (dead) {
-                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7,
-                         static_cast<int>(sx) + 7, static_cast<int>(sy) + 7, BLACK);
-                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) + 7,
-                         static_cast<int>(sx) + 7, static_cast<int>(sy) - 7, BLACK);
+                DrawLine(static_cast<int>(sx) - 9, static_cast<int>(sy) - 9,
+                         static_cast<int>(sx) + 9, static_cast<int>(sy) + 9, kVoid);
+                DrawLine(static_cast<int>(sx) - 9, static_cast<int>(sy) + 9,
+                         static_cast<int>(sx) + 9, static_cast<int>(sy) - 9, kVoid);
             }
             const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4, Fade(RED, 0.25f));
-            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
-                          static_cast<int>(20.0f * ratio), 4, LIME);
+            DrawMeter(Rectangle{sx - 20.0f, sy - 25.0f, 40.0f, 5.0f}, ratio, kDanger);
             if (combat_view.IsHitFlashing(id)) {
-                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f, GOLD);
+                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 22.0f, kGold);
             }
-            DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 9,
-                     static_cast<int>(sy) - 8, 12, DARKGRAY);
+            if (show_debug) {
+                DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 16,
+                         static_cast<int>(sy) - 8, 13, kMuted);
+            }
         }
 
         for (const auto& player : game_view.Players()) {
@@ -929,47 +1171,221 @@ int main() {
             }
             px = to_screen_x(px);
             pz = to_screen_y(pz);
-            DrawCircleV(Vector2{px, pz}, 9.0f,
-                        !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
+            const Color player_color = !player.alive ? kMuted : (is_self ? kCyan : kAlly);
+            DrawCircleV(Vector2{px, pz}, 23.0f, Fade(player_color, 0.10f));
+            if (is_self) {
+                DrawCircleV(Vector2{px, pz}, 12.0f, player_color);
+                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 16.0f, kStarlight);
+            } else {
+                DrawPoly(Vector2{px, pz}, 6, 13.0f, 30.0f, player_color);
+            }
             if (combat_view.IsHitFlashing(player.id)) {
-                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f, GOLD);
+                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 25.0f, kGold);
             }
             // HP bar above every player (authoritative hp/max_hp from snapshot).
             const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4, Fade(RED, 0.25f));
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20,
-                          static_cast<int>(24.0f * hp_ratio), 4, player.alive ? GREEN : GRAY);
+            DrawMeter(Rectangle{px - 24.0f, pz - 31.0f, 48.0f, 6.0f}, hp_ratio,
+                      player.alive ? player_color : kDanger);
             if (is_self) {
                 // Aim heading we are sending to the server.
                 DrawLineV(Vector2{px, pz},
-                          Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f}, DARKBLUE);
+                          Vector2{px + last_aim_x * 34.0f, pz + last_aim_z * 34.0f}, kStarlight);
             }
-            DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
-                     static_cast<int>(pz - 8), 16, DARKGRAY);
+            DrawUiText(is_self ? ui::kYou : ui::kAlly, static_cast<int>(px + 20),
+                       static_cast<int>(pz - 9), 14, player_color);
+            if (show_debug) {
+                DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 20),
+                         static_cast<int>(pz + 8), 12, kMuted);
+            }
         }
 
         if (!demo.banner.empty()) {
-            DrawText(demo.banner.c_str(), 300, 20, 32, MAROON);
+            const std::string banner = ShortText(demo.banner, 46);
+            const int width = MeasureUiText(banner.c_str(), 20) + 42;
+            const Rectangle toast{static_cast<float>((kScreenWidth - width) / 2), 124.0f,
+                                  static_cast<float>(width), 42.0f};
+            DrawPanel(toast, Fade(kPanelRaised, 0.96f), Fade(kGold, 0.65f));
+            DrawCentered(banner, kScreenWidth * 0.5f, 135, 20, kGold);
         }
 
         if (reward_view.State() != RewardState::kNone) {
-            // Treasure chest panel: options come from the server; display text
-            // comes from the local static table (ids travel on the wire).
-            DrawRectangle(20, 452, 920, 72, Fade(LIGHTGRAY, 0.45f));
-            DrawText(("REWARD - " + reward_view.Note() + "   (keys 1-3 choose)").c_str(),
-                     30, 456, 20, MAROON);
-            std::string row;
+            const Rectangle reward_panel{70.0f, 350.0f, 1140.0f, 238.0f};
+            DrawPanel(reward_panel, Fade(kVoid, 0.96f), Fade(kGold, 0.75f));
+            DrawUiText(ui::kSalvage, 94, 370, 24, kGold);
+            std::string reward_instruction = ui::kChoose;
+            if (reward_view.State() == RewardState::kChosen) {
+                reward_instruction = ui::kInstalling;
+            } else if (reward_view.State() == RewardState::kApplied) {
+                reward_instruction = demo.ready_sent
+                                         ? ui::kReadyWaiting
+                                         : ui::kInstalled;
+            } else if (reward_view.State() == RewardState::kTimedOut) {
+                reward_instruction = ui::kExpired;
+            } else if (reward_view.State() == RewardState::kRejected) {
+                reward_instruction = ui::kRejected;
+            }
+            DrawUiText(reward_instruction.c_str(), 94, 402, 16,
+                       reward_view.State() == RewardState::kApplied ? kCyan : kMuted);
             const auto& options = reward_view.Options();
             for (std::size_t i = 0; i < options.size(); ++i) {
-                row += "[" + std::to_string(i + 1) + "] " + options[i].display.name + " (" +
-                       options[i].display.slot + ") " + options[i].display.description + "   ";
+                const auto bounds = odyssey::client::ui::CardBounds(i);
+                const Rectangle card{bounds.x, bounds.y, bounds.width, bounds.height};
+                const bool hovered = reward_view.State() == RewardState::kOffered &&
+                                     CheckCollisionPointRec(canvas_mouse, card);
+                DrawPanel(card, hovered ? Color{38, 59, 82, 255} : kPanelRaised,
+                          Fade(hovered ? kCyan : kGold, hovered ? 0.85f : 0.32f));
+                DrawText(("[" + std::to_string(i + 1) + "]").c_str(),
+                         static_cast<int>(card.x + 16), 450, 20, kGold);
+                DrawUiText(ShortText(options[i].display.name, 26).c_str(),
+                           static_cast<int>(card.x + 58), 450, 20, kStarlight);
+                DrawUiText(options[i].display.slot.c_str(), static_cast<int>(card.x + 16), 482, 14, kCyan);
+                DrawUiText(ShortText(options[i].display.description, 38).c_str(),
+                           static_cast<int>(card.x + 16), 516, 15, kMuted);
             }
-            DrawText(row.c_str(), 30, 486, 18, DARKGRAY);
-        } else {
-            DrawText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
-                     24, kScreenHeight - 60, 20, LIGHTGRAY);
         }
-        DrawFPS(kScreenWidth - 90, 12);
+
+        if (demo.in_room && demo.stage_state == 2 && reward_view.State() == RewardState::kNone) {
+            const bool expedition_complete = demo.stage_clear_started_at > 0.0 &&
+                                             GetTime() - demo.stage_clear_started_at > 1.5;
+            const Rectangle panel{430.0f, 258.0f, 420.0f, 164.0f};
+            DrawPanel(panel, Fade(kVoid, 0.96f), Fade(kGold, 0.78f));
+            DrawCentered(expedition_complete ? ui::kExpeditionComplete : ui::kStageClear,
+                         kScreenWidth * 0.5f, 288, 27, kGold);
+            DrawCentered(expedition_complete ? ui::kAllSecure
+                                             : ui::kScanning,
+                         kScreenWidth * 0.5f, 337, 16, kMuted);
+            if (!expedition_complete) {
+                DrawCentered(ui::kIncoming, kScreenWidth * 0.5f, 369, 14, kCyan);
+            }
+        }
+
+        if (demo.state == ConnectionState::kConnected && demo.in_room &&
+            (demo.stage_state == 5 || rematch_pending || awaiting_new_stage)) {
+            const Rectangle panel{430.0f, 228.0f, 420.0f, 248.0f};
+            DrawPanel(panel, Fade(kVoid, 0.97f), Fade(kDanger, 0.82f));
+            DrawRectangle(430, 228, 7, 248, kDanger);
+            DrawCentered(awaiting_new_stage ? ui::kNewExpedition : ui::kCrewDefeated,
+                         kScreenWidth * 0.5f, 256, 28, kStarlight);
+            DrawCentered(awaiting_new_stage ? ui::kPreparingSector : ui::kRestartTogether,
+                         kScreenWidth * 0.5f, 300, 17, kMuted);
+            DrawCentered(ui::kStayOnline, kScreenWidth * 0.5f, 330, 15, kMuted);
+            const bool hover = CheckCollisionPointRec(canvas_mouse, kNewRunButton);
+            const bool busy = rematch_pending || awaiting_new_stage;
+            DrawRectangleRec(kNewRunButton, busy ? Fade(kMuted, 0.45f) : (hover ? kGold : Fade(kGold, 0.82f)));
+            DrawRectangleLinesEx(kNewRunButton, hover && !busy ? 2.0f : 1.0f,
+                                 hover && !busy ? kStarlight : Fade(kGold, 0.4f));
+            DrawCentered(busy ? ui::kStarting : ui::kStartNewRun, kScreenWidth * 0.5f, 406, 20,
+                         busy ? kStarlight : kVoid);
+            DrawCentered(ui::kClickOrN, kScreenWidth * 0.5f, 454, 14, kMuted);
+        }
+
+        if (!demo.in_room && reward_view.State() == RewardState::kNone) {
+            const Rectangle panel{430.0f, 246.0f, 420.0f, 190.0f};
+            DrawPanel(panel, Fade(kVoid, 0.95f), Fade(connected ? kCyan : kDanger, 0.7f));
+            const std::string title = connected ? ui::kAssembling : ui::kLinking;
+            DrawCentered(title, kScreenWidth * 0.5f, 279, 26, kStarlight);
+            DrawCentered(connected ? ui::kSecondPilot : ui::kKeepServer,
+                         kScreenWidth * 0.5f, 325, 17, kMuted);
+            DrawCentered(connected ? ui::kAutoMatch : ui::kRetryLink,
+                         kScreenWidth * 0.5f, 357, 15, connected ? kCyan : kGold);
+        }
+
+        DrawRectangle(0, 638, kScreenWidth, 82, kPanel);
+        DrawLine(0, 638, kScreenWidth, 638, Fade(kCyan, 0.3f));
+        if (reward_view.State() != RewardState::kNone) {
+            DrawUiText(ui::kUpgrade, 32, 656, 13, kMuted);
+            DrawUiText(reward_view.State() == RewardState::kOffered ? ui::kClickOrDigits :
+                       reward_view.State() == RewardState::kChosen ? ui::kWaitInstall :
+                       reward_view.State() == RewardState::kApplied ? ui::kInstalled : ui::kWaitServer,
+                       32, 678, 18, kGold);
+            DrawUiText(ui::kNextSector, 492, 656, 13, kMuted);
+            DrawUiText(reward_view.State() == RewardState::kApplied ?
+                           (demo.ready_sent ? ui::kWaitAlly : ui::kPressReady) :
+                           ui::kWaitUpgrade, 492, 678, 18, kStarlight);
+        } else {
+            DrawUiText(ui::kMove, 32, 656, 13, kMuted);
+            DrawText("WASD", 32, 678, 18, kStarlight);
+            DrawUiText(ui::kAim, 160, 656, 13, kMuted);
+            DrawUiText(ui::kMouse, 160, 678, 18, kStarlight);
+            DrawUiText(ui::kFire, 300, 656, 13, kMuted);
+            DrawUiText(ui::kHoldSpace, 300, 678, 18, kGold);
+            DrawUiText(ui::kRestart, 492, 656, 13, kMuted);
+            DrawUiText(ui::kNAfterDefeat, 492, 678, 18, kStarlight);
+        }
+        DrawUiText(ui::kExit, 735, 656, 13, kMuted);
+        DrawText("ESC", 735, 678, 18, kStarlight);
+        DrawUiText(ui::kDeveloper, 1014, 656, 13, kMuted);
+        DrawText("F3", 1014, 678, 18, show_debug ? kCyan : kStarlight);
+
+        if (show_debug) {
+            const char* recovery_phase = "idle";
+            switch (recovery.Phase()) {
+                case RecoveryPhase::kIdle: recovery_phase = "idle"; break;
+                case RecoveryPhase::kWaitingToRetry: recovery_phase = "waiting"; break;
+                case RecoveryPhase::kConnecting: recovery_phase = "connecting"; break;
+                case RecoveryPhase::kResuming: recovery_phase = "resuming"; break;
+                case RecoveryPhase::kRestored: recovery_phase = "restored"; break;
+                case RecoveryPhase::kFailed: recovery_phase = "failed"; break;
+            }
+            char correction_text[32] = {0};
+            std::snprintf(correction_text, sizeof(correction_text), "%.3f",
+                          predictor.LastCorrectionDistance());
+            std::vector<std::string> debug_lines{
+                std::string("Connection  ") + ToString(demo.state) + "  " + demo.state_detail,
+                std::string("Recovery    ") + recovery_phase + "  attempts=" +
+                    std::to_string(recovery.Attempts()) + "  token=" +
+                    std::to_string(demo.resume_token.size()) + "B  " + recovery.Note(),
+                "Identity    session=" + std::to_string(demo.session_id) + " player=" +
+                    std::to_string(demo.player_id) + " room=" + std::to_string(demo.room_id),
+                "Inbound     type=" + std::to_string(demo.last_type) + " seq=" +
+                    std::to_string(demo.last_sequence) + " bytes=" +
+                    std::to_string(demo.last_payload_bytes),
+                "Heartbeat   sent=" + std::to_string(demo.pings_sent) + " pong=" +
+                    std::to_string(demo.pong_nonce) + " server_ms=" +
+                    std::to_string(demo.pong_server_time_ms),
+                "Transport   outbound_drops=" + std::to_string(demo.outbound_drops),
+                "Input       dx=" + std::to_string(last_sample.dx) + " dz=" +
+                    std::to_string(last_sample.dz) + " seq=" +
+                    std::to_string(last_report.sequence) + " shoot=" +
+                    (last_shoot ? "yes" : "no"),
+                "View        players=" + std::to_string(game_view.PlayerCount()) + " tick=" +
+                    std::to_string(game_view.ServerTick()) + " snapshots=" +
+                    std::to_string(demo.snapshots_received),
+                "Stage       index=" + std::to_string(demo.stage_index) + " state=" +
+                    StageStateName(demo.stage_state) + " remain=" +
+                    std::to_string(demo.monsters_remaining),
+                "Combat      monsters=" + std::to_string(combat_view.MonsterCount()) +
+                    " projectiles=" + std::to_string(combat_view.ProjectileCount()) +
+                    " events=" + std::to_string(demo.spawns) + "/" +
+                    std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) +
+                    "/" + std::to_string(demo.deaths),
+                "Stats       hp=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
+                    std::to_string(static_cast<int>(demo.self_max_hp)) + " atk=" +
+                    std::to_string(static_cast<int>(demo.self_attack)) + " def=" +
+                    std::to_string(static_cast<int>(demo.self_defense)) + " speed=" +
+                    std::to_string(static_cast<int>(demo.self_move_speed)),
+                std::string("Netcode     pending=") + std::to_string(predictor.PendingCount()) +
+                    " correction=" + correction_text + " delay=" +
+                    std::to_string(static_cast<int>(remote_interp.DelayTicks())) + "t tracks=" +
+                    std::to_string(remote_interp.Count()) + "/" +
+                    std::to_string(monster_interp.Count()),
+                "Last event  " + demo.last_event_note,
+            };
+            if (!demo.server_note.empty()) debug_lines.push_back("Server      " + demo.server_note);
+
+            const Rectangle debug_panel{20.0f, 110.0f, 720.0f, 514.0f};
+            DrawPanel(debug_panel, Fade(kVoid, 0.97f), Fade(kCyan, 0.85f));
+            DrawText("DEVELOPER TELEMETRY", 40, 130, 21, kCyan);
+            DrawText("F3  CLOSE", 616, 134, 14, kMuted);
+            int debug_y = 174;
+            for (const auto& line : debug_lines) {
+                DrawText(ShortText(line, 78).c_str(), 40, debug_y, 17, kStarlight);
+                debug_y += 29;
+            }
+            DrawFPS(640, 582);
+        }
+
+        rlPopMatrix();
 
         EndDrawing();
         // This raylib build enables SUPPORT_CUSTOM_FRAME_CONTROL: EndDrawing
@@ -988,6 +1404,7 @@ int main() {
     std::printf("main: loop exited, stopping net thread\n"); fflush(stdout);
     client.Stop();
     std::printf("main: net stopped, closing window\n"); fflush(stdout);
+    if (IsFontValid(gChineseFont)) UnloadFont(gChineseFont);
     CloseWindow();
     std::printf("main: exit\n"); fflush(stdout);
     return 0;

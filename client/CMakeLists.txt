@@ -30,6 +30,16 @@ if(_equipment_count LESS 1)
 endif()
 set(_equipment_display "${CMAKE_CURRENT_BINARY_DIR}/equipment.tsv")
 file(WRITE "${_equipment_display}" "# Generated from data/equipment/catalog.json; do not edit.\n# catalog-version=${_equipment_version}\n")
+set(_equipment_localized_catalog "${CMAKE_CURRENT_SOURCE_DIR}/assets/equipment.zh-CN.json")
+file(READ "${_equipment_localized_catalog}" _equipment_localized_json)
+string(JSON _equipment_localized_version GET "${_equipment_localized_json}" version)
+string(JSON _equipment_localized_count LENGTH "${_equipment_localized_json}" items)
+if(NOT _equipment_localized_version EQUAL _equipment_version OR
+   NOT _equipment_localized_count EQUAL _equipment_count)
+    message(FATAL_ERROR "Chinese equipment names must match the authoritative catalog version and item count")
+endif()
+set(_equipment_localized_display "${CMAKE_CURRENT_BINARY_DIR}/equipment.zh-CN.tsv")
+file(WRITE "${_equipment_localized_display}" "# Chinese player-facing labels keyed by authoritative equipment ID.\n# catalog-version=${_equipment_version}\n")
 math(EXPR _equipment_last "${_equipment_count} - 1")
 foreach(_equipment_index RANGE 0 ${_equipment_last})
     string(JSON _equipment_id GET "${_equipment_json}" items ${_equipment_index} id)
@@ -42,6 +52,15 @@ foreach(_equipment_index RANGE 0 ${_equipment_last})
         endif()
     endforeach()
     file(APPEND "${_equipment_display}" "${_equipment_id}\t${_equipment_name}\t${_equipment_slot}\t${_equipment_description}\n")
+    foreach(_equipment_key name slot description)
+        string(JSON _localized_${_equipment_key} ERROR_VARIABLE _localized_error
+            GET "${_equipment_localized_json}" items "${_equipment_id}" ${_equipment_key})
+        if(_localized_error OR "${_localized_${_equipment_key}}" MATCHES "[\t\r\n]")
+            message(FATAL_ERROR "Missing or invalid Chinese ${_equipment_key} for equipment ${_equipment_id}")
+        endif()
+    endforeach()
+    file(APPEND "${_equipment_localized_display}"
+        "${_equipment_id}\t${_localized_name}\t${_localized_slot}\t${_localized_description}\n")
 endforeach()
 
 add_library(odyssey_client_dependencies INTERFACE)
@@ -106,6 +125,11 @@ if(BUILD_TESTING)
 
     add_executable(odyssey_logic_tests tests/gameview_tests.cpp)
     target_include_directories(odyssey_logic_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(odyssey_logic_tests PRIVATE
+        ODYSSEY_EQUIPMENT_ZH_PATH="${_equipment_localized_display}")
+    if(MSVC)
+        target_compile_options(odyssey_logic_tests PRIVATE /utf-8)
+    endif()
     target_link_libraries(odyssey_logic_tests PRIVATE Threads::Threads)
     set_target_properties(odyssey_logic_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
     add_test(NAME odyssey_logic_tests COMMAND odyssey_logic_tests)
@@ -121,12 +145,30 @@ endif()
 # PlayerInput transmission and WorldSnapshot decoding land in the next slices.
 add_executable(odyssey_client src/main.cpp src/input/InputSampler.cpp)
 target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+if(MSVC)
+    # Chinese UTF-8 literals must not be parsed as the machine's ANSI code page.
+    target_compile_options(odyssey_client PRIVATE /utf-8)
+endif()
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+option(ODYSSEY_CLIENT_CONSOLE "Show the developer console beside the Windows game client" OFF)
+if(WIN32 AND NOT ODYSSEY_CLIENT_CONSOLE)
+    # Player builds launch as a normal Windows app. Keep event diagnostics in
+    # log files and the in-game F3 overlay instead of exposing a console full
+    # of protocol details. /ENTRY lets the existing portable main() remain the
+    # single entry point on Windows.
+    set_target_properties(odyssey_client PROPERTIES WIN32_EXECUTABLE YES)
+    if(MSVC)
+        target_link_options(odyssey_client PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+    target_compile_definitions(odyssey_client PRIVATE ODYSSEY_PLAYER_CLIENT=1)
+endif()
 add_custom_command(TARGET odyssey_client POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${_equipment_display}" "$<TARGET_FILE_DIR:odyssey_client>/equipment.tsv"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${_equipment_localized_display}" "$<TARGET_FILE_DIR:odyssey_client>/equipment.zh-CN.tsv"
     COMMENT "Copying generated equipment display table"
     VERBATIM)
 

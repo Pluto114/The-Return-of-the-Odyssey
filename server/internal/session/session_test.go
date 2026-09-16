@@ -55,6 +55,32 @@ func TestInputRejectedBeforeInRoom(t *testing.T) {
 	}
 }
 
+func TestMatchRequestAcceptedFromInRoomForServerValidatedRematch(t *testing.T) {
+	s := New()
+	s.AssignIdentity(1, 100)
+	s.Transition(StateLobby)
+	s.Transition(StateMatching)
+	s.Transition(StateInRoom)
+	if ok, reason := s.Accept(protocol.MessageType_MSG_MATCH_REQUEST); !ok {
+		t.Fatalf("rematch request rejected in room: %v", reason)
+	}
+	if s.State() != StateInRoom {
+		t.Fatal("rematch request must not change session state before new room join")
+	}
+}
+
+func TestRewardAcceptsInFlightPlayerInputForSafeApplicationDrop(t *testing.T) {
+	s := New()
+	s.AssignIdentity(1, 100)
+	s.Transition(StateLobby)
+	s.Transition(StateMatching)
+	s.Transition(StateInRoom)
+	s.Transition(StateReward)
+	if ok, reason := s.Accept(protocol.MessageType_MSG_PLAYER_INPUT); !ok {
+		t.Fatalf("in-flight PlayerInput rejected during reward transition: %v", reason)
+	}
+}
+
 func TestPingAlwaysAcceptedUntilDisconnect(t *testing.T) {
 	s := New()
 	for _, st := range []State{StateConnected, StateLobby, StateMatching, StateInRoom, StateReward} {

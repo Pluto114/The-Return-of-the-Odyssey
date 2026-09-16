@@ -1,6 +1,7 @@
 # The Return of the Odyssey
 
 基于 Go 服务端权威架构的多人 Roguelike 实训项目。
+当前功能分支进度与待验收项见 [项目开发进度（2026-09-16）](docs/PROJECT-STATUS.md)；下面的 9 月 15 日描述仅说明当时的主分支基线。
 当前阶段：**D 单关平台集成基线（2026-09-15）**。正式入口已启动首关战斗；D 已接入装备同源配置、战斗 Bot、真实指标与管理看板、Redis 恢复存储和 MySQL 异步结算模块。完整奖励、三关、恢复和终局写入仍需整合 A 的新入口与 C 的兼容修复，当前不是最终完整玩法版本。
 
 远程仓库：[Pluto114/The-Return-of-the-Odyssey](https://github.com/Pluto114/The-Return-of-the-Odyssey)。团队日常开发从 develop 创建功能分支。
@@ -43,8 +44,8 @@ pwsh -File scripts/build/build.ps1 -Target dashboard
 ```
 
 客户端依赖验证与基础设施启动见 [SETUP.md](docs/SETUP.md)。
-当前 gameserver 可运行 Login → Match → Join → 首关战斗 → 清场。客户端构建和操作见 [client/README.md](client/README.md)，Bot 见 [bot/README.md](bot/README.md)。Bot 单关已有真实 TCP 验证；奖励、三关、恢复与终局落库仍按收尾清单整合，不能将已装配的存储模块等同于全流程已完成。
-客户端当前硬编码连接 `10.22.31.251:7777`；本机运行须按客户端说明调整并重建，可配置端点已列入 A/C 收口任务。不要直接运行单个 `main.cpp`，应生成协议后构建整个 CMake 客户端目标。
+当前 gameserver 可运行 Login → Match → Join → 首关战斗 → 清场。玩家实际操作及遇到失败画面时的处理见 [玩家操作指南](docs/PLAYER-GUIDE.md)；客户端构建见 [client/README.md](client/README.md)，Bot 见 [bot/README.md](bot/README.md)。Bot 单关已有真实 TCP 验证；奖励、三关、恢复与终局落库仍按收尾清单整合，不能将已装配的存储模块等同于全流程已完成。
+客户端当前默认连接 `127.0.0.1:7777`，跨主机体验可以配置 `ODYSSEY_SERVER_HOST` 和 `ODYSSEY_SERVER_PORT`。不要直接运行单个 `main.cpp`，应生成协议后构建整个 CMake 客户端目标。
 角色 B 的离线演示可在加载环境后运行 `go run ./server/cmd/core-demo`；战斗、装备奖励、连续关卡和恢复结果接口分别见 [首关战斗交接文档](docs/architecture/COMBAT-CORE.md)、[装备与奖励领域接口](docs/architecture/EQUIPMENT-REWARD.md)、[Director 接口](docs/architecture/DIRECTOR.md) 和 [恢复与结果接口](docs/architecture/RESUME-GAME-RESULT.md)。
 
 ## 固定架构边界

@@ -7,10 +7,13 @@
 #include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
+#include "ui/RewardChoiceInput.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -52,6 +55,36 @@ using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StepMovement;
 
 constexpr float kEps = 1e-5f;
+
+void TestRewardCardSelection() {
+    using odyssey::client::ui::CardBounds;
+    using odyssey::client::ui::SelectRewardOption;
+    CHECK(SelectRewardOption(1, false, 0, 0, 3) == 0);
+    CHECK(SelectRewardOption(3, false, 0, 0, 3) == 2);
+    CHECK(!SelectRewardOption(3, false, 0, 0, 2).has_value());
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto card = CardBounds(i);
+        CHECK(SelectRewardOption(0, true, card.x + 20, card.y + 20, 3) == i);
+        CHECK(SelectRewardOption(0, true, card.x, card.y, 3) == i);
+        CHECK(!SelectRewardOption(0, true, card.x + card.width, card.y + 20, 3).has_value());
+        CHECK(!SelectRewardOption(0, false, card.x + 20, card.y + 20, 3).has_value());
+    }
+    CHECK(!SelectRewardOption(0, true, 450, 500, 3).has_value());
+    CHECK(!SelectRewardOption(0, true, 1140, 500, 2).has_value());
+}
+
+void TestChineseEquipmentLabels() {
+    std::ifstream file(ODYSSEY_EQUIPMENT_ZH_PATH);
+    CHECK(file.good());
+    if (!file) return;
+    std::stringstream contents;
+    contents << file.rdbuf();
+    EquipmentTable table;
+    CHECK(ParseEquipmentTable(contents.str(), table) == 6);
+    CHECK(table.at(2002).name == "疾风遗物");
+    CHECK(table.at(2002).description == "移动速度 ×1.1");
+    CHECK(table.at(3001).slot == "药剂");
+}
 
 void TestNormalizeIdle() {
     const auto v = NormalizeInput(InputSample{});
@@ -495,6 +528,8 @@ void TestSnapshotInterpolation() {
 }  // namespace
 
 int main() {
+    TestRewardCardSelection();
+    TestChineseEquipmentLabels();
     TestNormalizeIdle();
     TestNormalizeAxes();
     TestNormalizeDiagonalNotFaster();

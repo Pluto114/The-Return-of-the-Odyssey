@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +15,16 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/bootstrap"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/config"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/router"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
 
 type appPeer struct {
@@ -189,6 +195,279 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("connections or empty room were not reclaimed")
+}
+
+func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.Default()
+	catalogPath, err := filepath.Abs(filepath.Join("..", "..", "..", "data", "equipment", "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.EquipmentCatalogPath = catalogPath
+	gameplay, err := bootstrap.LoadGameplay(cfg, room.DefaultConfig().World)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := newConfiguredGameApplication(ctx, logger, metrics.New(), gameplay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := network.NewServer(app.handle, logger)
+	srv.OnDisconnect(app.disconnected)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx, listener) }()
+	defer func() {
+		cancel()
+		srv.CloseConnections()
+		if err := <-serveDone; err != nil {
+			t.Error(err)
+		}
+	}()
+
+	peers := make([]appPeer, 2)
+	for i := range peers {
+		conn, dialErr := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
+		defer conn.Close()
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		var login pb.LoginResponse
+		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
+		if login.Reason != pb.ReasonCode_REASON_OK {
+			t.Fatalf("peer %d login failed: %v", i, login.Reason)
+		}
+		peers[i].id = login.PlayerId
+	}
+
+	roomID, active, err := app.newActiveRoom()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range peers {
+		var member *session.Session
+		var serverConn *network.Connection
+		app.mu.Lock()
+		for connection, candidate := range app.connections {
+			_, playerID := candidate.Identity()
+			if playerID == peers[i].id {
+				member, serverConn = candidate, connection
+				break
+			}
+		}
+		app.mu.Unlock()
+		if member == nil || !member.Transition(session.StateMatching) {
+			t.Fatal("peer did not enter matching")
+		}
+		if err := router.Join(member, active.room, uint64(roomID)); err != nil {
+			t.Fatal(err)
+		}
+		active.snapshots.Subscribe(entity.ID(peers[i].id), serverConn)
+		active.events.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
+		active.close.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
+	}
+
+	plan := stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{{
+		Position: entity.Vec2{X: 13, Y: 10}, Radius: 0.4, AttackRange: 1,
+		Stats: entity.CombatStats{MaxHealth: 1, MoveSpeed: 0, AttackCooldownTicks: 30},
+	}}}
+	receipt, err := active.room.StartStage(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-receipt; err != nil {
+		t.Fatal(err)
+	}
+	for i := range peers {
+		var started pb.StageStartedEvent
+		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
+		if started.StageIndex != 1 {
+			t.Fatalf("peer %d opening stage = %d, want 1", i, started.StageIndex)
+		}
+	}
+	appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 2,
+		&pb.PlayerInput{InputSeq: 1, Aim: &pb.Vec2{X: 1}, Shoot: true})
+
+	offers := make([]pb.RewardOptions, len(peers))
+	for i := range peers {
+		appRead(t, peers[i], pb.MessageType_MSG_REWARD_OPTIONS, &offers[i])
+		if offers[i].StageIndex != 1 || len(offers[i].EquipmentIds) == 0 {
+			t.Fatalf("peer %d invalid private reward offer: %+v", i, &offers[i])
+		}
+		if i == 0 {
+			// A 30 Hz combat packet can already be in TCP when the server enters
+			// Reward. It must be ignored rather than disconnecting the player.
+			appSend(t, peers[i], pb.MessageType_MSG_PLAYER_INPUT, 3,
+				&pb.PlayerInput{InputSeq: 2, Move: &pb.Vec2{X: 1}, Aim: &pb.Vec2{X: 1}})
+		}
+		appSend(t, peers[i], pb.MessageType_MSG_REWARD_CHOICE, 3,
+			&pb.RewardChoice{EquipmentId: offers[i].EquipmentIds[0]})
+		if i == 0 {
+			appSend(t, peers[i], pb.MessageType_MSG_REWARD_CHOICE, 4,
+				&pb.RewardChoice{EquipmentId: offers[i].EquipmentIds[0]})
+		}
+	}
+	for i := range peers {
+		var applied pb.RewardApplied
+		appRead(t, peers[i], pb.MessageType_MSG_REWARD_APPLIED, &applied)
+		if applied.Reason != pb.ReasonCode_REASON_OK || applied.EquipmentId != offers[i].EquipmentIds[0] {
+			t.Fatalf("peer %d reward not applied: %+v", i, &applied)
+		}
+		if i == 0 {
+			var duplicate pb.RewardApplied
+			appRead(t, peers[i], pb.MessageType_MSG_REWARD_APPLIED, &duplicate)
+			if duplicate.Reason == pb.ReasonCode_REASON_OK || duplicate.EquipmentId != offers[i].EquipmentIds[0] {
+				t.Fatalf("duplicate reward response out of order or accepted: %+v", &duplicate)
+			}
+		}
+		appSend(t, peers[i], pb.MessageType_MSG_NEXT_STAGE_REQUEST, 4, &pb.NextStageRequest{})
+		if i == 0 {
+			appSend(t, peers[i], pb.MessageType_MSG_NEXT_STAGE_REQUEST, 5, &pb.NextStageRequest{})
+		}
+	}
+	for i := range peers {
+		var started pb.StageStartedEvent
+		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
+		if started.StageIndex != 2 {
+			t.Fatalf("peer %d next stage = %d, want 2", i, started.StageIndex)
+		}
+	}
+}
+
+func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app, err := newGameApplication(ctx, logger, metrics.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.roomConfig.EmptyTimeout = 150 * time.Millisecond
+	srv := network.NewServer(app.handle, logger)
+	srv.OnDisconnect(app.disconnected)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx, listener) }()
+	defer func() {
+		cancel()
+		srv.CloseConnections()
+		if err := <-serveDone; err != nil {
+			t.Error(err)
+		}
+	}()
+
+	peers := make([]appPeer, 2)
+	for i := range peers {
+		conn, dialErr := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
+		defer conn.Close()
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		var login pb.LoginResponse
+		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
+		if login.Reason != pb.ReasonCode_REASON_OK {
+			t.Fatalf("login failed: %v", login.Reason)
+		}
+		peers[i].id = login.PlayerId
+	}
+	oldID, old, err := app.newActiveRoom()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range peers {
+		var member *session.Session
+		var serverConn *network.Connection
+		app.mu.Lock()
+		for conn, candidate := range app.connections {
+			_, playerID := candidate.Identity()
+			if playerID == peers[i].id {
+				member, serverConn = candidate, conn
+				break
+			}
+		}
+		app.mu.Unlock()
+		if member == nil || !member.Transition(session.StateMatching) {
+			t.Fatal("peer did not enter matching")
+		}
+		if err := router.Join(member, old.room, uint64(oldID)); err != nil {
+			t.Fatal(err)
+		}
+		old.snapshots.Subscribe(entity.ID(peers[i].id), serverConn)
+		old.events.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
+		old.close.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
+	}
+	// A trusted, lethal encounter makes the *real* room enter Failed quickly;
+	// the network request then exercises exactly the button's wire code path.
+	spawn := stage.Spawn{Position: app.roomConfig.World.Spawn, Radius: 0.4,
+		AttackRange: 1, Stats: entity.CombatStats{MaxHealth: 100, Attack: 1000, AttackCooldownTicks: 1}}
+	receipt, err := old.room.StartStage(stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{spawn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-receipt; err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for old.room.LatestSnapshot().Stage.State != stage.Failed && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if old.room.LatestSnapshot().Stage.State != stage.Failed {
+		t.Fatal("old match did not fail")
+	}
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{}) // repeated click is idempotent
+	var newID uint64
+	for i := range peers {
+		var found pb.MatchFound
+		appRead(t, peers[i], pb.MessageType_MSG_MATCH_FOUND, &found)
+		if found.RoomId == uint64(oldID) || found.RoomId == 0 || len(found.Teammates) != 1 {
+			t.Fatalf("invalid rematch for peer %d: %+v", i, &found)
+		}
+		if newID == 0 {
+			newID = found.RoomId
+		} else if newID != found.RoomId {
+			t.Fatalf("team split across new rooms: %d and %d", newID, found.RoomId)
+		}
+	}
+	for i := range peers {
+		deadline = time.Now().Add(3 * time.Second)
+		for {
+			var snap pb.WorldSnapshot
+			appRead(t, peers[i], pb.MessageType_MSG_WORLD_SNAPSHOT, &snap)
+			if snap.Stage != nil && snap.Stage.State == uint32(stage.Playing) && snap.Self != nil &&
+				snap.Self.PlayerId == peers[i].id && snap.Self.Alive && snap.Self.Hp > 0 && len(snap.Players) == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("peer %d did not receive a healthy new match", i)
+			}
+		}
+	}
+	appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 4,
+		&pb.PlayerInput{InputSeq: 1, Aim: &pb.Vec2{X: 1}, Shoot: true})
+	for i := range peers {
+		var spawned pb.ProjectileSpawnEvent
+		appRead(t, peers[i], pb.MessageType_MSG_PROJECTILE_SPAWN, &spawned)
+		if spawned.OwnerId != peers[0].id {
+			t.Fatalf("peer %d saw another shooter's projectile: %+v", i, &spawned)
+		}
+	}
+	app.mu.Lock()
+	if len(app.rooms) > 2 || app.rooms[room.ID(newID)] == nil {
+		t.Errorf("duplicate click created extra rooms: %d", len(app.rooms))
+	}
+	app.mu.Unlock()
 }
 
 func appSend(t *testing.T, peer appPeer, messageType pb.MessageType, sequence uint32, message proto.Message) {

@@ -21,6 +21,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/director"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/equipment"
+	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/reward"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/lobby"
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/metrics"
@@ -38,10 +40,21 @@ type participant struct {
 }
 
 type activeRoom struct {
-	room      *room.Room
-	snapshots *router.SnapshotDispatcher
-	events    *router.EventDispatcher
-	close     *router.CloseWatcher
+	room       *room.Room
+	snapshots  *router.SnapshotDispatcher
+	events     *router.EventDispatcher
+	close      *router.CloseWatcher
+	rematching bool // guarded by gameApplication.mu; coalesces repeated clicks
+
+	// The application owns progression between B's authoritative Room phases.
+	// These fields are guarded by gameApplication.mu. The stage number makes
+	// StageCleared handling idempotent if a reliable batch is ever replayed.
+	rewardStage uint32
+	rewarded    map[entity.ID]bool
+	delivered   map[entity.ID]bool
+	ready       map[entity.ID]bool
+	advancing   bool
+	completed   bool
 
 	monsters    int
 	projectiles map[entity.ID]struct{}
@@ -150,6 +163,10 @@ func (a *gameApplication) handle(c *network.Connection, h network.Header, payloa
 		return a.handleMatchCancel(payload, sess)
 	case pb.MessageType_MSG_PLAYER_INPUT:
 		return a.handlePlayerInput(payload, sess)
+	case pb.MessageType_MSG_REWARD_CHOICE:
+		return a.handleRewardChoice(c, h, payload, sess)
+	case pb.MessageType_MSG_NEXT_STAGE_REQUEST:
+		return a.handleNextStageRequest(payload, sess)
 	default:
 		return nil
 	}
@@ -159,6 +176,9 @@ func (a *gameApplication) handleMatchRequest(c *network.Connection, h network.He
 	var request pb.MatchRequest
 	if err := proto.Unmarshal(payload, &request); err != nil {
 		return err
+	}
+	if sess.State() == session.StateInRoom {
+		return a.handleRematchRequest(sess, h.Sequence)
 	}
 	if sess.State() == session.StateMatching {
 		return nil // protocol contract: duplicate request while queued is a no-op
@@ -228,6 +248,9 @@ func (a *gameApplication) handlePlayerInput(payload []byte, sess *session.Sessio
 	if err := proto.Unmarshal(payload, &message); err != nil {
 		return err
 	}
+	if sess.State() == session.StateReward {
+		return nil // safe discard of combat input already in flight at phase change
+	}
 	input, err := convert.Input(&message)
 	if err != nil {
 		return err
@@ -242,40 +265,99 @@ func (a *gameApplication) handlePlayerInput(payload []byte, sess *session.Sessio
 	return active.room.Input(room.SessionID(sessionID), input)
 }
 
+func (a *gameApplication) handleRewardChoice(c *network.Connection, h network.Header, payload []byte, sess *session.Session) error {
+	var choice pb.RewardChoice
+	if err := proto.Unmarshal(payload, &choice); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	roomID := room.ID(sess.RoomID())
+	active := a.rooms[roomID]
+	a.mu.Unlock()
+	if active == nil {
+		return room.ErrClosed
+	}
+	sessionID, playerID := sess.Identity()
+	receipt, err := active.room.ChooseReward(room.SessionID(sessionID), equipment.ID(choice.EquipmentId))
+	if err != nil {
+		a.rejectRewardChoice(c, h, roomID, choice.EquipmentId, err)
+		return nil
+	}
+	// Room receipts arrive on its next fixed tick, so never block the socket's
+	// reader goroutine while the authoritative choice is validated and applied.
+	go func() {
+		if result := <-receipt; result != nil {
+			if errors.Is(result, reward.ErrChoiceAlreadyMade) || errors.Is(result, game.ErrRewardState) {
+				a.waitRewardAppliedDelivery(roomID, entity.ID(playerID), c)
+			}
+			a.rejectRewardChoice(c, h, roomID, choice.EquipmentId, result)
+		}
+	}()
+	return nil
+}
+
+// A valid choice and a duplicate can be applied by Room in one tick. The
+// private authoritative Applied update must enter the connection's reliable
+// queue before the duplicate rejection, regardless of goroutine scheduling.
+func (a *gameApplication) waitRewardAppliedDelivery(roomID room.ID, playerID entity.ID, c *network.Connection) {
+	deadline := time.NewTimer(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for {
+		a.mu.Lock()
+		active := a.rooms[roomID]
+		delivered := active == nil || active.delivered[playerID]
+		a.mu.Unlock()
+		if delivered || c.IsClosed() {
+			return
+		}
+		select {
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (a *gameApplication) rejectRewardChoice(c *network.Connection, h network.Header, roomID room.ID, equipmentID uint32, cause error) {
+	a.recordInvalidRewardChoice(roomID, cause)
+	reason := pb.ReasonCode_REASON_INVALID_STATE
+	if errors.Is(cause, room.ErrQueueFull) || errors.Is(cause, room.ErrClosed) {
+		reason = pb.ReasonCode_REASON_INTERNAL
+	}
+	if err := sendMessage(c, h, pb.MessageType_MSG_REWARD_APPLIED,
+		&pb.RewardApplied{Reason: reason, EquipmentId: equipmentID}); err != nil {
+		c.Close()
+	}
+}
+
+func (a *gameApplication) handleNextStageRequest(payload []byte, sess *session.Session) error {
+	var request pb.NextStageRequest
+	if err := proto.Unmarshal(payload, &request); err != nil {
+		return err
+	}
+	_, playerID := sess.Identity()
+	roomID := room.ID(sess.RoomID())
+	a.mu.Lock()
+	active := a.rooms[roomID]
+	if active == nil || active.completed || !active.rewarded[entity.ID(playerID)] {
+		a.mu.Unlock()
+		return nil
+	}
+	active.ready[entity.ID(playerID)] = true
+	a.mu.Unlock()
+	a.tryAdvanceStage(roomID)
+	return nil
+}
+
 func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
-	roomID := room.ID(a.nextRoomID.Add(1))
-	rm, err := room.Start(a.ctx, roomID, a.roomConfig)
+	roomID, active, err := a.newActiveRoom()
 	if err != nil {
 		a.failMatch(players, err)
 		return
 	}
-	active := &activeRoom{
-		room:        rm,
-		snapshots:   router.NewSnapshotDispatcher(),
-		events:      router.NewEventDispatcher(),
-		close:       router.NewCloseWatcher(),
-		projectiles: make(map[entity.ID]struct{}),
-	}
-	// Route dispatcher saturation warnings through the application logger so
-	// reliable-queue overflow is observable alongside other server logs (T10).
-	active.events.SetLogger(a.logger)
-	active.close.SetLogger(a.logger)
-	active.close.OnClose(func(id room.ID, reason string) {
-		a.recordRoomStats(id, rm.Stats())
-		a.mu.Lock()
-		delete(a.rooms, id)
-		a.publishMetricsLocked()
-		a.mu.Unlock()
-		a.logger.Info("room closed", "room_id", id, "reason", reason)
-	})
-	a.mu.Lock()
-	a.rooms[roomID] = active
-	a.publishMetricsLocked()
-	a.mu.Unlock()
-	go a.observeSnapshots(roomID, rm, active.snapshots)
-	go a.observeEvents(roomID, rm, active.events)
-	go active.close.Run(rm)
-	go a.observeTicks(roomID, rm)
+	rm := active.room
 
 	for _, p := range players {
 		if p.session.State() != session.StateMatching {
@@ -322,13 +404,7 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		}
 	}
 
-	// A's transport boundary starts the first authoritative encounter only
-	// after every participant has joined and received MatchFound. Production
-	// uses D's validated seed base; legacy focused tests retain the room seed.
-	seed := int64(roomID)
-	if a.gameplay.Valid() {
-		seed = a.gameplay.FirstStageSeed(uint64(roomID))
-	}
+	seed := a.firstStageSeed(roomID)
 	firstStage, err := game.NewFirstStagePlan(a.roomConfig.World, seed)
 	if err != nil {
 		a.logger.Error("first-stage plan failed", "room_id", roomID, "err", err)
@@ -350,6 +426,213 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	}
 	_ = a.metrics.ObserveMatch(time.Since(oldest))
 	a.logger.Info("match ready", "room_id", roomID, "players", len(players))
+}
+
+func (a *gameApplication) firstStageSeed(roomID room.ID) int64 {
+	if a.gameplay.Valid() {
+		return a.gameplay.FirstStageSeed(uint64(roomID))
+	}
+	return int64(roomID)
+}
+
+// MatchRequest in a failed room is a team rematch. Only the server chooses the
+// fresh room, seed and team; a client cannot reset a live encounter or choose
+// its own teammates. A single request moves both connected participants.
+func (a *gameApplication) handleRematchRequest(sess *session.Session, sequence uint32) error {
+	a.mu.Lock()
+	oldID := room.ID(sess.RoomID())
+	old := a.rooms[oldID]
+	if old == nil || old.rematching || old.room.LatestSnapshot().Stage.State != stage.Failed {
+		a.mu.Unlock()
+		return nil // duplicate or a match request outside the failed phase
+	}
+	players := make([]*participant, 0, 2)
+	for conn, member := range a.connections {
+		if member.RoomID() == uint64(oldID) && member.State() == session.StateInRoom && !conn.IsClosed() {
+			players = append(players, &participant{conn: conn, session: member})
+		}
+	}
+	if len(players) != 2 { // the existing matchmaker requires a connected pair
+		a.mu.Unlock()
+		a.logger.Warn("rematch needs two connected players", "room_id", oldID, "connected", len(players))
+		return nil
+	}
+	old.rematching = true
+	a.mu.Unlock()
+	go a.createRematch(oldID, old, players, sequence)
+	return nil
+}
+
+func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players []*participant, sequence uint32) {
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			a.mu.Lock()
+			old.rematching = false
+			a.mu.Unlock()
+		}
+	}()
+	newID, next, err := a.newActiveRoom()
+	if err != nil {
+		a.logger.Error("rematch room failed", "room_id", oldID, "err", err)
+		return
+	}
+	newRoom := next.room
+	defer func() {
+		if !succeeded {
+			newRoom.Close()
+		}
+	}()
+	plan, err := game.NewFirstStagePlan(a.roomConfig.World, a.firstStageSeed(newID))
+	if err != nil {
+		a.logger.Error("rematch plan failed", "room_id", oldID, "err", err)
+		return
+	}
+	// Join before changing any live session binding. Failure leaves all players
+	// in the old room and closes the unused new room.
+	for _, p := range players {
+		sessionID, playerID := p.session.Identity()
+		receipt, joinErr := newRoom.Join(room.SessionID(sessionID), entity.ID(playerID))
+		if joinErr == nil {
+			joinErr = <-receipt
+		}
+		if joinErr != nil {
+			a.logger.Error("rematch join failed", "room_id", newID, "err", joinErr)
+			return
+		}
+	}
+
+	a.mu.Lock()
+	if a.rooms[oldID] != old {
+		a.mu.Unlock()
+		return
+	}
+	for _, p := range players {
+		if a.connections[p.conn] != p.session || p.conn.IsClosed() ||
+			p.session.State() != session.StateInRoom || p.session.RoomID() != uint64(oldID) {
+			a.mu.Unlock()
+			return
+		}
+	}
+	for _, p := range players {
+		_, playerID := p.session.Identity()
+		old.snapshots.Unsubscribe(entity.ID(playerID))
+		old.events.Unsubscribe(entity.ID(playerID))
+		old.close.Unsubscribe(entity.ID(playerID))
+		p.session.BindRoom(uint64(newID))
+		wire := closingSink{connection: p.conn}
+		next.snapshots.Subscribe(entity.ID(playerID), p.conn)
+		next.events.Subscribe(entity.ID(playerID), wire)
+		next.close.Subscribe(entity.ID(playerID), wire)
+	}
+	a.publishMetricsLocked()
+	a.mu.Unlock()
+
+	for _, p := range players {
+		_, selfID := p.session.Identity()
+		teammates := make([]uint64, 0, len(players)-1)
+		for _, other := range players {
+			_, otherID := other.session.Identity()
+			if otherID != selfID {
+				teammates = append(teammates, otherID)
+			}
+		}
+		if err := sendMessage(p.conn, network.Header{Sequence: sequence}, pb.MessageType_MSG_MATCH_FOUND,
+			&pb.MatchFound{RoomId: uint64(newID), RoomToken: fmt.Sprintf("room-%d", newID), Teammates: teammates}); err != nil {
+			p.conn.Close() // same reliable-delivery contract as first matchmaking
+		}
+	}
+	for _, p := range players {
+		sessionID, _ := p.session.Identity()
+		go a.leaveFormerRoom(old.room, room.SessionID(sessionID))
+	}
+	// Backpressure on the trusted control queue is transient. Never announce a
+	// successful rematch if the first encounter did not actually start.
+	for attempt := 0; attempt < 10; attempt++ {
+		receipt, startErr := newRoom.StartStage(plan)
+		if errors.Is(startErr, room.ErrQueueFull) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if startErr == nil {
+			startErr = <-receipt
+		}
+		if startErr != nil {
+			a.logger.Error("rematch stage failed", "room_id", newID, "err", startErr)
+			return // deferred Close notifies the clients; old room is already leaving
+		}
+		succeeded = true
+		break
+	}
+	if !succeeded {
+		a.logger.Error("rematch stage admission exhausted", "room_id", newID)
+		return
+	}
+	a.logger.Info("rematch ready", "old_room", oldID, "new_room", newID, "players", len(players))
+}
+
+// Leaving the former room must not clear the session's *new* binding.
+func (a *gameApplication) leaveFormerRoom(rm *room.Room, sessionID room.SessionID) {
+	for {
+		receipt, err := rm.Leave(sessionID)
+		if err == nil {
+			err = <-receipt
+		}
+		if err == nil || errors.Is(err, room.ErrClosed) {
+			return
+		}
+		if !errors.Is(err, room.ErrQueueFull) {
+			a.logger.Warn("former room leave failed", "err", err)
+			return
+		}
+		select {
+		case <-rm.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// newActiveRoom wires each dispatcher exactly once, for both first matches and
+// rematches. The old room stays alive until its former members leave.
+func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
+	roomID := room.ID(a.nextRoomID.Add(1))
+	rm, err := room.Start(a.ctx, roomID, a.roomConfig)
+	if err != nil {
+		return 0, nil, err
+	}
+	active := &activeRoom{
+		room:        rm,
+		snapshots:   router.NewSnapshotDispatcher(),
+		events:      router.NewEventDispatcher(),
+		close:       router.NewCloseWatcher(),
+		projectiles: make(map[entity.ID]struct{}),
+		rewarded:    make(map[entity.ID]bool),
+		delivered:   make(map[entity.ID]bool),
+		ready:       make(map[entity.ID]bool),
+	}
+	// Route dispatcher saturation warnings through the application logger so
+	// reliable-queue overflow is observable alongside other server logs (T10).
+	active.events.SetLogger(a.logger)
+	active.close.SetLogger(a.logger)
+	active.close.OnClose(func(id room.ID, reason string) {
+		a.recordRoomStats(id, rm.Stats())
+		a.mu.Lock()
+		delete(a.rooms, id)
+		a.publishMetricsLocked()
+		a.mu.Unlock()
+		a.logger.Info("room closed", "room_id", id, "reason", reason)
+	})
+	a.mu.Lock()
+	a.rooms[roomID] = active
+	a.publishMetricsLocked()
+	a.mu.Unlock()
+	go a.observeSnapshots(roomID, rm, active.snapshots)
+	go a.observeEvents(roomID, rm, active.events)
+	go a.observeRewards(roomID, rm)
+	go active.close.Run(rm)
+	go a.observeTicks(roomID, rm)
+	return roomID, active, nil
 }
 
 func (a *gameApplication) failMatch(players []*participant, cause error) {
@@ -463,7 +746,260 @@ func (a *gameApplication) observeEvents(roomID room.ID, rm *room.Room, dispatche
 	for batch := range rm.Events() {
 		a.recordEventMetrics(roomID, batch)
 		dispatcher.Dispatch(batch)
+		for _, event := range batch.Events {
+			if event.Kind == game.StageCleared {
+				go a.beginRewardStage(roomID, event.StageIndex)
+			}
+		}
 	}
+}
+
+// beginRewardStage bridges a reliable StageCleared event into B's existing
+// reward state machine. The event observer never waits for Room receipts.
+func (a *gameApplication) beginRewardStage(roomID room.ID, stageIndex uint32) {
+	if !a.gameplay.Valid() {
+		return // focused legacy tests intentionally construct no gameplay bundle
+	}
+	a.mu.Lock()
+	active := a.rooms[roomID]
+	if active == nil || active.completed || active.rewardStage >= stageIndex {
+		a.mu.Unlock()
+		return
+	}
+	if stageIndex >= a.gameplay.StageLimit() {
+		active.completed = true
+		a.mu.Unlock()
+		a.logger.Info("expedition complete", "room_id", roomID, "stage", stageIndex)
+		return
+	}
+	active.rewardStage = stageIndex
+	active.rewarded = make(map[entity.ID]bool)
+	active.delivered = make(map[entity.ID]bool)
+	active.ready = make(map[entity.ID]bool)
+	a.mu.Unlock()
+
+	completed, err := waitCompletedStage(active.room)
+	if err != nil {
+		a.rewardStartFailed(roomID, stageIndex, err)
+		return
+	}
+	receipt, err := submitStartReward(active.room, a.gameplay.Catalog(), completed.Plan.Seed,
+		a.gameplay.RewardDurationTicks())
+	if err == nil {
+		err = <-receipt
+	}
+	if err != nil {
+		a.rewardStartFailed(roomID, stageIndex, err)
+		return
+	}
+	a.transitionRoomSessions(roomID, session.StateInRoom, session.StateReward)
+	a.logger.Info("reward phase started", "room_id", roomID, "stage", stageIndex)
+}
+
+func waitCompletedStage(rm *room.Room) (game.StageResult, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		receipt, err := rm.CompletedStage()
+		if errors.Is(err, room.ErrQueueFull) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if err != nil {
+			return game.StageResult{}, err
+		}
+		result := <-receipt
+		return result.Result, result.Err
+	}
+	return game.StageResult{}, room.ErrQueueFull
+}
+
+func submitStartReward(rm *room.Room, catalog equipment.Catalog, seed int64, duration uint64) (<-chan error, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		receipt, err := rm.StartReward(catalog, seed, duration)
+		if errors.Is(err, room.ErrQueueFull) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		return receipt, err
+	}
+	return nil, room.ErrQueueFull
+}
+
+func (a *gameApplication) rewardStartFailed(roomID room.ID, stageIndex uint32, cause error) {
+	a.mu.Lock()
+	if active := a.rooms[roomID]; active != nil && active.rewardStage == stageIndex {
+		active.rewardStage = 0
+	}
+	a.mu.Unlock()
+	a.logger.Error("start reward phase failed", "room_id", roomID, "stage", stageIndex, "err", cause)
+}
+
+func (a *gameApplication) transitionRoomSessions(roomID room.ID, from, to session.State) {
+	a.mu.Lock()
+	members := make([]*session.Session, 0, 2)
+	for connection, member := range a.connections {
+		if !connection.IsClosed() && member.RoomID() == uint64(roomID) && member.State() == from {
+			members = append(members, member)
+		}
+	}
+	a.mu.Unlock()
+	for _, member := range members {
+		if !member.Transition(to) {
+			a.logger.Warn("session phase transition refused", "room_id", roomID,
+				"from", from.String(), "to", to.String())
+		}
+	}
+}
+
+// observeRewards is the Room RewardUpdates channel's single consumer. Each
+// option list and result is private to the addressed player.
+func (a *gameApplication) observeRewards(roomID room.ID, rm *room.Room) {
+	for batch := range rm.RewardUpdates() {
+		a.recordRewardMetrics(roomID, batch)
+		for _, update := range batch.Updates {
+			connection, member := a.rewardRecipient(roomID, update.PlayerID)
+			if update.Kind == game.RewardSelectionApplied {
+				a.mu.Lock()
+				if active := a.rooms[roomID]; active != nil {
+					active.rewarded[update.PlayerID] = true
+				}
+				a.mu.Unlock()
+			}
+			if connection == nil || member == nil {
+				continue
+			}
+			if member.State() == session.StateInRoom {
+				member.Transition(session.StateReward)
+			}
+			var err error
+			switch update.Kind {
+			case game.RewardOptionsAvailable:
+				ids := make([]uint32, len(update.EquipmentIDs))
+				for index, id := range update.EquipmentIDs {
+					ids[index] = uint32(id)
+				}
+				err = sendMessage(connection, network.Header{}, pb.MessageType_MSG_REWARD_OPTIONS,
+					&pb.RewardOptions{StageIndex: update.StageIndex, EquipmentIds: ids,
+						DeadlineServerTick: update.DeadlineTick})
+			case game.RewardSelectionApplied:
+				err = sendMessage(connection, network.Header{}, pb.MessageType_MSG_REWARD_APPLIED,
+					&pb.RewardApplied{Reason: pb.ReasonCode_REASON_OK, EquipmentId: uint32(update.EquipmentID)})
+			default:
+				a.logger.Warn("unknown reward update", "room_id", roomID, "kind", update.Kind)
+			}
+			if err != nil {
+				connection.Close()
+			} else if update.Kind == game.RewardSelectionApplied {
+				a.mu.Lock()
+				if active := a.rooms[roomID]; active != nil {
+					active.delivered[update.PlayerID] = true
+				}
+				a.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (a *gameApplication) rewardRecipient(roomID room.ID, playerID entity.ID) (*network.Connection, *session.Session) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for connection, member := range a.connections {
+		_, candidate := member.Identity()
+		if !connection.IsClosed() && member.RoomID() == uint64(roomID) && entity.ID(candidate) == playerID {
+			return connection, member
+		}
+	}
+	return nil, nil
+}
+
+// tryAdvanceStage opens the Director gate only after every connected room
+// member has an applied reward and has explicitly pressed ready.
+func (a *gameApplication) tryAdvanceStage(roomID room.ID) {
+	a.mu.Lock()
+	active := a.rooms[roomID]
+	if active == nil || active.completed || active.advancing || active.rewardStage == 0 {
+		a.mu.Unlock()
+		return
+	}
+	members := 0
+	for connection, member := range a.connections {
+		if connection.IsClosed() || member.RoomID() != uint64(roomID) || member.State() != session.StateReward {
+			continue
+		}
+		_, playerID := member.Identity()
+		members++
+		if !active.rewarded[entity.ID(playerID)] || !active.ready[entity.ID(playerID)] {
+			a.mu.Unlock()
+			return
+		}
+	}
+	if members == 0 {
+		a.mu.Unlock()
+		return
+	}
+	active.advancing = true
+	a.mu.Unlock()
+	go a.advanceStage(roomID, active)
+}
+
+func (a *gameApplication) advanceStage(roomID room.ID, active *activeRoom) {
+	completed, err := waitCompletedStage(active.room)
+	if err != nil {
+		a.advanceStageFailed(roomID, active, err)
+		return
+	}
+	started := time.Now()
+	plan, decision, err := a.gameplay.Director().Decide(completed.Plan, completed.Performance)
+	duration := time.Since(started)
+	if err != nil {
+		a.advanceStageFailed(roomID, active, err)
+		return
+	}
+	// PreparingNextStage may become visible one tick after the final private
+	// reward update. Retry that short authoritative hand-off without generating
+	// a second Director decision.
+	for attempt := 0; attempt < 30; attempt++ {
+		receipt, startErr := active.room.StartStage(plan)
+		if errors.Is(startErr, room.ErrQueueFull) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if startErr == nil {
+			startErr = <-receipt
+		}
+		if errors.Is(startErr, game.ErrStageState) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if startErr != nil {
+			a.advanceStageFailed(roomID, active, startErr)
+			return
+		}
+		a.transitionRoomSessions(roomID, session.StateReward, session.StateInRoom)
+		a.mu.Lock()
+		if current := a.rooms[roomID]; current == active {
+			active.advancing = false
+			active.rewarded = make(map[entity.ID]bool)
+			active.delivered = make(map[entity.ID]bool)
+			active.ready = make(map[entity.ID]bool)
+		}
+		a.mu.Unlock()
+		if metricErr := a.recordDirectorDecision(roomID, plan.Index, completed.Performance, decision, duration); metricErr != nil {
+			a.logger.Warn("director metric rejected", "room_id", roomID, "stage", plan.Index, "err", metricErr)
+		}
+		a.logger.Info("next stage started", "room_id", roomID, "stage", plan.Index,
+			"difficulty", plan.DifficultyScore, "monsters", len(plan.Monsters))
+		return
+	}
+	a.advanceStageFailed(roomID, active, room.ErrQueueFull)
+}
+
+func (a *gameApplication) advanceStageFailed(roomID room.ID, expected *activeRoom, cause error) {
+	a.mu.Lock()
+	if active := a.rooms[roomID]; active == expected {
+		active.advancing = false
+	}
+	a.mu.Unlock()
+	a.logger.Error("advance stage failed", "room_id", roomID, "err", cause)
 }
 
 func (a *gameApplication) recordEventMetrics(roomID room.ID, batch game.EventBatch) {

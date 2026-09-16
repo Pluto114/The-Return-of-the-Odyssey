@@ -10,10 +10,11 @@ import (
 func TestInput(t *testing.T) {
 	t.Run("full mapping", func(t *testing.T) {
 		in := &protocol.PlayerInput{
-			InputSeq: 42,
-			Move:     &protocol.Vec2{X: 1, Y: 0},
-			Aim:      &protocol.Vec2{X: 0.5, Y: 0.25},
-			Shoot:    true,
+			InputSeq:  42,
+			Move:      &protocol.Vec2{X: 1, Y: 0},
+			Aim:       &protocol.Vec2{X: 0.5, Y: 0.25},
+			Shoot:     true,
+			UsePotion: true,
 		}
 		got, err := Input(in)
 		if err != nil {
@@ -30,6 +31,9 @@ func TestInput(t *testing.T) {
 		}
 		if !got.Shoot {
 			t.Errorf("Shoot = false, want true")
+		}
+		if !got.UsePotion {
+			t.Errorf("UsePotion = false, want true")
 		}
 	})
 
@@ -68,9 +72,4 @@ func TestInput(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported potion is rejected explicitly", func(t *testing.T) {
-		if _, err := Input(&protocol.PlayerInput{InputSeq: 1, UsePotion: true}); err != ErrPotionUnsupported {
-			t.Errorf("Input(use_potion) error = %v, want ErrPotionUnsupported", err)
-		}
-	})
 }

@@ -14,8 +14,9 @@ option go_package = "github.com/Pluto114/The-Return-of-the-Odyssey/server/genera
 // import is added lazily when a ReasonCode or shared DTO is needed.
 // ============================================================================
 
-// C -> S. Request to enter the matchmaking pool. Idempotent within a single
-// session; sending it again while already MATCHING is a no-op.
+// C -> S. Request to enter the matchmaking pool. Idempotent while MATCHING.
+// After a room has failed, the same request asks the server to move the
+// connected two-player team to a fresh match; it does not resume the old run.
 message MatchRequest {
   // Optional skill estimate. Server may ignore or use it to bias pairing.
   uint32 mmr = 1;
