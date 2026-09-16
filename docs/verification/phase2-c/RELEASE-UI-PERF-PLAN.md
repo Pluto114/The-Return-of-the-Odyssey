@@ -71,7 +71,17 @@ pwsh -File scripts/build/build.ps1 -Target client-release
 
 ### 2.2 预设未就位时的临时路径（不阻塞测量，不改共享文件）
 
-在**独立目录**里配置一份 Release 树，不碰 `build/client-windows`（避免把 Debug 树翻成 Release）：
+**一条命令**（推荐）：
+
+```powershell
+pwsh -File scripts/verify/build-client-release.ps1
+# 产物：build/client-windows-release/client/odyssey_client.exe
+# -Reconfigure 强制重新配置；-BuildDir 换目录；脚本拒绝复用非 Release 的已有缓存
+```
+
+该脚本把下列变量按 `client-windows` 预设 1:1 复制，只把 `CMAKE_BUILD_TYPE` 换成 `Release`，并在**独立目录**配置（不碰 `build/client-windows`，不会把 Debug 树翻成 Release），也**不改** `CMakePresets.json` / `build.ps1`。D 的共享预设落地后改用 `pwsh -File scripts/build/build.ps1 -Target client-release`，并删除该脚本与本节。
+
+等价手工命令（供核对脚本行为）：
 
 ```powershell
 cd <repo-root>          # 你本地的仓库根目录

@@ -177,6 +177,7 @@ void TestPlayerInputWire() {
     data.aim_x = 0.0f;
     data.aim_z = 1.0f;
     data.shoot = true;
+    data.use_potion = true;
     data.client_tick_ms = 12345;
     const auto bytes = EncodePlayerInput(data);
 
@@ -195,6 +196,9 @@ void TestPlayerInputWire() {
         CHECK(parsed.aim().y() == data.aim_z);
     }
     CHECK(parsed.shoot());
+    // A5 item C-c: the potion intent must travel on the wire, and its absence must be a
+    // plain false rather than an unset field the server could misread.
+    CHECK(parsed.use_potion());
     // Zero-intent (release) encodes fine with seq and no direction magnitude.
     odyssey::client::network::payload::PlayerInputData idle;
     idle.input_seq = 78;
@@ -202,6 +206,8 @@ void TestPlayerInputWire() {
     odyssey::protocol::v1::PlayerInput idle_parsed;
     CHECK(idle_parsed.ParseFromArray(idle_bytes.data(), static_cast<int>(idle_bytes.size())));
     CHECK(idle_parsed.input_seq() == 78);
+    CHECK(!idle_parsed.use_potion());
+    CHECK(!idle_parsed.shoot());
     if (idle_parsed.has_move()) {
         CHECK(idle_parsed.move().x() == 0.0f);
         CHECK(idle_parsed.move().y() == 0.0f);

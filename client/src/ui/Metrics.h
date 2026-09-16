@@ -133,10 +133,41 @@ private:
     Ema ema_;
 };
 
+// Counts commands submitted to one UI layer. The plan asks for a UI command record as
+// auxiliary diagnostics, and reading a delta per frame needs the arithmetic to be right, so
+// it lives here (raylib-free, unit tested) rather than inline in the render loop.
+//
+// The HUD feeds it from the single text funnel (DrawHudText). That covers every HUD string
+// without touching call sites; shape commands are not counted yet, and the ImGui submit
+// timing arrives with P2.
+class CommandCounter {
+public:
+    void Add(std::uint64_t count = 1) { total_ += count; }
+
+    // Commands submitted since the previous Take(). The first call reports everything so
+    // far, which is the honest answer for a counter that was never read before.
+    std::uint64_t Take() {
+        const std::uint64_t current = total_;
+        const std::uint64_t delta = current - last_;
+        last_ = current;
+        return delta;
+    }
+
+    std::uint64_t Total() const { return total_; }
+
+    void Reset() {
+        total_ = 0;
+        last_ = 0;
+    }
+
+private:
+    std::uint64_t total_ = 0;
+    std::uint64_t last_ = 0;
+};
+
 // Fixed-capacity ring of samples for the overlay's little line graph. No allocation
 // after construction, so it can be appended to from the render loop.
-class MetricSeries {
-public:
+class MetricSeries {public:
     static constexpr std::size_t kCapacity = 120;
 
     void Add(float sample) {

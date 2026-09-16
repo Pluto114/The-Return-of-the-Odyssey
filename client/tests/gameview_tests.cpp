@@ -42,6 +42,7 @@ using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
+using odyssey::client::input::PotionIntent;
 using odyssey::client::sync::CombatView;
 using odyssey::client::sync::AuthoritativeRewardPhaseEnded;
 using odyssey::client::sync::CanReportReady;
@@ -87,6 +88,7 @@ using odyssey::client::ui::AccessibilityConfig;
 using odyssey::client::ui::AssetRootCandidates;
 using odyssey::client::ui::ChooseAssetRoot;
 using odyssey::client::ui::ChooseSettingsDirectory;
+using odyssey::client::ui::CommandCounter;
 using odyssey::client::ui::ComputeHealthSegments;
 using odyssey::client::ui::ComputeViewportLayout;
 using odyssey::client::ui::DamageDedupeTable;
@@ -94,7 +96,8 @@ using odyssey::client::ui::Floater;
 using odyssey::client::ui::FloaterKey;
 using odyssey::client::ui::FloaterPool;
 using odyssey::client::ui::IsInsideTarget;
-using odyssey::client::ui::JoinPath;using odyssey::client::ui::kDefaultAccessibility;
+using odyssey::client::ui::JoinPath;
+using odyssey::client::ui::kDefaultAccessibility;
 using odyssey::client::ui::kDefaultTheme;
 using odyssey::client::ui::kTargetHeight;
 using odyssey::client::ui::kTargetWidth;
@@ -1913,6 +1916,66 @@ void TestStageSummary() {
     CHECK(!line.HasDetail());
 }
 
+void TestPotionIntent() {
+    // A5 item C-c: one press may spend at most one charge, and a blocked press is dropped
+    // rather than queued, so a potion can never fire after a death, a stage transition or a
+    // recovery the player did not press it in.
+    PotionIntent potion;
+    CHECK(!potion.Pending());
+    CHECK(!potion.Consume());  // nothing was pressed: nothing to send
+
+    potion.Press(false);  // gate closed: the press must not be latched
+    CHECK(!potion.Pending());
+    CHECK(!potion.Consume());
+
+    potion.Press(true);
+    CHECK(potion.Pending());
+    CHECK(potion.Consume());   // exactly one report carries it
+    CHECK(!potion.Pending());
+    CHECK(!potion.Consume());  // a second send must not duplicate the request
+
+    // Pressing twice still yields a single pending intent, so a held or repeated key cannot
+    // queue up charges.
+    potion.Press(true);
+    potion.Press(true);
+    CHECK(potion.Consume());
+    CHECK(!potion.Consume());
+
+    // A press admitted just before the gate closes is dropped on the transition.
+    potion.Press(true);
+    CHECK(potion.Pending());
+    potion.Clear();
+    CHECK(!potion.Pending());
+    CHECK(!potion.Consume());
+
+    // A blocked press must not cancel an already admitted one.
+    potion.Press(true);
+    potion.Press(false);
+    CHECK(potion.Consume());
+}
+
+void TestCommandCounter() {
+    // Auxiliary UI-command record (P3): the delta between reads is what the F1 row shows, so
+    // the arithmetic has to be right and the first read must not under-report.
+    CommandCounter counter;
+    CHECK(counter.Total() == 0);
+    CHECK(counter.Take() == 0);
+    counter.Add();
+    counter.Add();
+    counter.Add();
+    CHECK(counter.Total() == 3);
+    CHECK(counter.Take() == 3);  // everything since the last read
+    CHECK(counter.Take() == 0);  // a frame that drew nothing reports zero, not the last value
+    counter.Add(4);
+    CHECK(counter.Total() == 7);
+    CHECK(counter.Take() == 4);
+    counter.Reset();
+    CHECK(counter.Total() == 0);
+    CHECK(counter.Take() == 0);
+    counter.Add(2);
+    CHECK(counter.Take() == 2);  // a reset must not leave a stale high-water mark behind
+}
+
 }  // namespace
 
 int main() {
@@ -1973,6 +2036,8 @@ int main() {
     TestPredictionErrorEstimator();
     TestMetricSeries();
     TestPerfCapture();
+    TestPotionIntent();
+    TestCommandCounter();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

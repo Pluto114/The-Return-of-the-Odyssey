@@ -28,15 +28,18 @@
 
 ## 二、剩余工作，分四部分
 
-### A. C 自己就能做完（不等任何人，约 1 天）
+### A. C 自己就能做完（不等任何人）
+
+> 2026-09-16 更新：第 1/2/3 项已完成，并新增"一键 Release 构建"（第 6 项）—— Release 性能验收不再等 D 的共享预设。
 
 | # | 项 | 说明 | 量级 |
 | --- | --- | --- | --- |
-| 1 | **C-c 药水输入通路** | 按键 + `network/PayloadCodec.h` 编码 `use_potion` + 一次操作只消费一次。协议字段已存在（`game.proto` 的 `use_potion`）；**权威药水槽/HP 显示**仍缺快照字段（A3） | 半天 |
-| 2 | **F1 双向队列深度 EMA 折线图** | 目前只有队列深度**数字**（瞬时/峰值）与 RTT/Tick 两条曲线；分期要求点名"Queue 深度 EMA 折线图" | 1–2h |
-| 3 | 辅助指标 UI 命令记录 | 分期要求"辅助记录 UI 命令 + ImGui 提交耗时供诊断"；ImGui 提交耗时依赖 P2 | 1–2h |
-| 4 | 文档补漏 | `client/README.md` 补 `ODYSSEY_PERF_*` 一段；`CLIENT-PHASE1.md` 的 `[LOCAL_DISPLAY]` 措辞；C-b 在途旧输入按服务端 `ErrStaleInput` 语义收口（§五） | 1–2h |
+| 1 | ~~C-c 药水输入通路~~ | ✅ **已完成（2026-09-16）**：`PotionIntent` 一次性 latch + `use_potion` 编码 + `Q` 键 + 真正发出时才消费；门控关闭丢弃、翻转即清。权威药水槽/HP 显示仍待 A3 | — |
+| 2 | ~~F1 双向队列深度 EMA 折线图~~ | ✅ **已完成（2026-09-16）**：`Ema(0.1)` 平滑、按快照 10Hz 采样，F1 第三条曲线（in=cyan/out=amber），三条图像改为框内标题 | — |
+| 3 | ~~辅助指标 UI 命令记录~~ | ✅ **已完成客户端侧（2026-09-16）**：`ui/Metrics.h::CommandCounter` + `DrawHudText` 自动计数，F1 `ui text cmds last/ema`；ImGui 提交耗时随 P2 | — |
+| 4 | 文档补漏 | `client/README.md` 的 `ODYSSEY_PERF_*` 与 `Q` 键已补；**剩** `CLIENT-PHASE1.md` 的 `[LOCAL_DISPLAY]` 措辞、C-b 在途旧输入按 `ErrStaleInput` 的书面收口（§五） | 1h |
 | 5 | 截图证据链 | `docs/verification/phase2-c` 目前**无截图**。`disconnected`/`login` 与 **`playing`** 现在都能截（main 已有 D 的首关启动 `1bcec34`，`loadbot` 可陪玩补满房间）；**`reward` 截图需 A 的奖励路由**（bot README 明确 A2/A3 奖励与 Ready 路由未进主线）。要求：统一分辨率、无个人绝对路径 | 0.5 天 |
+| 6 | **Release ≤1.5ms 性能验收** | 采集、方案、一键脚本均已就绪，且**不再等 D 的预设**：`pwsh -File scripts/verify/build-client-release.ps1` 建独立 Release 树 → 起 gameserver + `loadbot` → `pwsh -File scripts/verify/client-release-ui-perf.ps1 -Rounds 3 -Frames 600`，脚本直接给出 PASS/FAIL/UNSTABLE 与 `report.md` | 半天 |
 
 ### B. 卡在其他人接线
 
@@ -81,9 +84,9 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 | --- | --- |
 | `odyssey_core_tests` | 557 |
 | `odyssey_net_tests` | 未改动 |
-| `odyssey_logic_tests` | 709 |
+| `odyssey_logic_tests` | 733 |
 | `odyssey_config_tests` | 190 |
-| `odyssey_protocol_tests` | 158 |
+| `odyssey_protocol_tests` | 161 |
 
 已做的额外检查：`main.cpp`、`NetClient.cpp` 以 CMake 同款参数 `/W4` 单独编译 exit 0（无我方警告）；`main.cpp` 纯 ASCII、大括号配平；渲染块内 `std::string`/`std::vector` 构造为 0。
 **唯一未由 C 验证的点**：客户端 target 的 rlImGui + ImGui 完整链接，请在 CMake 构建里确认一次。

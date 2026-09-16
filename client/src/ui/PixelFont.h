@@ -51,4 +51,11 @@ Vector2 MeasureHudText(const char* text, float size);
 // DrawTextEx against the loaded HUD font with pixel-snapped integer positions.
 void DrawHudText(const char* text, float x, float y, float size, Color color);
 
+// Diagnostics (P3): HUD text commands since the previous call. Every HUD string goes
+// through DrawHudText, so this counts the text layer without touching call sites. Shape
+// commands and the ImGui submit timing are not included (the latter arrives with P2).
+// Main Thread only, like the rest of the drawing path.
+std::uint64_t TakeHudTextCommands();
+std::uint64_t HudTextCommandTotal();
+
 }  // namespace odyssey::client::ui

@@ -90,6 +90,7 @@ using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSampler;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
+using odyssey::client::input::PotionIntent;
 using odyssey::client::network::ConnectionState;
 using odyssey::client::network::NetClient;
 using odyssey::client::network::NetEvent;
@@ -144,6 +145,7 @@ using odyssey::client::ui::DamageGhost;
 using odyssey::client::ui::DamageDedupeTable;
 using odyssey::client::ui::DamageShakeOffset;
 using odyssey::client::ui::DrawHudText;
+using odyssey::client::ui::Ema;
 using odyssey::client::ui::Floater;
 using odyssey::client::ui::FloaterKey;
 using odyssey::client::ui::FloaterPool;
@@ -172,6 +174,7 @@ using odyssey::client::ui::ServerTickRateEstimator;
 using odyssey::client::ui::SetHitDirection;
 using odyssey::client::ui::SettingsFileExists;
 using odyssey::client::ui::SettingsFilePath;
+using odyssey::client::ui::TakeHudTextCommands;
 using odyssey::client::ui::Theme;
 using odyssey::client::ui::UpdateDamageGhost;
 using odyssey::client::ui::UpdateHitMarker;
@@ -443,6 +446,10 @@ int main(int argc, char** argv) {
     float last_aim_x = 1.0f;      // aim heading sent to the server (for the HUD)
     float last_aim_z = 0.0f;
     bool last_shoot = false;
+    // A5 item C-c: one-shot potion intent (Q). Latched on press, consumed by exactly one
+    // report, dropped when the input gate closes.
+    PotionIntent potion;
+    std::uint64_t potion_sent = 0;  // client-side count, for the F1 evidence row
     double last_input_time = 0.0;
     GameView game_view;           // players from authoritative snapshots
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
@@ -516,7 +523,20 @@ int main(int argc, char** argv) {
     PredictionErrorEstimator prediction_error;
     MetricSeries rtt_series;
     MetricSeries tick_series;
+    // Queue depth is the smoothed instantaneous depth of both bounded queues (the plan asks
+    // for an EMA line chart next to the numbers). EMA(0.1) matches the other client metrics,
+    // and the series is sampled on snapshot arrival so the chart advances at a stable 10Hz
+    // instead of once per rendered frame (which would scroll 128 samples away in 2 seconds).
+    Ema inbox_depth_ema{0.1f};
+    Ema outbound_depth_ema{0.1f};
+    MetricSeries inbox_depth_series;
+    MetricSeries outbound_depth_series;
     std::uint64_t last_ping_client_time_ms = 0;
+    // Auxiliary diagnostic (plan P3): HUD text commands per frame, read as a delta and
+    // smoothed. The ImGui submit time joins it with P2; today the number covers the Raylib
+    // HUD layer, and it drops to zero on a --no-ui run, which is the point of measuring it.
+    Ema hud_text_cmd_ema{0.1f};
+    std::uint64_t hud_text_cmds_last = 0;
     // Release UI acceptance run: when ODYSSEY_PERF_FRAMES is set the client records
     // per-frame CPU time, writes it once and exits by itself, so the UI-on and UI-off
     // runs are automated and comparable.
@@ -625,6 +645,8 @@ int main(int argc, char** argv) {
             combat_view.Clear();
             reward_view.Clear();
             stage_summary.Clear();
+            potion.Clear();
+            potion_sent = 0;
             demo.prev_stage_index = 0;
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
@@ -682,6 +704,26 @@ int main(int argc, char** argv) {
                         StageStateName(demo.stage_state), demo.self_alive ? "yes" : "no");
             std::fflush(stdout);
         }
+
+        // A5 item C-c: potion key. Sampled here, after the gate for this frame is known, so
+        // a press is admitted only when the intent could actually be sent. A blocked press is
+        // reported with its reason instead of being silently swallowed (same contract as the
+        // input gate log below). The server decides whether a charge was available.
+        // Deliberately NOT gated on ui_enabled: --no-ui skips drawing, never gameplay input.
+        if (IsKeyPressed(KEY_Q)) {
+            if (input_enabled) {
+                potion.Press(true);
+                demo.last_event_note = "potion requested";
+                std::printf("main: potion intent queued (stage=%s)\n",
+                            StageStateName(demo.stage_state));
+            } else {
+                demo.last_event_note = std::string("potion blocked: ") + InputBlockReason(input_gate);
+                std::printf("main: potion blocked (%s) stage=%s alive=%s\n",
+                            InputBlockReason(input_gate), StageStateName(demo.stage_state),
+                            demo.self_alive ? "yes" : "no");
+            }
+            std::fflush(stdout);
+        }
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
             if (now - last_input_time >= 1.0 / 30.0) {
@@ -726,6 +768,17 @@ int main(int argc, char** argv) {
                     input.aim_x = aim_x;
                     input.aim_z = aim_z;
                     input.shoot = IsKeyDown(KEY_SPACE);
+                    // One-shot potion intent (A5 C-c): the press is admitted only while the
+                    // gate is open, and Consume() below hands it to exactly one report. The
+                    // server owns the charge count and the authoritative slot/HP display.
+                    input.use_potion = potion.Consume();
+                    if (input.use_potion) {
+                        ++potion_sent;
+                        demo.last_event_note = "potion sent seq=" + std::to_string(input.input_seq);
+                        std::printf("main: potion sent seq=%u stage=%s\n", input.input_seq,
+                                    StageStateName(demo.stage_state));
+                        std::fflush(stdout);
+                    }
                     input.client_tick_ms = static_cast<std::uint64_t>(now * 1000.0);
                     last_aim_x = aim_x;
                     last_aim_z = aim_z;
@@ -747,6 +800,10 @@ int main(int argc, char** argv) {
                     // resumes (A5 item C-b).
                     if (input_enabled_prev) {
                         predictor.ClearIntent();
+                        // A potion press admitted just before the gate closed must not be
+                        // replayed later: the charge belongs to the moment it was pressed
+                        // (same reasoning as the remembered direction above).
+                        potion.Clear();
                         std::printf("main: input muted (%s) stage=%s alive=%s\n",
                                     InputBlockReason(input_gate),
                                     StageStateName(demo.stage_state),
@@ -791,6 +848,8 @@ int main(int argc, char** argv) {
                         combat_view.Clear();
                         reward_view.Clear();
                         stage_summary.Clear();
+                        potion.Clear();
+                        potion_sent = 0;
                         demo.prev_stage_index = 0;
                         demo.banner.clear();
                         demo.banner_ttl = 0.0f;
@@ -814,6 +873,10 @@ int main(int argc, char** argv) {
                         prediction_error.Reset();
                         rtt_series.Reset();
                         tick_series.Reset();
+                        inbox_depth_series.Reset();
+                        outbound_depth_series.Reset();
+                        inbox_depth_ema.Reset();
+                        outbound_depth_ema.Reset();
                         inbox.ResetMaxDepth();
                         client.ResetOutboundMaxDepth();
                         if (had_session) {
@@ -944,6 +1007,14 @@ int main(int argc, char** argv) {
                             if (server_tick_rate.HasValue()) {
                                 tick_series.Add(server_tick_rate.Hertz());
                             }
+                            // Queue-depth EMA, sampled with the snapshot so the chart has a
+                            // stable 10Hz time base. Depth is read through the published
+                            // atomics, never from the queue itself (that lives on the
+                            // Network Thread).
+                            inbox_depth_ema.Add(static_cast<float>(inbox.Depth()));
+                            outbound_depth_ema.Add(static_cast<float>(client.OutboundDepth()));
+                            inbox_depth_series.Add(inbox_depth_ema.Value());
+                            outbound_depth_series.Add(outbound_depth_ema.Value());
                             if (demo.snapshots_received == 1) {
                                 std::printf("main: first world snapshot tick=%llu\n",
                                             static_cast<unsigned long long>(snap.server_tick));
@@ -1652,6 +1723,14 @@ int main(int argc, char** argv) {
                           static_cast<int>(demo.self_max_hp));
             DrawHudText(line, 28, 408, 18, ToRayColor(theme.text_dim));
 
+            // A5 C-c evidence row. The charge count itself is authoritative and has no
+            // snapshot field yet (A3), so this reports what the CLIENT knows: how many
+            // intents it sent and whether one is still latched, plus the key that is doing it.
+            std::snprintf(line, sizeof(line), "potion sent=%llu pending=%s key=Q (charges: await A3)",
+                          static_cast<unsigned long long>(potion_sent),
+                          potion.Pending() ? "yes" : "no");
+            DrawHudText(line, 28, 474, 18, ToRayColor(theme.text_dim));
+
             std::snprintf(line, sizeof(line), "last event %s",
                           SanitizeAscii(demo.last_event_note.c_str(), ascii_b, sizeof(ascii_b)));
             DrawHudText(line, 500, 342, 18, ToRayColor(theme.text_warn));
@@ -1659,34 +1738,63 @@ int main(int argc, char** argv) {
                           demo.destroys, demo.damages, demo.deaths);
             DrawHudText(line, 500, 364, 18, ToRayColor(theme.text_dim));
 
-            // History graphs (plan asks for line charts next to the numbers). The series
-            // are fixed-capacity rings, so this stays allocation-free; the scale is the
-            // window's own maximum so a quiet link does not look like a flat failure.
-            const auto draw_series = [&](const MetricSeries& series, float x, float y, float w,
-                                         float h, const char* caption, Color colour) {
+            // Auxiliary UI-command record (plan P3). Text commands only: the HUD routes every
+            // string through one funnel, so this needs no call-site bookkeeping. 0 on a
+            // --no-ui run is the expected reading and doubles as proof that the switch works;
+            // the ImGui submit time is added when P2 lands.
+            std::snprintf(line, sizeof(line), "ui text cmds last=%llu ema=%.1f (imgui: P2)",
+                          static_cast<unsigned long long>(hud_text_cmds_last),
+                          static_cast<double>(hud_text_cmd_ema.Value()));
+            DrawHudText(line, 500, 386, 18, ToRayColor(theme.text_dim));
+
+            // History graphs (the plan asks for the queue-depth EMA chart next to the
+            // numbers; RTT and tick come along because they share the slot). The series are
+            // fixed-capacity rings, so this stays allocation-free. Captions sit INSIDE each
+            // box: the panel only has room for three stacked plots, and a caption above one
+            // box would land on the plot of the box above it. A plot is scaled by the
+            // window's own maximum (floored at 1) so a quiet link does not read as a failure.
+            struct SeriesLine {
+                const MetricSeries* series = nullptr;
+                Color colour{};
+            };
+            const auto draw_plot = [&](float x, float y, float w, float h, const char* caption,
+                                       const SeriesLine* lines, std::size_t line_count) {
                 DrawRectangleLines(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w),
                                    static_cast<int>(h), ToRayColor(theme.panel_edge));
-                DrawHudText(caption, x + 4.0f, y - 20.0f, 16, ToRayColor(theme.text_dim));
-                const std::size_t count = series.Count();
-                if (count < 2) {
-                    return;
+                DrawHudText(caption, x + 4.0f, y + 2.0f, 14, ToRayColor(theme.text_dim));
+                float top = 1.0f;
+                for (std::size_t i = 0; i < line_count; ++i) {
+                    if (lines[i].series->MaxValue() > top) {
+                        top = lines[i].series->MaxValue();
+                    }
                 }
-                const float scale = series.MaxValue() > 1e-6f ? series.MaxValue() : 1.0f;
+                // Inset the plot under the caption so the line never runs through it.
+                const float plot_top = y + 16.0f;
+                const float plot_h = h - 18.0f;
                 const float step = w / static_cast<float>(MetricSeries::kCapacity - 1);
-                for (std::size_t i = 1; i < count; ++i) {
-                    const float x0 = x + step * static_cast<float>(i - 1);
-                    const float x1 = x + step * static_cast<float>(i);
-                    const float y0 = y + h - (series.At(i - 1) / scale) * h;
-                    const float y1 = y + h - (series.At(i) / scale) * h;
-                    DrawLineV(Vector2{x0, y0}, Vector2{x1, y1}, colour);
+                for (std::size_t i = 0; i < line_count; ++i) {
+                    const MetricSeries& series = *lines[i].series;
+                    const std::size_t count = series.Count();
+                    for (std::size_t point = 1; point < count; ++point) {
+                        const float x0 = x + step * static_cast<float>(point - 1);
+                        const float x1 = x + step * static_cast<float>(point);
+                        const float y0 = plot_top + plot_h - (series.At(point - 1) / top) * plot_h;
+                        const float y1 = plot_top + plot_h - (series.At(point) / top) * plot_h;
+                        DrawLineV(Vector2{x0, y0}, Vector2{x1, y1}, lines[i].colour);
+                    }
                 }
-                std::snprintf(line, sizeof(line), "max %.2f", series.MaxValue());
-                DrawHudText(line, x + w - 90.0f, y - 20.0f, 16, ToRayColor(theme.text_dim));
+                std::snprintf(line, sizeof(line), "max %.2f", top);
+                DrawHudText(line, x + w - 86.0f, y + 2.0f, 14, ToRayColor(theme.text_dim));
             };
-            draw_series(rtt_series, 500.0f, 412.0f, 400.0f, 48.0f, "rtt ms (EMA 0.1)",
-                        ToRayColor(theme.neon_cyan));
-            draw_series(tick_series, 500.0f, 488.0f, 400.0f, 32.0f, "server tick Hz (expect ~30)",
-                        ToRayColor(theme.neon_magenta));
+            const SeriesLine rtt_lines[] = {{&rtt_series, ToRayColor(theme.neon_cyan)}};
+            const SeriesLine tick_lines[] = {{&tick_series, ToRayColor(theme.neon_magenta)}};
+            const SeriesLine depth_lines[] = {
+                {&inbox_depth_series, ToRayColor(theme.neon_cyan)},
+                {&outbound_depth_series, ToRayColor(theme.text_warn)}};
+            draw_plot(500.0f, 402.0f, 400.0f, 40.0f, "rtt ms (EMA 0.1)", rtt_lines, 1);
+            draw_plot(500.0f, 446.0f, 400.0f, 40.0f, "server tick Hz (expect ~30)", tick_lines, 1);
+            draw_plot(500.0f, 490.0f, 400.0f, 40.0f, "queue depth EMA  in:cyan out:amber",
+                      depth_lines, 2);
             DrawFPS(860, 22);
         } else {  // !debug_overlay: the game view
             // Arena: world [0,20]^2. Self neon blue, peers red, monsters orange,
@@ -2142,7 +2250,8 @@ int main(int argc, char** argv) {
                     const float hint_age = now_seconds - static_cast<float>(hint_shown_at);
                     const float hint_alpha = std::clamp(1.0f - (hint_age - 5.0f), 0.0f, 1.0f);
                     if (hint_alpha > 0.01f) {
-                        const char* hint = "WASD move   mouse aim   SPACE shoot   ENTER ready";
+                        const char* hint =
+                            "WASD move   mouse aim   SPACE shoot   Q potion   ENTER ready";
                         DrawHudText(hint, CenteredTextX(hint, 18), 508, 18,
                                     Fade(ToRayColor(theme.text_dim), hint_alpha));
                     }
@@ -2213,6 +2322,12 @@ int main(int argc, char** argv) {
         // Manual frame pacing fallback: hold each frame to ~1/60s even when
         // raylib's built-in timing is not applied by the linked build.
         const double frame_elapsed = GetTime() - frame_start;
+        // Auxiliary UI-command diagnostic: how many HUD text commands this frame submitted.
+        // Read after the draw block so it describes the frame that was just issued; a
+        // --no-ui run reports 0, which is the evidence that the switch really skipped the
+        // layer it claims to skip.
+        hud_text_cmds_last = TakeHudTextCommands();
+        hud_text_cmd_ema.Add(static_cast<float>(hud_text_cmds_last));
         // Perf capture measures the CPU time of the frame (everything above except the
         // deliberate sleep), so UI-on and UI-off runs compare the same quantity.
         if (perf.Sampling()) {

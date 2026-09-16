@@ -26,7 +26,18 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 - `--no-ui` 或 `ODYSSEY_UI_OFF=1`：**跳过整个 UI 层**（HUD 文字、血条/残影、准星、受击弧、飘字、提示、F1/F2/F3 面板），但**保留** RT 管线、世界（网格与玩家/怪物/投射物）与全部网络/游戏逻辑——这样"同一场景 UI 开 vs 关"的整帧 CPU 时间差才有意义
 - 启动日志会打印 `main: UI layer enabled (...)` 或 `main: UI layer disabled (--no-ui / ODYSSEY_UI_OFF)`
-- 指标口径（与 D 的 Grafana 命名/语义对齐，客户端不接 Prometheus）：RTT = Ping 回显 EMA(α=0.1)；Server Tick = Δ`server_tick`/Δt（**不是** 10Hz 快照率）；Prediction Error = 校正距离 EMA，仅快照到达时更新；队列深度 = 入站/出站瞬时 + 峰值
+- 指标口径（与 D 的 Grafana 命名/语义对齐，客户端不接 Prometheus）：RTT = Ping 回显 EMA(α=0.1)；Server Tick = Δ`server_tick`/Δt（**不是** 10Hz 快照率）；Prediction Error = 校正距离 EMA，仅快照到达时更新；队列深度 = 入站/出站瞬时 + 峰值，另有 EMA 折线图
+- **辅助 UI 命令记录**：F1 的 `ui text cmds last=.. ema=..` 统计每帧提交的 HUD 文本命令数。HUD 的所有字符串都经同一个 `DrawHudText` 漏斗，因此无需在每个调用点埋点；`--no-ui` 时应读数为 0（这本身就是开关生效的证据）。形状命令尚未计入，ImGui 提交耗时随 P2 加入
+- **Release 性能采集**（验收用，见 [RELEASE-UI-PERF-PLAN.md](../docs/verification/phase2-c/RELEASE-UI-PERF-PLAN.md)）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `ODYSSEY_PERF_FRAMES` | 采样帧数 1..4096；设置即开启采集，非法值报错退出 |
+| `ODYSSEY_PERF_LOG` | CSV 输出路径（可选；不设则只打印汇总） |
+| `ODYSSEY_PERF_TRIGGER` | `immediate`（默认，供冒烟）或 `playing`（**验收必须用**：从进入真实战斗的第一帧开始计数，否则 600 帧会落在登录/匹配阶段） |
+
+  采集器丢弃计数前的 10 个预热帧（第 0 帧即字体图集上传帧），计数满后写 CSV、打印 `main: perf frames=.. mean=.. median=.. p95=.. max=.. ui=on|off trigger=..` 并自行退出。
+- **Release 构建（临时路径）**：共享预设尚未提供 Release 配置，因此用 `pwsh -File scripts/verify/build-client-release.ps1` 在**独立目录** `build/client-windows-release` 里配置并构建（不碰 Debug 树、不改 `CMakePresets.json`/`build.ps1`）。D 的共享预设落地后改用 `build.ps1 -Target client-release` 并删除该脚本
 
 ## 资源与设置（UI 重构 P0b）
 
@@ -101,10 +112,11 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 | `WASD` | 移动意图（30Hz 发送，只发意图不发坐标） |
 | 鼠标 | 瞄准方向（相对自身权威位置归一化） |
 | `SPACE` | 射击（按住持续开火，冷却由服务器决定） |
+| `Q` | **使用药水**（一次性意图：按一次最多消费一次；门控关闭时按键被丢弃并打印原因，绝不排队重放） |
 | `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | 报告“准备下一关”：仅当权威状态已是 `PreparingNextStage` 且自身奖励已结清；提前按会显示被拦截原因 |
 | `R` | 失败后手动重连 |
-| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS），含双向队列深度（瞬时/峰值）、RTT EMA、Server Tick 频率、Prediction Error、RTT 与 Tick 的历史折线图，以及 `stage spawned/diff/clear/detail` 与完整 Modifier 列表 |
+| `F1` | 整屏诊断视图（SESSION / NETWORK / INPUT / PREDICTION / WORLD / EVENTS），含双向队列深度（瞬时/峰值 + EMA 折线图）、RTT 与 Server Tick 折线图、辅助 UI 命令记录，以及 `stage spawned/diff/clear/detail` 与完整 Modifier 列表 |
 | `F2` | 实体调试：包围盒、发送中的瞄准锥、自身权威位姿与预测位姿的误差线、远端/怪物的插值延迟线 |
 | `F3` | 无障碍菜单（↑/↓ 选择、ENTER/SPACE 切换）：glitch 效果 / 屏幕抖动 / 伤害飘字；改动**立即写入** `settings.ini` |
 | `ESC` | 优先关闭当前面板（F3 → F2 → F1），都没有打开时才退出游戏 |
@@ -114,7 +126,7 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 
 - **Network Thread** 只做 Socket / 组帧 / 解码，向有界队列投递 `NetEvent`；**绝不**修改客户端世界或渲染状态。
 - **Main Thread** 每帧 Drain 队列、应用快照、绘制；所有权威状态来自服务器。
-- 客户端不发送坐标、命中或伤害结果；当前发送输入序号、时间、移动、瞄准与射击。协议已有 `use_potion`，但客户端键位/编码尚待补齐。
+- 客户端不发送坐标、命中或伤害结果；当前发送输入序号、时间、移动、瞄准、射击与一次性 `use_potion` 意图（是否生效由服务器判定）。
 
 ## 已实现（第二周 D4–D9 客户端侧）
 
@@ -133,7 +145,8 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 - **C-d 预测口径**：改为 tick 驱动——每 30Hz 边界恰好一步（发包 30Hz 还是 300Hz 都不改变预测速度）、移速取快照 `self.move_speed`（装备加成即时生效、非法值拒绝并保留上次有效值）、死亡时不推进、校正只补"本地已模拟过快照 tick"的那几 tick 且限幅 10，杜绝按包加步
 - **C-b 输入门控**：意图只在「已入房 + 本会话已收到权威快照 + 无恢复进行中 + 自己存活 + 关卡正在 `playing`」时发送；任一条件不满足即静默（不消耗 InputSeq、不发包），并在门控翻转时丢弃已记住的方向，避免阶段切换/死亡/恢复后残留旧意图再走一步。HUD 与日志直接给出被拦截原因
 - **C-f 有界等待**：重连尝试用尽后进入**终止态** `kExhausted`（HUD 显示 `exhausted (press R)`、日志提示按 R），不再无声停摆；`ResumeRequest`/`LoginRequest` 若 5 秒无响应即判超时——丢弃令牌、回落全新登录，HUD 显示 `handshake_left=<秒>` 倒计时；超时与连接失败共用同一份尝试预算（最多 5 次）后终止；恢复成功后再次闪断会重置尝试次数与退避（可反复恢复）
-- 待办：C-c 药水（阻塞于 A2/A3）；Token 轮换语义待 A4（`ResumeResponse` 目前无新 token 字段）
+- **C-c 药水（客户端侧已完成）**：`Q` 键 → `PotionIntent` 一次性 latch → 下一个真正发出的 30Hz `PlayerInput` 携带 `use_potion=true`（`PayloadCodec::EncodePlayerInput` 已编码该字段）。规则：门控关闭时的按键**不入队**（打印拦截原因），门控翻转关闭时丢弃已 latch 的意图（与 C-b 的移动意图同规矩），因此不会在死亡/切关/恢复后"补发"一次药水。日志：`main: potion intent queued` / `main: potion blocked (<原因>)` / `main: potion sent seq=..`；F1 显示 `potion sent=.. pending=..`。**权威药水槽位/剩余次数/HP 显示仍缺快照字段（A3）**，故 F1 明确标注 `charges: await A3`；端到端验收还需 A 的 `4462d21` 进入 main（该提交把 `use_potion` 意图映射到权威 World）
+- 待办：Token 轮换语义待 A4（`ResumeResponse` 目前无新 token 字段）
 
 - **D7 阶段摘要（难度 / 全局 Modifier / 清关耗时）**：客户端这半边已完成并**等 A 接线即生效**。
   - 数据来源：字段在 `stage.proto` 的域消息 `StageStarted`（`modifiers`，`StatModifier{target,op,stat,value}`）、`StageCleared`（`difficulty_score`、`clear_time_ms`）上，对应消息类型 `MSG_STAGE_STARTED=400` / `MSG_STAGE_CLEARED=401`；而服务端**目前只发**可靠事件 `msg 325/326`（仅 `stage_index`+`server_tick`），400/401 从未发送、字段也未被填值。
@@ -145,9 +158,9 @@ main: server endpoint 192.168.1.20:7777 (source=cli)     # source: cli | env | d
 
 - 装备显示以 `data/equipment/catalog.json` 为**唯一手写数据源**（D 的方案，已并入 main）：CMake 配置阶段校验版本 1 并生成 `equipment.tsv`（制表符分隔 `id/name/slot/description`），再由 post-build 复制到 **`<exe 目录>/assets/equipment.tsv`**；客户端经资源根解析加载，运行期不解析 JSON、也没有第二张手维护的表。字段含制表符/换行时 CMake 直接报错停止
 - **`NextStageRequest` 服务器侧尚无处理逻辑**：main 上它只在 `server/internal/session/session.go` 的合法性表里出现（InRoom/Reward 合法），没有任何 handler 消费它；奖励完成后的 `PreparingNextStage` 是服务器自己推进的。因此客户端已按 A5 要求把 ready 收敛到正确时机，但**ready 屏障的端到端验收仍取决于 A 接线**（A 的 `1bfd796` 有 Ready 实现，尚未与 D 的入口整合）。
-- 药水（C-c）客户端侧尚未收口。A 的 `feature/network` 新提交 `4462d21` 已把 `use_potion` 映射到权威 World（解除此前的占位拒绝），合入 main 后即可做真实药水联调。**Token 轮换待 A4**：`LoginResponse` 只发一次 `resume_token`，`ResumeResponse` 没有新 token 字段，所以客户端在二次闪断时仍会用旧 token 尝试 resume，被拒后回落全新登录（不会重放旧输入）；若 A 决定 resume 后令牌单次消费并轮换，请给出新 token 的下发字段。
+- 药水（C-c）**客户端侧已收口**（`Q` 键 + `use_potion` 编码 + 一次性消费，见上）；权威药水槽/次数显示待 A3 快照字段，端到端联调待 A 的 `4462d21` 合入 main。**Token 轮换待 A4**：`LoginResponse` 只发一次 `resume_token`，`ResumeResponse` 没有新 token 字段，所以客户端在二次闪断时仍会用旧 token 尝试 resume，被拒后回落全新登录（不会重放旧输入）；若 A 决定 resume 后令牌单次消费并轮换，请给出新 token 的下发字段。
 - **输入只在权威 `stage.state == playing` 时发送**（C-b）：main 的 `1bcec34` 已让正式入口在匹配完成后启动首关，因此正常流程下进入 playing 即开始发输入。
-- 在途旧输入的**丢弃策略仍需 A 确认**：客户端当前采取保守做法（门控翻转即丢弃意图、不重放、序号继续单调），若服务器在切关时对在途输入另有处理（丢弃窗口/复位期望序号），请同步给 C。
+- 在途旧输入的处理（C-b 尾项）：服务端 `server/internal/game/world.go` 对过期序号返回 `ErrStaleInput` 并在 `ApplyInput` 处拒绝，即**服务器不会把乱序/在途旧输入当作新的移动意图**；客户端侧保持保守做法（门控翻转即丢弃意图、不重放、序号继续单调）。两者一致，只等 A 在评审记录里书面确认这一策略，即可正式闭合该条。
 - 难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 仅 index/seed/state/monsters_remaining）。
 - 早期“纯色图元不上屏”根因是该 raylib 构建启用 `SUPPORT_CUSTOM_FRAME_CONTROL`：
   `EndDrawing()` 只提交绘制，需要显式 `SwapScreenBuffer()`（已在 main/probe 中调用）。

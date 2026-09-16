@@ -3,12 +3,20 @@
 #include "ui/PixelFont.h"
 
 #include "ui/AssetPath.h"
+#include "ui/Metrics.h"
 
 #include <cstdio>
 #include <vector>
 
 namespace odyssey::client::ui {
 namespace {
+
+// Diagnostics counter for the HUD text layer (see ui/Metrics.h::CommandCounter). Only the
+// Main Thread draws, so no synchronisation is needed.
+CommandCounter& TextCounter() {
+    static CommandCounter counter;
+    return counter;
+}
 
 // The HUD is English + digits + hex by contract, so only printable ASCII needs a
 // glyph. Loading a tight range keeps the atlas small.
@@ -114,6 +122,11 @@ void DrawHudText(const char* text, float x, float y, float size, Color color) {
     DrawTextEx(hud.font, text, Vector2{static_cast<float>(static_cast<int>(x)),
                                        static_cast<float>(static_cast<int>(y))},
                size, spacing, color);
+    TextCounter().Add();
 }
+
+std::uint64_t TakeHudTextCommands() { return TextCounter().Take(); }
+
+std::uint64_t HudTextCommandTotal() { return TextCounter().Total(); }
 
 }  // namespace odyssey::client::ui

@@ -18,7 +18,7 @@ A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控
 | 流式组帧 | `client/src/core/FramingReader.{h,cpp}` | TCP 字节流 → 完整帧；拆包/粘包；坏 Magic/Version/超限/EOF 截断分类 |
 | 有界队列 | `client/src/core/BoundedQueue.h` | 线程安全有界队列：Push(丢最旧)/TryPush(拒绝)；Close 唤醒等待者 |
 | 端点配置 | `client/src/core/ClientConfig.h` | 命令行/环境变量解析 + 校验（host/port），默认本机；无 raylib/asio/protobuf 依赖，可无头测试 |
-| 装备显示表 | `client/CMakeLists.txt`（配置期生成）→ `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv` | 从 `data/equipment/catalog.json`（唯一手写源，D 负责）生成 TSV 客户端显示表；`CMAKE_CONFIGURE_DEPENDS` 保证目录变更即重新生成；客户端运行期不解析 JSON、也没有第二张手维护表 |
+| 装备显示表 `[LOCAL_DISPLAY]` | `client/CMakeLists.txt`（配置期生成）→ `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv` | 从 `data/equipment/catalog.json`（唯一手写源，D 负责）生成 TSV 客户端显示表；`CMAKE_CONFIGURE_DEPENDS` 保证目录变更即重新生成；客户端运行期不解析 JSON、也没有第二张手维护表。**这是纯展示层：只把 ID 翻译成名称/槽位/描述，不参与任何战斗计算**（伤害、命中、属性结算全部以权威快照为准，见本文 §数据权威）；缺表时回退显示 `[RAW_ID_<id>]` |
 | 网络线程 | `client/src/network/NetClient.{h,cpp}` | Asio TCP 客户端，独立 Network Thread；异步连接/读写；断连事件 |
 | 消息 ID 适配 | `client/src/network/ProtocolIds.h` | A 的 `MessageType` 枚举 → 客户端 constexpr 常量（单一映射点） |
 | 载荷编解码 | `client/src/network/PayloadCodec.h` | Ping/Pong/Login/Resume/Match/Input/Snapshot/战斗事件/奖励 ↔ POD 视图 |

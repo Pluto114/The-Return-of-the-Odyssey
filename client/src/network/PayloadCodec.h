@@ -86,6 +86,10 @@ struct PlayerInputData {
     float aim_x = 0.0f;           // aim heading, world x (finite; required when shoot)
     float aim_z = 0.0f;           // aim heading, world z
     bool shoot = false;
+    // One-shot potion intent (A5 C-c). The server owns availability: it consumes at most
+    // one charge per intent, and a request that arrives while the gate rejects the input
+    // is never sent at all - the caller latches a press exactly once (PotionIntent).
+    bool use_potion = false;
     std::uint64_t client_tick_ms = 0;
 };
 
@@ -100,6 +104,7 @@ inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) 
     aim->set_x(data.aim_x);
     aim->set_y(data.aim_z);
     proto.set_shoot(data.shoot);
+    proto.set_use_potion(data.use_potion);
     std::vector<std::uint8_t> out(proto.ByteSizeLong());
     proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
     return out;
