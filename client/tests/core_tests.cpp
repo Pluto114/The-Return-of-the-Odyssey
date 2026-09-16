@@ -484,6 +484,53 @@ void TestQueueDrain() {
     CHECK(queue.Size() == 0);
 }
 
+// Depth metrics feed the debug overlay's instant/peak readouts (plan section on
+// metric semantics). The peak is a high-water mark: it survives pops and is only
+// lowered by ResetMaxDepth().
+void TestQueueDepthMetrics() {
+    BoundedQueue<int> queue(4);
+    CHECK(queue.Depth() == 0);
+    CHECK(queue.MaxDepth() == 0);
+    CHECK(queue.Capacity() == 4);
+
+    queue.Push(1);
+    queue.Push(2);
+    CHECK(queue.Depth() == 2);
+    CHECK(queue.MaxDepth() == 2);
+    CHECK(queue.Size() == queue.Depth());
+
+    // Popping lowers the instant depth but not the peak.
+    CHECK(queue.TryPop().has_value());
+    CHECK(queue.Depth() == 1);
+    CHECK(queue.MaxDepth() == 2);
+
+    // Filling to capacity, then dropping the oldest, keeps the peak at capacity.
+    queue.Push(3);
+    queue.Push(4);
+    queue.Push(5);  // full: evicts 2
+    CHECK(queue.Depth() == 4);
+    CHECK(queue.MaxDepth() == 4);
+    CHECK(queue.Drain().size() == 4);
+    CHECK(queue.Depth() == 0);
+    CHECK(queue.MaxDepth() == 4);
+
+    // Resetting the watermark to the current depth is how a measurement window
+    // starts (the perf run compares windows, not whole sessions).
+    queue.Push(7);
+    queue.ResetMaxDepth();
+    CHECK(queue.MaxDepth() == 1);
+    queue.Push(8);
+    CHECK(queue.MaxDepth() == 2);
+
+    // A zero-capacity request is clamped to 1, so Depth can never exceed it.
+    BoundedQueue<int> tiny(0);
+    CHECK(tiny.Capacity() == 1);
+    tiny.Push(1);
+    tiny.Push(2);
+    CHECK(tiny.Depth() == 1);
+    CHECK(tiny.MaxDepth() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -506,6 +553,7 @@ int main() {
     TestQueueCloseAndPop();
     TestQueueProducerConsumer();
     TestQueueDrain();
+    TestQueueDepthMetrics();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

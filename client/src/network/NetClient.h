@@ -48,6 +48,15 @@ public:
 
     bool IsRunning() const;
 
+    // Outbound write-queue depth, published from the Network Thread: the instant
+    // depth and the high-water mark since the last reset. Safe from the Main Thread
+    // (the debug overlay reads these).
+    std::size_t OutboundDepth() const;
+    std::size_t OutboundMaxDepth() const;
+    // Fixed bound of the outbound write queue (the denominator for the depth above).
+    std::size_t OutboundCapacity() const;
+    void ResetOutboundMaxDepth();
+
     // Enqueues one outbound frame (header derived from message_type/sequence;
     // payload bytes are opaque here). Safe to call from any thread.
     void SendFrame(std::uint16_t message_type, std::uint32_t sequence,

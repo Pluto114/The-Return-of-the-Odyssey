@@ -5,6 +5,7 @@
 // 30Hz PlayerInput -> authoritative WorldSnapshot. ESC / close
 // stops the Network Thread cleanly. 'R' retries a failed connect.
 #include "core/BoundedQueue.h"
+#include "core/ClientConfig.h"
 #include "input/InputSample.h"
 #include "input/InputSampler.h"
 #include "network/NetClient.h"
@@ -12,13 +13,26 @@
 #include "network/PayloadCodec.h"
 #include "network/ProtocolIds.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
 #include "sync/Interpolation.h"
 #include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
+#include "sync/SessionGate.h"
+#include "sync/StageSummary.h"
+#include "ui/AssetPath.h"
+#include "ui/FloaterPool.h"
+#include "ui/HealthBar.h"
+#include "ui/HudMath.h"
+#include "ui/Metrics.h"
+#include "ui/PerfCapture.h"
+#include "ui/PixelFont.h"
+#include "ui/Theme.h"
+#include "ui/UiGeometry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -36,16 +50,23 @@ constexpr int kScreenHeight = 540;
 constexpr int kFps = 60;
 
 // World [0,20]^2 arena mapped into this screen rectangle (shared by the aim
-// inverse mapping and the drawing code).
+// inverse mapping and the drawing code). Centred and enlarged per the HUD design:
+// the old right-hand placement existed only to leave room for the always-on
+// diagnostic column, which now lives behind F1.
 constexpr float kWorldSize = 20.0f;
-constexpr float kArenaX = 560.0f;
-constexpr float kArenaY = 190.0f;
-constexpr float kArenaW = 340.0f;
-constexpr float kArenaH = 280.0f;
+constexpr float kArenaX = 240.0f;
+constexpr float kArenaY = 30.0f;
+constexpr float kArenaW = 480.0f;
+constexpr float kArenaH = 480.0f;
+constexpr odyssey::client::ui::Rectf kArenaView{kArenaX, kArenaY, kArenaW, kArenaH};
 
-// Gameserver endpoint reserved in the infra docs; read from config later.
-constexpr const char* kServerHost = "10.22.31.251";
-constexpr std::uint16_t kServerPort = 7777;
+// Raylib-dependent adapter for the raylib-free theme palette.
+Color ToRayColor(const odyssey::client::ui::Rgba& colour) {
+    return Color{colour.r, colour.g, colour.b, colour.a};
+}
+
+// Gameserver endpoint: resolved from the command line or the environment, with
+// a loopback default (see core/ClientConfig.h). Never hardcode an address here.
 
 // Development-mode login (Phase 1 has no real auth; server assigns identity).
 constexpr const char* kDevToken = "dev";
@@ -55,27 +76,21 @@ constexpr std::uint32_t kClientProtocolVersion = 1;
 constexpr float kPingIntervalSeconds = 1.0f;
 constexpr double kFrameSeconds = 1.0 / 60.0;
 
-const char* StageStateName(std::uint32_t state) {
-    switch (state) {
-        case 0: return "waiting";
-        case 1: return "playing";
-        case 2: return "clear";
-        case 3: return "reward";
-        case 4: return "preparing";
-        case 5: return "failed";
-        case 6: return "closed";
-        default: return "?";
-    }
-}
-
 using namespace odyssey::client::network::ids;
 namespace payload = odyssey::client::network::payload;
 using odyssey::client::core::BoundedQueue;
+using odyssey::client::core::ClientEndpoint;
+using odyssey::client::core::ClientUsageText;
+using odyssey::client::core::ConfigParseResult;
+using odyssey::client::core::ParseClientOptions;
+using odyssey::client::core::PerfTrigger;
+using odyssey::client::core::ToString;
 using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSampler;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
+using odyssey::client::input::PotionIntent;
 using odyssey::client::network::ConnectionState;
 using odyssey::client::network::NetClient;
 using odyssey::client::network::NetEvent;
@@ -94,22 +109,78 @@ using odyssey::client::network::payload::ProjectileSpawnData;
 using odyssey::client::network::payload::RewardAppliedData;
 using odyssey::client::network::payload::RewardOptionsData;
 using odyssey::client::network::payload::ResumeResponseData;
+using odyssey::client::network::payload::StageClearedDetail;
 using odyssey::client::network::payload::StageEventData;
+using odyssey::client::network::payload::StageModifierData;
+using odyssey::client::network::payload::StageStartedDetail;
 using odyssey::client::network::payload::SnapshotPlayerView;
 using odyssey::client::network::payload::WorldSnapshotView;
 using odyssey::client::sync::CombatView;
+using odyssey::client::sync::AuthoritativeRewardPhaseEnded;
+using odyssey::client::sync::CanReportReady;
+using odyssey::client::sync::CanSendInput;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
+using odyssey::client::sync::InputBlockReason;
 using odyssey::client::sync::InputCommand;
+using odyssey::client::sync::InputGate;
+using odyssey::client::sync::InputSeqFloor;
 using odyssey::client::sync::MonsterEntity;
 using odyssey::client::sync::MovementPredictor;
 using odyssey::client::sync::ProjectileVisual;
+using odyssey::client::sync::ReadyBlockReason;
 using odyssey::client::sync::RecoveryPhase;
 using odyssey::client::sync::RecoveryState;
 using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
+using odyssey::client::sync::StageStateName;
+using odyssey::client::sync::StageSummary;
+using odyssey::client::ui::AccessibilityConfig;
+using odyssey::client::ui::AssetRoot;
+using odyssey::client::ui::ComputeHealthSegments;
+using odyssey::client::ui::ComputeViewportLayout;
+using odyssey::client::ui::DamageGhost;
+using odyssey::client::ui::DamageDedupeTable;
+using odyssey::client::ui::DamageShakeOffset;
+using odyssey::client::ui::DrawHudText;
+using odyssey::client::ui::Ema;
+using odyssey::client::ui::Floater;
+using odyssey::client::ui::FloaterKey;
+using odyssey::client::ui::FloaterPool;
+using odyssey::client::ui::GetAssetPath;
+using odyssey::client::ui::HexagonCrosshair;
+using odyssey::client::ui::HealthSegments;
+using odyssey::client::ui::HitMarker;
+using odyssey::client::ui::HitMarkerFade;
+using odyssey::client::ui::IsInsideTarget;
+using odyssey::client::ui::kCrosshairPoints;
+using odyssey::client::ui::kDefaultTheme;
+using odyssey::client::ui::LoadAccessibility;
+using odyssey::client::ui::MeasureHudText;
+using odyssey::client::ui::MetricSeries;
+using odyssey::client::ui::OnHealthFraction;
+using odyssey::client::ui::PerfCapture;
+using odyssey::client::ui::PerfSummary;
+using odyssey::client::ui::PredictionErrorEstimator;
+using odyssey::client::ui::ReleaseHudFont;
+using odyssey::client::ui::RTToWorld;
+using odyssey::client::ui::RttEstimator;
+using odyssey::client::ui::SanitizeAscii;
+using odyssey::client::ui::SaveAccessibility;
+using odyssey::client::ui::SegmentWidth;
+using odyssey::client::ui::ServerTickRateEstimator;
+using odyssey::client::ui::SetHitDirection;
+using odyssey::client::ui::SettingsFileExists;
+using odyssey::client::ui::SettingsFilePath;
+using odyssey::client::ui::TakeHudTextCommands;
+using odyssey::client::ui::Theme;
+using odyssey::client::ui::UpdateDamageGhost;
+using odyssey::client::ui::UpdateHitMarker;
+using odyssey::client::ui::Vec2f;
+using odyssey::client::ui::ViewportLayout;
+using odyssey::client::ui::WindowToRT;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -151,11 +222,19 @@ struct DemoState {
     std::string server_note;
 
     // WorldSnapshot ingestion stats.
-    std::uint64_t snapshots_received = 0;
+    std::uint64_t snapshots_received = 0;  // lifetime (HUD)
+    // Snapshots of the current session/connection. Reset on every disconnect and
+    // on a fresh login: a resumed session has no authoritative state at all until
+    // its first snapshot arrives (proto/session.proto).
+    std::uint64_t session_snapshots = 0;
 
     // Combat (D4) state.
     float self_hp = 0.0f;
     float self_max_hp = 0.0f;
+    // Authoritative aliveness. Gated on only once a self entity has been seen
+    // (input will not be muted for a field the server has not sent yet).
+    bool self_known = false;
+    bool self_alive = false;
     std::uint32_t stage_index = 0;
     std::uint32_t stage_state = 0;
     std::uint32_t monsters_remaining = 0;
@@ -173,17 +252,188 @@ struct DemoState {
     float self_defense = 0.0f;
     float self_move_speed = 0.0f;
 
-    // D7 readiness (client-side echo; the server owns the ready barrier).
+    // D7 readiness: the server owns the ready barrier. The client only reports
+    // ready once the authoritative state is PreparingNextStage (A5 item C-a) and
+    // latches it per stage so ENTER cannot spam the request.
     bool ready_sent = false;
+    std::uint32_t ready_stage = 0;  // stage index ready_sent applies to
 };
+
+// A5 item C-b: everything the input gate depends on, gathered in one place so the
+// send path and the HUD always agree on why input is muted.
+InputGate MakeInputGate(const DemoState& demo, bool recovery_active) {
+    InputGate gate;
+    gate.in_room = demo.in_room;
+    gate.session_has_snapshot = demo.session_snapshots > 0;
+    gate.recovery_active = recovery_active;
+    gate.self_known = demo.self_known;
+    gate.self_alive = demo.self_alive;
+    gate.stage_state = demo.stage_state;
+    return gate;
+}
+
+// What the screen shows, per docs/architecture/CLIENT-HUD-DESIGN.md section 4. A lost or
+// recovering link outranks everything else, then the lobby, then the stage states.
+enum class HudPhase {
+    kOffline,     // disconnected / connecting / recovering
+    kLobby,       // connected, not in a stage (login, matching, waiting for the stage)
+    kPlaying,     // stage is being played: the game HUD is live
+    kReward,      // reward offers are on screen
+    kTransition,  // clear / preparing / failed / closed
+};
+
+HudPhase CurrentHudPhase(const DemoState& demo, const RecoveryState& recovery) {
+    using odyssey::client::sync::StageState;
+    if (demo.state != ConnectionState::kConnected || recovery.Active()) {
+        return HudPhase::kOffline;
+    }
+    if (!demo.in_room) {
+        return HudPhase::kLobby;
+    }
+    switch (static_cast<StageState>(demo.stage_state)) {
+        case StageState::kPlaying:
+            return HudPhase::kPlaying;
+        case StageState::kReward:
+            return HudPhase::kReward;
+        case StageState::kStageClear:
+        case StageState::kPreparingNextStage:
+        case StageState::kFailed:
+        case StageState::kClosed:
+            return HudPhase::kTransition;
+        case StageState::kWaiting:
+            break;
+    }
+    return HudPhase::kLobby;  // waiting for the first stage
+}
+
+// Centre a HUD line horizontally inside the 960px render target.
+float CenteredTextX(const char* text, float size) {
+    return (kScreenWidth - MeasureHudText(text, size).x) * 0.5f;
+}
+
+// World position of whatever entity an id refers to: players first, then monsters.
+// Used to anchor damage floaters and to work out where a hit came from.
+bool FindEntityWorld(const GameView& players, const CombatView& monsters, std::uint64_t id,
+                     float& x, float& z) {
+    if (const auto* player = players.Find(id)) {
+        x = player->x;
+        z = player->z;
+        return true;
+    }
+    if (const auto* monster = monsters.FindMonster(id)) {
+        x = monster->x;
+        z = monster->z;
+        return true;
+    }
+    return false;
+}
+
+// Short, player-facing label for the transition card (design section 4).
+const char* TransitionLabel(std::uint32_t wire_stage_state) {
+    using odyssey::client::sync::StageState;
+    switch (static_cast<StageState>(wire_stage_state)) {
+        case StageState::kStageClear: return "STAGE CLEAR";
+        case StageState::kPreparingNextStage: return "PREPARING NEXT STAGE";
+        case StageState::kFailed: return "TEAM DEFEATED";
+        case StageState::kClosed: return "RUN CLOSED";
+        case StageState::kWaiting: return "WAITING";
+        case StageState::kPlaying: return "IN PROGRESS";
+        case StageState::kReward: return "CHOOSE A REWARD";
+    }
+    return "?";
+}
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Resolve the endpoint before creating the window so that --help and
+    // invalid arguments both exit without opening one.
+    const ConfigParseResult config = ParseClientOptions(argc, argv);
+    if (!config.ok) {
+        std::fprintf(stderr, "odyssey_client: %s\n", config.error.c_str());
+        std::fprintf(stderr, "\n%s", ClientUsageText());
+        return 2;
+    }
+    if (config.options.help_requested) {
+        std::printf("%s", ClientUsageText());
+        return 0;
+    }
+    const ClientEndpoint endpoint = config.options.endpoint;
+    // --no-ui / ODYSSEY_UI_OFF=1: keep the world rendering and every gameplay/network
+    // path, drop the UI layer. This is the switch the performance acceptance run uses
+    // to compare UI-on vs UI-off frame time in the same scene.
+    const bool ui_enabled = config.options.ui_enabled;
+
+    // Window contract (UI refactor P0b): resizable before InitWindow, a 960x540
+    // minimum so the integer letterbox never has to shrink, ESC taken over by the
+    // game loop (raylib's default close-on-ESC is disabled), and no HIGHDPI flag -
+    // the render target already provides the fixed pixel grid.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     std::printf("main: before InitWindow\n"); fflush(stdout);
     InitWindow(kScreenWidth, kScreenHeight, "The Return of the Odyssey - Client");
     std::printf("main: after InitWindow\n"); fflush(stdout);
+    SetWindowMinSize(kScreenWidth, kScreenHeight);
+    // Start at the largest INTEGER multiple of 960x540 the monitor can show, so the
+    // letterbox bars stay small on a large display. Integer-only scaling is the
+    // design rule (fractional scaling would blur the pixel art); the window can be
+    // resized freely afterwards and the layout recomputes on every resize.
+    int window_w = kScreenWidth;
+    int window_h = kScreenHeight;
+    {
+        const int monitor_w = GetMonitorWidth(GetCurrentMonitor());
+        const int monitor_h = GetMonitorHeight(GetCurrentMonitor());
+        if (monitor_w > kScreenWidth && monitor_h > kScreenHeight) {
+            // Leave room for the title bar and taskbar.
+            const int usable_w = (monitor_w * 95) / 100;
+            const int usable_h = (monitor_h * 90) / 100;
+            const int scale = std::max(1, std::min(usable_w / kScreenWidth, usable_h / kScreenHeight));
+            window_w = kScreenWidth * scale;
+            window_h = kScreenHeight * scale;
+            std::printf("main: monitor %dx%d -> window %dx%d (scale %d)\n", monitor_w, monitor_h,
+                        window_w, window_h, scale);
+        } else {
+            std::printf("main: WARN monitor size %dx%d unknown/too small; keeping %dx%d\n",
+                        monitor_w, monitor_h, window_w, window_h);
+        }
+        std::fflush(stdout);
+        SetWindowSize(window_w, window_h);
+    }
+    SetExitKey(KEY_NULL);
     SetTargetFPS(kFps);
+
+    // Everything - world and HUD alike - is drawn into this fixed 960x540 target
+    // and blitted with an integer scale plus letterbox bars.
+    RenderTexture2D target = LoadRenderTexture(kScreenWidth, kScreenHeight);
+    // raylib 6.0 renamed this check: it is IsRenderTextureValid(), not the 5.x
+    // IsRenderTextureReady() the UI plan mentioned.
+    const bool target_ready = IsRenderTextureValid(target);
+    if (target_ready) {
+        // Nearest-neighbour: integer upscaling must not blur the pixel art.
+        SetTextureFilter(target.texture, TEXTURE_FILTER_POINT);
+    } else {
+        std::printf("main: WARN render texture unavailable; drawing straight to the window\n");
+        std::fflush(stdout);
+    }
+    // Use the window size we just asked for rather than reading it back: the layout
+    // must not depend on how quickly the platform applied the resize.
+    ViewportLayout layout = ComputeViewportLayout(window_w, window_h);
+    std::printf("main: viewport %dx%d scale=%.0f offset=(%.0f,%.0f)\n", GetScreenWidth(),
+                GetScreenHeight(), layout.scale, layout.offset_x, layout.offset_y);
+    std::fflush(stdout);
+    const Theme theme = kDefaultTheme;
+    // Mutable: the F3 menu toggles these and persists them (P3).
+    AccessibilityConfig accessibility = LoadAccessibility();
+    std::printf("main: asset root '%s' (settings '%s'%s)\n", AssetRoot().c_str(),
+                SettingsFilePath().c_str(), SettingsFileExists() ? "" : ", not created yet");
+    // The accessibility switches are consumed by the HUD/effects in P1-P3; logging
+    // them here keeps the loaded state visible in playtest evidence.
+    std::printf("main: accessibility glitch_fx=%d screen_shake=%d damage_floaters=%d\n",
+                accessibility.disable_glitch_fx ? 0 : 1,
+                accessibility.disable_screen_shake ? 0 : 1,
+                accessibility.disable_damage_floaters ? 0 : 1);
+    std::printf("main: UI layer %s\n", ui_enabled ? "enabled (F1 diagnostics, F2 entities, F3 accessibility)"
+                                                  : "disabled (--no-ui / ODYSSEY_UI_OFF)");
+    std::fflush(stdout);
 
     BoundedQueue<NetEvent> inbox(256);
     NetClient client;
@@ -196,6 +446,10 @@ int main() {
     float last_aim_x = 1.0f;      // aim heading sent to the server (for the HUD)
     float last_aim_z = 0.0f;
     bool last_shoot = false;
+    // A5 item C-c: one-shot potion intent (Q). Latched on press, consumed by exactly one
+    // report, dropped when the input gate closes.
+    PotionIntent potion;
+    std::uint64_t potion_sent = 0;  // client-side count, for the F1 evidence row
     double last_input_time = 0.0;
     GameView game_view;           // players from authoritative snapshots
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
@@ -206,30 +460,112 @@ int main() {
     SnapshotInterpolator monster_interp;  // monsters (10Hz -> smooth)
     EquipmentTable equipment_table;
 
-    // This table is generated from data/equipment/catalog.json by CMake and
-    // copied beside the executable. Missing data degrades to placeholders.
-    const std::string executable_equipment = std::string(GetApplicationDirectory()) + "equipment.tsv";
-    for (const std::string& candidate : {executable_equipment, std::string("equipment.tsv"),
-                                         std::string("assets/data/equipment.tsv")}) {
-        std::ifstream file(candidate);
-        if (file) {
+    // Equipment display table: generated from data/equipment/catalog.json by CMake
+    // (the single hand-maintained source) and copied next to the executable. The
+    // asset root is tried first, then the executable directory, so the client works
+    // both from a build tree and from a shipped folder. Missing data degrades to
+    // "equipment#<id>" placeholders instead of failing.
+    {
+        const std::string candidates[] = {GetAssetPath("equipment.tsv"),
+                                          std::string(GetApplicationDirectory()) + "equipment.tsv"};
+        for (const std::string& equipment_path : candidates) {
+            std::ifstream file(equipment_path);
+            if (!file) {
+                continue;
+            }
             std::stringstream buffer;
             buffer << file.rdbuf();
-            const std::size_t loaded = odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
-            std::printf("main: loaded %zu equipment entries from %s\n", loaded, candidate.c_str());
+            const std::size_t loaded =
+                odyssey::client::sync::ParseEquipmentTable(buffer.str(), equipment_table);
+            std::printf("main: loaded %zu equipment entries from %s\n", loaded,
+                        equipment_path.c_str());
             std::fflush(stdout);
             break;
+        }
+        if (equipment_table.empty()) {
+            std::printf("main: WARN equipment display table missing (%s or %s); "
+                        "rewards will show raw ids\n",
+                        candidates[0].c_str(), candidates[1].c_str());
+            std::fflush(stdout);
         }
     }
 
     client.SetEventCallback([&inbox](NetEvent&& event) { inbox.Push(std::move(event)); });
+    // Prints the effective endpoint and where it came from, so a LAN playtest can
+    // tell a mistyped argument from a server that is simply not running.
+    std::printf("main: server endpoint %s:%u (source=%s)\n", endpoint.host.c_str(),
+                static_cast<unsigned>(endpoint.port), ToString(config.options.source));
     std::printf("main: starting net thread\n"); fflush(stdout);
-    client.Start(kServerHost, kServerPort);
+    client.Start(endpoint.host, endpoint.port);
     std::printf("main: net thread started, entering loop\n"); fflush(stdout);
 
     double last_ping_sent = 0.0;
     int frame_counter = 0;
     const double t_start = GetTime();
+    // Input gate state, recomputed every frame and shared with the HUD. The
+    // previous value drives the mute/unmute transitions below.
+    InputGate input_gate;
+    bool input_enabled = false;
+    bool input_enabled_prev = false;
+    // F1 development overlay (design section 7): every diagnostic line that used to be
+    // always on screen. stdout evidence logging is unaffected.
+    bool debug_overlay = false;
+    // P3 panels: F2 entity/aim/interpolation debug, F3 accessibility menu.
+    bool entity_debug = false;
+    bool accessibility_menu = false;
+    int accessibility_cursor = 0;
+    // Metric estimators (plan section on metric semantics): RTT is ping/pong driven
+    // with EMA(0.1), the server tick rate comes from delta(server_tick)/delta(t) so it
+    // reports 30Hz rather than the 10Hz snapshot rate, and prediction error is only
+    // sampled when a snapshot arrives.
+    RttEstimator rtt;
+    ServerTickRateEstimator server_tick_rate;
+    PredictionErrorEstimator prediction_error;
+    MetricSeries rtt_series;
+    MetricSeries tick_series;
+    // Queue depth is the smoothed instantaneous depth of both bounded queues (the plan asks
+    // for an EMA line chart next to the numbers). EMA(0.1) matches the other client metrics,
+    // and the series is sampled on snapshot arrival so the chart advances at a stable 10Hz
+    // instead of once per rendered frame (which would scroll 128 samples away in 2 seconds).
+    Ema inbox_depth_ema{0.1f};
+    Ema outbound_depth_ema{0.1f};
+    MetricSeries inbox_depth_series;
+    MetricSeries outbound_depth_series;
+    std::uint64_t last_ping_client_time_ms = 0;
+    // Auxiliary diagnostic (plan P3): HUD text commands per frame, read as a delta and
+    // smoothed. The ImGui submit time joins it with P2; today the number covers the Raylib
+    // HUD layer, and it drops to zero on a --no-ui run, which is the point of measuring it.
+    Ema hud_text_cmd_ema{0.1f};
+    std::uint64_t hud_text_cmds_last = 0;
+    // Release UI acceptance run: when ODYSSEY_PERF_FRAMES is set the client records
+    // per-frame CPU time, writes it once and exits by itself, so the UI-on and UI-off
+    // runs are automated and comparable.
+    PerfCapture perf;
+    if (config.options.perf_frames > 0) {
+        perf.Arm(config.options.perf_frames);
+        std::printf("main: perf capture %zu frames trigger=%s -> %s\n",
+                    config.options.perf_frames, ToString(config.options.perf_trigger),
+                    config.options.perf_log.empty() ? "(no file; summary only)"
+                                                    : config.options.perf_log.c_str());
+        if (config.options.perf_trigger == PerfTrigger::kImmediate) {
+            perf.BeginSampling();
+        }
+        std::fflush(stdout);
+    }
+    // P1b-2 combat feedback: white ghost of the health bar, the direction the last
+    // hit came from, and the damage floater pool with its hit de-duplication table.
+    DamageGhost damage_ghost;
+    HitMarker hit_marker;
+    FloaterPool floater_pool;
+    DamageDedupeTable damage_dedupe;
+    float last_self_fraction = 1.0f;
+    bool self_fraction_known = false;
+    double hint_shown_at = -1.0;  // control hint fades a few seconds into play
+
+    // D7 stage summary: difficulty, clear time and the stage's global modifiers. Stays
+    // empty (and every line below stays hidden) until the server sends A's domain stage
+    // messages - see sync/StageSummary.h for why the reliable events cannot carry them.
+    StageSummary stage_summary;
 
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
@@ -247,6 +583,15 @@ int main() {
             break;
         }
         const double frame_start = GetTime();
+        // Resize: recompute the integer scale and letterbox offsets. Cheap and
+        // only on the frames where the platform reports a size change.
+        if (IsWindowResized()) {
+            layout = ComputeViewportLayout(GetScreenWidth(), GetScreenHeight());
+            std::printf("main: window resized %dx%d -> scale=%.0f offset=(%.0f,%.0f)\n",
+                        GetScreenWidth(), GetScreenHeight(), layout.scale, layout.offset_x,
+                        layout.offset_y);
+            std::fflush(stdout);
+        }
         // Decay transient combat feedback (hit flashes, banner).
         const float frame_dt = GetFrameTime();
         combat_view.Tick(frame_dt);
@@ -263,8 +608,22 @@ int main() {
         }
         ++frame_counter;
         if (IsKeyPressed(KEY_ESCAPE)) {
-            std::printf("main: ESC pressed, exiting loop\n"); fflush(stdout);
-            break;
+            // ESC closes whatever panel is open first and only quits when nothing is
+            // open (the UI contract's priority order). KEY_NULL already stopped
+            // raylib from closing the window itself.
+            if (accessibility_menu) {
+                accessibility_menu = false;
+                std::printf("main: ESC closed the accessibility menu\n"); fflush(stdout);
+            } else if (entity_debug) {
+                entity_debug = false;
+                std::printf("main: ESC closed the entity debug view\n"); fflush(stdout);
+            } else if (debug_overlay) {
+                debug_overlay = false;
+                std::printf("main: ESC closed the diagnostics view\n"); fflush(stdout);
+            } else {
+                std::printf("main: ESC pressed, exiting loop\n"); fflush(stdout);
+                break;
+            }
         }
         if (IsKeyPressed(KEY_R)) {
             // Retry after a failed/disconnected connect attempt.
@@ -285,11 +644,17 @@ int main() {
             game_view = GameView{};
             combat_view.Clear();
             reward_view.Clear();
+            stage_summary.Clear();
+            potion.Clear();
+            potion_sent = 0;
             demo.prev_stage_index = 0;
             demo.banner.clear();
             demo.banner_ttl = 0.0f;
             demo.ready_sent = false;
-            client.Connect(kServerHost, kServerPort);
+            demo.session_snapshots = 0;
+            demo.self_known = false;
+            demo.self_alive = false;
+            client.Connect(endpoint.host, endpoint.port);
         }
 
         // Automatic reconnect with bounded backoff after a transient outage.
@@ -300,7 +665,7 @@ int main() {
             demo.state_detail = recovery.Note();
             std::printf("main: %s\n", recovery.Note().c_str());
             std::fflush(stdout);
-            client.Connect(kServerHost, kServerPort);
+            client.Connect(endpoint.host, endpoint.port);
         }
 
         // Reward choice: keys 1..3 pick one of the offered options. Only a
@@ -323,19 +688,65 @@ int main() {
 
         // Sample and transmit intent at a fixed 30Hz after MatchFound. The
         // client sends direction only; position always comes from snapshots.
+        // A5 items C-b/C-e: intent is transmitted only while the room session is
+        // live, this session has an authoritative snapshot, no recovery is in
+        // progress, the player is alive and the stage is actually being played.
+        // Recomputed every frame (before the connection check) so the send path
+        // and the HUD can never disagree, and a dropped link reports muted at once.
+        input_gate = MakeInputGate(demo, recovery.Active());
+        input_enabled = CanSendInput(input_gate);
+        // Perf capture trigger: with trigger=playing the measurement begins at the first
+        // frame of a live battle - the same predicate that opens input - so the UI-on and
+        // UI-off runs cover the same kind of scene instead of login/matchmaking. No-op for
+        // trigger=immediate (already sampling) and for runs without a capture.
+        if (input_enabled && perf.BeginSampling()) {
+            std::printf("main: perf capture started (stage=%s alive=%s)\n",
+                        StageStateName(demo.stage_state), demo.self_alive ? "yes" : "no");
+            std::fflush(stdout);
+        }
+
+        // A5 item C-c: potion key. Sampled here, after the gate for this frame is known, so
+        // a press is admitted only when the intent could actually be sent. A blocked press is
+        // reported with its reason instead of being silently swallowed (same contract as the
+        // input gate log below). The server decides whether a charge was available.
+        // Deliberately NOT gated on ui_enabled: --no-ui skips drawing, never gameplay input.
+        if (IsKeyPressed(KEY_Q)) {
+            if (input_enabled) {
+                potion.Press(true);
+                demo.last_event_note = "potion requested";
+                std::printf("main: potion intent queued (stage=%s)\n",
+                            StageStateName(demo.stage_state));
+            } else {
+                demo.last_event_note = std::string("potion blocked: ") + InputBlockReason(input_gate);
+                std::printf("main: potion blocked (%s) stage=%s alive=%s\n",
+                            InputBlockReason(input_gate), StageStateName(demo.stage_state),
+                            demo.self_alive ? "yes" : "no");
+            }
+            std::fflush(stdout);
+        }
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
             if (now - last_input_time >= 1.0 / 30.0) {
                 last_input_time = now;
                 last_sample = input_sampler.SampleNow();
-                if (demo.in_room) {
+                if (input_enabled) {
+                    if (!input_enabled_prev) {
+                        std::printf("main: input enabled stage=%s alive=%s\n",
+                                    StageStateName(demo.stage_state),
+                                    demo.self_alive ? "yes" : "no");
+                        std::fflush(stdout);
+                    }
                     last_report = input_sequencer.Tick(last_sample);
-                    // Aim heading: mouse position mapped back to world space,
-                    // relative to our own authoritative position. The client
-                    // never sends positions or hit results.
+                    // Aim heading: mouse position mapped back to world space. The
+                    // window pointer goes through the letterbox transform first,
+                    // so aim stays correct at any window size, then through the
+                    // shared RT->world mapping (same one the crosshair and the
+                    // damage floaters will use).
                     const Vector2 mouse = GetMousePosition();
-                    const float mx = (mouse.x - kArenaX) / kArenaW * kWorldSize;
-                    const float mz = (mouse.y - kArenaY) / kArenaH * kWorldSize;
+                    const Vec2f rt_mouse = WindowToRT(Vec2f{mouse.x, mouse.y}, layout);
+                    const Vec2f world_mouse = RTToWorld(rt_mouse, kArenaView);
+                    const float mx = world_mouse.x;
+                    const float mz = world_mouse.y;
                     float aim_x = 1.0f;
                     float aim_z = 0.0f;
                     if (const auto* self = game_view.Find(demo.player_id)) {
@@ -357,20 +768,52 @@ int main() {
                     input.aim_x = aim_x;
                     input.aim_z = aim_z;
                     input.shoot = IsKeyDown(KEY_SPACE);
+                    // One-shot potion intent (A5 C-c): the press is admitted only while the
+                    // gate is open, and Consume() below hands it to exactly one report. The
+                    // server owns the charge count and the authoritative slot/HP display.
+                    input.use_potion = potion.Consume();
+                    if (input.use_potion) {
+                        ++potion_sent;
+                        demo.last_event_note = "potion sent seq=" + std::to_string(input.input_seq);
+                        std::printf("main: potion sent seq=%u stage=%s\n", input.input_seq,
+                                    StageStateName(demo.stage_state));
+                        std::fflush(stdout);
+                    }
                     input.client_tick_ms = static_cast<std::uint64_t>(now * 1000.0);
                     last_aim_x = aim_x;
                     last_aim_z = aim_z;
                     last_shoot = input.shoot;
-                    // Predict immediately and remember the input for replay
-                    // until the server confirms it via last_processed_input.
+                    // Predict with the same rules the server uses: record the
+                    // intent, then advance exactly one 1/30 step per 30Hz
+                    // boundary. Steps are counted in ticks, never per sent packet
+                    // (A5 item C-d), so a faster send rate cannot outrun the
+                    // server.
                     predictor.RecordInput(InputCommand{last_report.sequence,
                                                        last_report.vector.x,
                                                        last_report.vector.z});
+                    predictor.AdvanceTick();
                     SendPayload(kPlayerInput, payload::EncodePlayerInput(input));
                 } else {
+                    // Muted: no InputSeq is consumed and no input is transmitted.
+                    // Drop the remembered intent on the transition so a stale
+                    // direction is not applied for one extra tick when play
+                    // resumes (A5 item C-b).
+                    if (input_enabled_prev) {
+                        predictor.ClearIntent();
+                        // A potion press admitted just before the gate closed must not be
+                        // replayed later: the charge belongs to the moment it was pressed
+                        // (same reasoning as the remembered direction above).
+                        potion.Clear();
+                        std::printf("main: input muted (%s) stage=%s alive=%s\n",
+                                    InputBlockReason(input_gate),
+                                    StageStateName(demo.stage_state),
+                                    demo.self_alive ? "yes" : "no");
+                        std::fflush(stdout);
+                    }
                     last_report.sequence = 0;
                     last_report.vector = NormalizeInput(last_sample);
                 }
+                input_enabled_prev = input_enabled;
             }
         }
 
@@ -404,10 +847,38 @@ int main() {
                         game_view = GameView{};
                         combat_view.Clear();
                         reward_view.Clear();
+                        stage_summary.Clear();
+                        potion.Clear();
+                        potion_sent = 0;
                         demo.prev_stage_index = 0;
                         demo.banner.clear();
                         demo.banner_ttl = 0.0f;
                         demo.ready_sent = false;
+                        // No authoritative state belongs to the next connection:
+                        // input stays muted until its first snapshot arrives.
+                        demo.session_snapshots = 0;
+                        demo.self_known = false;
+                        demo.self_alive = false;
+                        // Cross-session cleanup (UI contract): the dedupe table and the
+                        // floater pool are cleared so a reconnect cannot suppress or
+                        // resurrect hit feedback from the previous session.
+                        floater_pool.Clear();
+                        damage_dedupe.Clear();
+                        hit_marker = HitMarker{};
+                        damage_ghost = DamageGhost{};
+                        self_fraction_known = false;
+                        // Metrics describe one session; a reconnect starts a new window.
+                        rtt.Reset();
+                        server_tick_rate.Reset();
+                        prediction_error.Reset();
+                        rtt_series.Reset();
+                        tick_series.Reset();
+                        inbox_depth_series.Reset();
+                        outbound_depth_series.Reset();
+                        inbox_depth_ema.Reset();
+                        outbound_depth_ema.Reset();
+                        inbox.ResetMaxDepth();
+                        client.ResetOutboundMaxDepth();
                         if (had_session) {
                             recovery.OnDisconnect(GetTime());
                             std::printf("main: connection lost -> recovery (%s)\n",
@@ -441,6 +912,7 @@ int main() {
                                 recovery.OnFreshLoginOk();
                                 demo.resumed = false;
                                 input_sequencer.Reset();
+                                demo.session_snapshots = 0;
                             }
                         } else {
                             demo.login_ok = false;
@@ -457,9 +929,20 @@ int main() {
                                 demo.resumed = true;
                                 demo.in_room = true;
                                 demo.login_note = "resumed session";
+                                // The server re-bound us to the existing room:
+                                // matchmaking must NOT run again for this session
+                                // (A5 item C-e), and the resume token stays valid.
+                                demo.match_sent = true;
+                                demo.match_note = "resumed (no new match)";
+                                // The resumed session has no authoritative state
+                                // until its first snapshot: keep input muted and
+                                // do not let the old sequence range be replayed.
+                                demo.session_snapshots = 0;
                                 std::printf("main: session resumed session=%llu player=%llu\n",
                                             static_cast<unsigned long long>(resume.session_id),
                                             static_cast<unsigned long long>(resume.player_id));
+                                std::printf("main: input muted until the first snapshot of the "
+                                            "resumed session\n");
                                 std::fflush(stdout);
                             } else {
                                 // Refused (expired/forged/replayed). Never replay
@@ -494,6 +977,13 @@ int main() {
                         if (payload::DecodePong(event->message.payload, pong)) {
                             demo.pong_server_time_ms = pong.server_time_ms;
                             demo.pong_nonce = pong.nonce;
+                            // RTT from the ping this pong answers (the client clock is
+                            // the only one we can trust end to end), EMA(0.1).
+                            rtt.OnPong(last_ping_client_time_ms,
+                                       static_cast<std::uint64_t>(GetTime() * 1000.0));
+                            if (rtt.HasValue()) {
+                                rtt_series.Add(rtt.Milliseconds());
+                            }
                         }
                     } else if (event->message.message_type == kDisconnect) {
                         DisconnectData disc;
@@ -508,9 +998,44 @@ int main() {
                         WorldSnapshotView snap;
                         if (payload::DecodeWorldSnapshot(event->message.payload, snap)) {
                             ++demo.snapshots_received;
+                            const bool first_of_session = demo.session_snapshots == 0;
+                            ++demo.session_snapshots;
+                            // Tick rate from the tick the snapshot carries (not the
+                            // snapshot arrival rate), and prediction error sampled here
+                            // because the plan ties it to snapshot arrival.
+                            server_tick_rate.OnSnapshot(snap.server_tick, GetTime());
+                            if (server_tick_rate.HasValue()) {
+                                tick_series.Add(server_tick_rate.Hertz());
+                            }
+                            // Queue-depth EMA, sampled with the snapshot so the chart has a
+                            // stable 10Hz time base. Depth is read through the published
+                            // atomics, never from the queue itself (that lives on the
+                            // Network Thread).
+                            inbox_depth_ema.Add(static_cast<float>(inbox.Depth()));
+                            outbound_depth_ema.Add(static_cast<float>(client.OutboundDepth()));
+                            inbox_depth_series.Add(inbox_depth_ema.Value());
+                            outbound_depth_series.Add(outbound_depth_ema.Value());
                             if (demo.snapshots_received == 1) {
                                 std::printf("main: first world snapshot tick=%llu\n",
                                             static_cast<unsigned long long>(snap.server_tick));
+                                std::fflush(stdout);
+                            }
+                            if (first_of_session) {
+                                // A5 item C-e: the first snapshot of a resumed
+                                // session is the authority on where this session's
+                                // input range already stands. Continue strictly
+                                // above both the high-water mark sent before the
+                                // drop and the server's LastProcessedInputSeq,
+                                // never replaying the pre-drop range.
+                                if (demo.resumed) {
+                                    const std::uint32_t floor = InputSeqFloor(
+                                        input_sequencer.LastSequence(), snap.last_processed_input);
+                                    input_sequencer.EnsureGreaterThan(floor);
+                                    std::printf("main: resumed input floor=%u next_seq=%u\n",
+                                                floor, input_sequencer.LastSequence() + 1);
+                                }
+                                std::printf("main: input enabled after first snapshot%s\n",
+                                            demo.resumed ? " (resumed session)" : "");
                                 std::fflush(stdout);
                             }
                             odyssey::client::sync::SnapshotView sv;
@@ -565,27 +1090,67 @@ int main() {
                             stage.monsters_remaining = snap.stage.monsters_remaining;
                             combat_view.SetStage(stage);
                             // New stage: old projectiles must not leak across
-                            // the transition (they are event-driven only).
+                            // the transition (they are event-driven only). The stage
+                            // summary resets on the same edge: last stage's modifiers,
+                            // difficulty and clear time must not survive into this one.
                             if (demo.prev_stage_index != 0 &&
                                 snap.stage.index != demo.prev_stage_index) {
                                 combat_view.ClearProjectiles();
+                                stage_summary.BeginStage(snap.stage.index);
                                 demo.last_event_note = "stage index changed -> projectiles cleared";
                             }
+                            // Seed and index are on the wire today (StageState), so the
+                            // F1 STAGE row works before A's detail messages land.
+                            stage_summary.BeginStage(snap.stage.index);
+                            stage_summary.SetSeed(snap.stage.seed);
                             demo.prev_stage_index = snap.stage.index;
                             demo.stage_index = snap.stage.index;
                             demo.stage_state = snap.stage.state;
                             demo.monsters_remaining = snap.stage.monsters_remaining;
+                            // A5 item C-a: the snapshot is the authority on the
+                            // reward phase. If it already ended while this client
+                            // is still holding an open panel, close it so it
+                            // cannot block the ready barrier (the server settled
+                            // the round; no outcome is invented here).
+                            if (AuthoritativeRewardPhaseEnded(snap.stage.state) &&
+                                reward_view.Active()) {
+                                reward_view.SettleAfterAuthoritativeEnd();
+                                std::printf("main: reward panel settled by authoritative state=%s\n",
+                                            StageStateName(snap.stage.state));
+                                std::fflush(stdout);
+                            }
                             if (snap.has_self) {
+                                // Health loss feeds the damaged-bar ghost: it holds the
+                                // pre-hit level briefly so the hit reads (P1b-2).
+                                const float new_fraction =
+                                    snap.self.max_hp > 0.0f ? (snap.self.hp / snap.self.max_hp)
+                                                            : 0.0f;
+                                OnHealthFraction(damage_ghost,
+                                                 self_fraction_known ? last_self_fraction
+                                                                     : new_fraction,
+                                                 new_fraction);
+                                last_self_fraction = new_fraction;
+                                self_fraction_known = true;
                                 demo.self_hp = snap.self.hp;
                                 demo.self_max_hp = snap.self.max_hp;
                                 demo.self_attack = snap.self.attack;
                                 demo.self_defense = snap.self.defense;
                                 demo.self_move_speed = snap.self.move_speed;
-                                // D9: snap to the authoritative position and
-                                // replay only the inputs the server has not
-                                // confirmed yet.
+                                demo.self_known = true;
+                                demo.self_alive = snap.self.alive;
+                                // D9/A5 C-d: snap to the authoritative pose, adopt
+                                // the server's move speed and alive flag, then
+                                // re-advance only the ticks already simulated past
+                                // this snapshot (tick timeline, not packet count).
                                 predictor.ApplyAuthoritative(snap.self.pos_x, snap.self.pos_z,
-                                                             snap.last_processed_input);
+                                                             snap.last_processed_input,
+                                                             snap.server_tick,
+                                                             snap.self.move_speed,
+                                                             snap.self.alive);
+                                // Sampled after reconciliation so it is this
+                                // snapshot's correction distance.
+                                prediction_error.OnSnapshotCorrection(
+                                    predictor.LastCorrectionDistance());
                             }
 
                             // D9: remote entities are rendered from an
@@ -647,6 +1212,34 @@ int main() {
                                                    std::to_string(damage.target_id) + " amount=" +
                                                    std::to_string(damage.amount) + " hp=" +
                                                    std::to_string(damage.remaining_health);
+                            // Presentation feedback (P1b-2). The de-duplication key is
+                            // (server_tick, source, target): the same source hitting the
+                            // same target in one tick is one hit, so a retransmitted or
+                            // double-reported event cannot spawn a second floater.
+                            const FloaterKey key{damage.server_tick,
+                                                 static_cast<std::uint32_t>(damage.source_id),
+                                                 static_cast<std::uint32_t>(damage.target_id)};
+                            if (damage_dedupe.Accept(key)) {
+                                const float now_seconds = static_cast<float>(GetTime());
+                                float target_x = 0.0f;
+                                float target_z = 0.0f;
+                                if (FindEntityWorld(game_view, combat_view, damage.target_id,
+                                                    target_x, target_z)) {
+                                    floater_pool.Spawn(key, target_x, target_z, damage.amount,
+                                                       now_seconds,
+                                                       !accessibility.disable_damage_floaters);
+                                }
+                                // Hit on us: remember which way it came from.
+                                if (damage.target_id == demo.player_id) {
+                                    float source_x = 0.0f;
+                                    float source_z = 0.0f;
+                                    if (FindEntityWorld(game_view, combat_view, damage.source_id,
+                                                        source_x, source_z)) {
+                                        SetHitDirection(hit_marker, target_x, target_z, source_x,
+                                                        source_z, now_seconds);
+                                    }
+                                }
+                            }
                         }
                     } else if (event->message.message_type == kDeathEvent) {
                         DeathEventData death;
@@ -674,15 +1267,61 @@ int main() {
                             demo.banner_ttl = 2.5f;
                             if (event->message.message_type == kStageStartedEvent) {
                                 // A new stage begins: drop event-driven bullets
-                                // from the previous wave and any reward panel.
+                                // from the previous wave, any reward panel and the
+                                // remembered movement intent (a direction held
+                                // during the transition must not carry over).
                                 combat_view.ClearProjectiles();
                                 reward_view.Clear();
+                                predictor.ClearIntent();
                                 demo.ready_sent = false;
+                                // Per-stage detail (modifiers/difficulty/clear time) belongs
+                                // to one stage only. Idempotent by index, so it does not
+                                // matter whether this event or A's detail message arrives
+                                // first (see StageSummary::BeginStage). The seed is not part
+                                // of this event; it arrives with the snapshots.
+                                stage_summary.BeginStage(stage_event.stage_index);
                             }
                             std::printf("main: %s stage=%u tick=%llu\n", kind,
                                         stage_event.stage_index,
                                         static_cast<unsigned long long>(stage_event.server_tick));
                             std::fflush(stdout);
+                        }
+                    } else if (event->message.message_type == kStageStarted ||
+                               event->message.message_type == kStageCleared) {
+                        // A's domain stage messages (MSG_STAGE_STARTED 400 / MSG_STAGE_CLEARED
+                        // 401): the only carriers of the global modifiers and the difficulty /
+                        // clear-time summary. The reliable events above cannot carry them, and
+                        // the server does not send these yet - when it does, the HUD lines and
+                        // the F1 STAGE row light up with no further client change.
+                        if (event->message.message_type == kStageStarted) {
+                            StageStartedDetail detail;
+                            if (payload::DecodeStageStartedDetail(event->message.payload, detail)) {
+                                stage_summary.BeginStage(detail.stage_index);
+                                stage_summary.SetSeed(detail.seed);
+                                stage_summary.SetMonsterCount(detail.monster_count);
+                                for (std::size_t i = 0; i < detail.modifier_count; ++i) {
+                                    const StageModifierData& modifier = detail.modifiers[i];
+                                    stage_summary.AddModifier(modifier.target, modifier.op,
+                                                              modifier.stat, modifier.value);
+                                }
+                                std::printf("main: stage detail stage=%u monsters=%u seed=%u "
+                                            "modifiers=%zu (+%zu) difficulty=%s\n",
+                                            detail.stage_index, detail.monster_count, detail.seed,
+                                            detail.modifier_count, detail.modifier_overflow,
+                                            stage_summary.has_difficulty() ? "yes" : "no");
+                                std::fflush(stdout);
+                            }
+                        } else {
+                            StageClearedDetail detail;
+                            if (payload::DecodeStageClearedDetail(event->message.payload, detail)) {
+                                stage_summary.SetCleared(detail.difficulty_score,
+                                                         detail.clear_time_ms);
+                                std::printf("main: stage cleared detail stage=%u difficulty=%u "
+                                            "clear_ms=%llu\n",
+                                            detail.stage_index, detail.difficulty_score,
+                                            static_cast<unsigned long long>(detail.clear_time_ms));
+                                std::fflush(stdout);
+                            }
                         }
                     } else if (event->message.message_type == kRewardOptions) {
                         RewardOptionsData options;
@@ -716,13 +1355,35 @@ int main() {
             }
         }
 
+        // Keyed by stage index rather than a bare flag: if a StageStarted event
+        // is ever missed, the next stage still becomes reportable instead of
+        // staying latched forever.
+        const bool ready_reported = demo.ready_sent && demo.ready_stage == demo.stage_index;
+
         if (demo.state == ConnectionState::kConnected) {
             const double now = GetTime();
+
+            // A5 item C-f: a handshake the server never answers must not leave the
+            // client "connected" but permanently mute. On timeout the token is
+            // dropped and the fresh-login path below runs in this same frame.
+            if (recovery.HandshakeTimedOut(now)) {
+                const bool was_resuming = recovery.Phase() == RecoveryPhase::kResuming;
+                recovery.OnHandshakeTimeout(now);
+                demo.login_sent = false;
+                demo.login_ok = false;
+                demo.login_note = recovery.Note();
+                if (was_resuming) {
+                    demo.resume_token.clear();
+                    demo.resumed = false;
+                }
+                std::printf("main: %s\n", recovery.Note().c_str());
+                std::fflush(stdout);
+            }
 
             // Resume first when we still hold a token (D8); otherwise perform a
             // fresh development login.
             if (recovery.WantsResumeRequest()) {
-                recovery.MarkResumeSent();
+                recovery.MarkResumeSent(now);
                 demo.login_sent = true;
                 demo.login_note = "sending ResumeRequest";
                 SendPayload(kResumeRequest,
@@ -732,6 +1393,7 @@ int main() {
             } else if (!demo.login_sent && recovery.Phase() != RecoveryPhase::kResuming) {
                 demo.login_sent = true;
                 demo.login_note = "sent, awaiting response";
+                recovery.MarkLoginSent(now);
                 LoginRequestData login;
                 login.protocol_version = kClientProtocolVersion;
                 login.token = kDevToken;
@@ -739,10 +1401,19 @@ int main() {
                 SendPayload(kLoginRequest, payload::EncodeLoginRequest(login));
             }
 
+            // Matchmaking runs once per fresh session. A resumed session is
+            // already bound to its room, so it must never enqueue a new match
+            // request (A5 item C-e).
             if (demo.login_ok && !demo.match_sent) {
                 demo.match_sent = true;
                 demo.match_note = "queued";
                 SendPayload(kMatchRequest, payload::EncodeMatchRequest());
+                // Evidence chain + automation hook: the room only forms once two players are
+                // queued, and the counterpart bot gives up after 5s of waiting for a message,
+                // so whatever starts that second player (scripts/verify/client-release-ui-perf.ps1)
+                // waits for exactly this line instead of guessing with a sleep.
+                std::printf("main: match request sent (queued)\n");
+                std::fflush(stdout);
             }
 
             // Heartbeat with a real Ping payload; Pong echoes nonce back.
@@ -752,31 +1423,131 @@ int main() {
                 ping.client_time_ms = static_cast<std::uint64_t>(now * 1000.0);
                 ping.nonce = ++demo.ping_nonce;
                 ++demo.pings_sent;
+                last_ping_client_time_ms = ping.client_time_ms;  // for the RTT estimate
                 SendPayload(kPing, payload::EncodePing(ping));
             }
 
-            // D7: while in the Reward state, ENTER reports "ready for the next
-            // stage". The server applies the ready barrier; repeat presses are
-            // idempotent server-side.
-            if (demo.in_room && demo.stage_state == 3 && IsKeyPressed(KEY_ENTER)) {
-                SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
-                demo.ready_sent = true;
-                demo.last_event_note = "next stage ready sent";
-                std::printf("main: next stage ready sent\n");
-                std::fflush(stdout);
+            // D7 / A5 item C-a: report "ready for the next stage" only when the
+            // authoritative state is PreparingNextStage - the server moves there
+            // itself once the reward round is complete - and this client's own
+            // reward is settled. Pressing ENTER earlier only produces a request
+            // the room cannot use, so it is refused here with a visible reason.
+            if (demo.in_room && IsKeyPressed(KEY_ENTER)) {
+                if (CanReportReady(demo.in_room, demo.stage_state, reward_view.State(),
+                                   ready_reported)) {
+                    SendPayload(kNextStageRequest, payload::EncodeNextStageRequest());
+                    demo.ready_sent = true;
+                    demo.ready_stage = demo.stage_index;
+                    demo.last_event_note = "next stage ready sent";
+                    std::printf("main: next stage ready sent stage=%u state=%s\n",
+                                demo.stage_index, StageStateName(demo.stage_state));
+                    std::fflush(stdout);
+                } else {
+                    const char* reason = ReadyBlockReason(demo.in_room, demo.stage_state,
+                                                          reward_view.State(), ready_reported);
+                    demo.last_event_note = std::string("ready blocked: ") + reason;
+                    std::printf("main: ready blocked (%s) stage=%u state=%s\n", reason,
+                                demo.stage_index, StageStateName(demo.stage_state));
+                    std::fflush(stdout);
+                }
             }
         }
 
         BeginDrawing();
-        ClearBackground(RAYWHITE);
+        // UI refactor P0b: the world and the HUD are drawn into the fixed 960x540
+        // render target, which is then blitted to the window with an integer scale
+        // and letterbox bars. Only the target's own clear is themed; the default
+        // framebuffer gets an explicit black clear so a resized window can never
+        // show stale pixels in the bars or ghost the previous frame.
+        if (target_ready) {
+            BeginTextureMode(target);
+        }
+        ClearBackground(ToRayColor(theme.background));
 
-        DrawText("The Return of the Odyssey", 24, 24, 32, DARKGRAY);
-        DrawText("Phase 1 - authoritative two-player movement", 24, 64, 20, GRAY);
+        // Screen layer per docs/architecture/CLIENT-HUD-DESIGN.md: disconnection
+        // outranks the lobby, which outranks the stage states.
+        const HudPhase hud_phase = CurrentHudPhase(demo, recovery);
+        const bool in_stage = hud_phase == HudPhase::kPlaying || hud_phase == HudPhase::kReward ||
+                              hud_phase == HudPhase::kTransition;
+        // F1 swaps the whole screen for the diagnostics view (section 7): a long column of
+        // numbers is easier to read without the world painted over it, while F2 keeps
+        // the world visible and annotates it. stdout evidence logging is unaffected
+        // either way.
+        if (!ui_enabled) {
+            debug_overlay = false;  // --no-ui keeps the UI layer off regardless of keys
+        }
+        if (ui_enabled && IsKeyPressed(KEY_F1)) {
+            debug_overlay = !debug_overlay;
+        }
+        if (ui_enabled && IsKeyPressed(KEY_F2)) {
+            entity_debug = !entity_debug;
+            std::printf("main: entity debug %s\n", entity_debug ? "on" : "off");
+            std::fflush(stdout);
+        }
+        if (ui_enabled && IsKeyPressed(KEY_F3)) {
+            accessibility_menu = !accessibility_menu;
+            accessibility_cursor = 0;
+            std::printf("main: accessibility menu %s\n", accessibility_menu ? "open" : "closed");
+            std::fflush(stdout);
+        }
+        if (ui_enabled && accessibility_menu) {
+            // Three switches, keys only: UP/DOWN select, ENTER or SPACE toggles and
+            // writes settings.ini (a write failure is a warning, never a crash).
+            if (IsKeyPressed(KEY_DOWN)) {
+                accessibility_cursor = (accessibility_cursor + 1) % 3;
+            }
+            if (IsKeyPressed(KEY_UP)) {
+                accessibility_cursor = (accessibility_cursor + 2) % 3;
+            }
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) {
+                switch (accessibility_cursor) {
+                    case 0: accessibility.disable_glitch_fx = !accessibility.disable_glitch_fx; break;
+                    case 1:
+                        accessibility.disable_screen_shake = !accessibility.disable_screen_shake;
+                        break;
+                    default:
+                        accessibility.disable_damage_floaters =
+                            !accessibility.disable_damage_floaters;
+                        break;
+                }
+                const bool saved = SaveAccessibility(accessibility);
+                std::printf("main: accessibility glitch_fx=%d screen_shake=%d damage_floaters=%d "
+                            "saved=%s\n",
+                            accessibility.disable_glitch_fx ? 0 : 1,
+                            accessibility.disable_screen_shake ? 0 : 1,
+                            accessibility.disable_damage_floaters ? 0 : 1, saved ? "yes" : "no");
+                std::fflush(stdout);
+            }
+        }
 
-        const std::string state_line =
-            std::string("Connection: ") + ToString(demo.state) + "  (" + demo.state_detail + ")";
-        DrawText(state_line.c_str(), 24, 100, 20,
-                 demo.state == ConnectionState::kConnected ? DARKGREEN : DARKGRAY);
+        // Every HUD string is formatted into a fixed stack buffer - no std::string or
+        // std::vector is built per frame - and anything that can carry server/OS text
+        // goes through SanitizeAscii first, because the pixel atlas holds printable
+        // ASCII only (a localized connect error would otherwise sample missing
+        // glyphs).
+        char line[256] = {0};
+        char ascii_a[160] = {0};
+        char ascii_b[160] = {0};
+        char ascii_c[160] = {0};
+        char suffix[80] = {0};
+
+        if (debug_overlay) {
+            DrawRectangle(0, 0, kScreenWidth, kScreenHeight, ToRayColor(theme.background));
+            DrawRectangle(12, 12, 936, 516, Fade(ToRayColor(theme.panel), 0.92f));
+            DrawRectangleLines(12, 12, 936, 516, ToRayColor(theme.panel_edge));
+            DrawHudText("DIAGNOSTICS  (F1 to close)", 28, 22, 20, ToRayColor(theme.neon_cyan));
+            DrawHudText("SESSION", 28, 56, 16, ToRayColor(theme.neon_yellow));
+            DrawHudText("NETWORK", 500, 56, 16, ToRayColor(theme.neon_yellow));
+            DrawHudText("INPUT", 28, 214, 16, ToRayColor(theme.neon_yellow));
+            DrawHudText("PREDICTION", 500, 214, 16, ToRayColor(theme.neon_yellow));
+            DrawHudText("WORLD", 28, 320, 16, ToRayColor(theme.neon_yellow));
+            DrawHudText("EVENTS", 500, 320, 16, ToRayColor(theme.neon_yellow));
+
+            std::snprintf(line, sizeof(line), "conn %s (%s)", ToString(demo.state),
+                          SanitizeAscii(demo.state_detail.c_str(), ascii_a, sizeof(ascii_a)));
+            DrawHudText(line, 28, 78, 18,
+                        demo.state == ConnectionState::kConnected ? ToRayColor(theme.neon_cyan)
+                                                                  : ToRayColor(theme.text_dim));
 
         const char* recovery_phase = "idle";
         switch (recovery.Phase()) {
@@ -786,191 +1557,769 @@ int main() {
             case RecoveryPhase::kResuming: recovery_phase = "resuming"; break;
             case RecoveryPhase::kRestored: recovery_phase = "restored"; break;
             case RecoveryPhase::kFailed: recovery_phase = "failed"; break;
+            case RecoveryPhase::kExhausted: recovery_phase = "exhausted (press R)"; break;
         }
-        const std::string recovery_line =
-            std::string("Recovery: ") + recovery_phase + " attempts=" +
-            std::to_string(recovery.Attempts()) + " token_bytes=" +
-            std::to_string(demo.resume_token.size()) +
-            (demo.resumed ? " (resumed session)" : "") + "  " + recovery.Note();
-        DrawText(recovery_line.c_str(), 24, 115, 18, GRAY);
-
-        const std::string login_line =
-            "Login: " + demo.login_note +
-            (demo.login_ok ? ("  session=" + std::to_string(demo.session_id) +
-                              " player=" + std::to_string(demo.player_id))
-                           : "");
-        DrawText(login_line.c_str(), 24, 130, 20, demo.login_ok ? DARKGREEN : GRAY);
-
-        DrawText(("Match: " + demo.match_note).c_str(), 520, 130, 20,
-                 demo.in_room ? DARKGREEN : GRAY);
-
-        if (demo.received_any) {
-            const std::string msg = "Inbound: type=" + std::to_string(demo.last_type) +
-                                    " seq=" + std::to_string(demo.last_sequence) +
-                                    " bytes=" + std::to_string(demo.last_payload_bytes);
-            DrawText(msg.c_str(), 24, 160, 20, GRAY);
+        // The handshake countdown makes an unanswered ResumeRequest/LoginRequest
+        // visible instead of looking like a hang (A5 item C-f).
+        if (recovery.HandshakePending()) {
+            std::snprintf(suffix, sizeof(suffix), " handshake_left=%.1fs",
+                          recovery.HandshakeSecondsLeft(GetTime()));
         } else {
-            DrawText("Inbound: (none yet)", 24, 160, 20, GRAY);
+            suffix[0] = '\0';
         }
+            std::snprintf(line, sizeof(line), "recovery %s attempts=%d token=%zu%s%s  %s",
+                          recovery_phase, recovery.Attempts(), demo.resume_token.size(), suffix,
+                          demo.resumed ? " (resumed)" : "", recovery.Note().c_str());
+            DrawHudText(line, 28, 100, 18, ToRayColor(theme.text_dim));
 
-        const std::string hb_line =
-            "Ping sent: " + std::to_string(demo.pings_sent) +
-            "   Pong: nonce=" + std::to_string(demo.pong_nonce) +
-            " server_time_ms=" + std::to_string(demo.pong_server_time_ms);
-        DrawText(hb_line.c_str(), 24, 190, 20, GRAY);
-        DrawText(("Outbound drops: " + std::to_string(demo.outbound_drops)).c_str(), 24, 220, 20, GRAY);
-        if (!demo.server_note.empty()) {
-            DrawText(demo.server_note.c_str(), 24, 250, 20, MAROON);
-        }
-
-        const std::string input_line =
-            "Input intent: keys(dx=" + std::to_string(last_sample.dx) +
-            ", dz=" + std::to_string(last_sample.dz) + ") vec(" +
-            std::to_string(last_report.vector.x) + ", " + std::to_string(last_report.vector.z) +
-            ") seq=" + std::to_string(last_report.sequence) + " @30Hz";
-        DrawText(input_line.c_str(), 24, 280, 20, GRAY);
-
-        const std::string view_line =
-            "View: players=" + std::to_string(game_view.PlayerCount()) +
-            " room=" + std::to_string(game_view.RoomId()) +
-            " tick=" + std::to_string(game_view.ServerTick()) +
-            " snaps=" + std::to_string(demo.snapshots_received);
-        DrawText(view_line.c_str(), 24, 310, 20, GRAY);
-
-        const std::string combat_line =
-            "Stage: idx=" + std::to_string(demo.stage_index) +
-            " state=" + StageStateName(demo.stage_state) +
-            " remain=" + std::to_string(demo.monsters_remaining) +
-            " | monsters=" + std::to_string(combat_view.MonsterCount()) +
-            " bullets=" + std::to_string(combat_view.ProjectileCount());
-        DrawText(combat_line.c_str(), 24, 340, 20, GRAY);
-
-        const std::string hp_line =
-            "HP self=" + std::to_string(static_cast<int>(demo.self_hp)) + "/" +
-            std::to_string(static_cast<int>(demo.self_max_hp)) +
-            "  shoot=" + std::string(last_shoot ? "yes" : "no") +
-            "  events sp/dst/dmg/dth=" + std::to_string(demo.spawns) + "/" +
-            std::to_string(demo.destroys) + "/" + std::to_string(demo.damages) + "/" +
-            std::to_string(demo.deaths);
-        DrawText(hp_line.c_str(), 24, 370, 20, GRAY);
-
-        const std::string stats_line =
-            "Stats(snapshot): ATK=" + std::to_string(static_cast<int>(demo.self_attack)) +
-            " DEF=" + std::to_string(static_cast<int>(demo.self_defense)) +
-            " SPD=" + std::to_string(static_cast<int>(demo.self_move_speed)) +
-            "  Ready: " + (demo.ready_sent ? "sent" : "no") +
-            "  seed=" + std::to_string(combat_view.Stage().seed);
-        DrawText(stats_line.c_str(), 24, 400, 20, GRAY);
-        DrawText(("Last event: " + demo.last_event_note).c_str(), 470, 400, 18, MAROON);
-
-        char correction_text[32] = {0};
-        std::snprintf(correction_text, sizeof(correction_text), "%.3f",
-                      predictor.LastCorrectionDistance());
-        const std::string netcode_line =
-            "Netcode: pending=" + std::to_string(predictor.PendingCount()) +
-            " corr=" + correction_text +
-            " interpDelay=" + std::to_string(static_cast<int>(remote_interp.DelayTicks())) +
-            "t tracks=" + std::to_string(remote_interp.Count()) + "/" +
-            std::to_string(monster_interp.Count());
-        DrawText(netcode_line.c_str(), 24, 430, 20, GRAY);
-
-        // Arena: world [0,20]^2. Self blue, peers red, monsters orange,
-        // projectiles gold. Projectiles exist only via spawn/destroy events.
-        DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
-                           static_cast<int>(kArenaW), static_cast<int>(kArenaH), LIGHTGRAY);
-        const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
-        const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
-
-        for (const auto& [id, projectile] : combat_view.Projectiles()) {
-            (void)id;
-            DrawCircleV(Vector2{to_screen_x(projectile.x), to_screen_y(projectile.z)}, 3.0f, GOLD);
-        }
-
-        for (const auto& [id, monster] : combat_view.Monsters()) {
-            // D9: render monsters from the interpolated 10Hz buffer.
-            float mx = monster.x;
-            float mz = monster.z;
-            monster_interp.SampleEntity(id, mx, mz);
-            const float sx = to_screen_x(mx);
-            const float sy = to_screen_y(mz);
-            const bool dead = combat_view.IsDead(id);
-            DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
-                          dead ? DARKGRAY : ORANGE);
-            if (dead) {
-                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7,
-                         static_cast<int>(sx) + 7, static_cast<int>(sy) + 7, BLACK);
-                DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) + 7,
-                         static_cast<int>(sx) + 7, static_cast<int>(sy) - 7, BLACK);
-            }
-            const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4, Fade(RED, 0.25f));
-            DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
-                          static_cast<int>(20.0f * ratio), 4, LIME);
-            if (combat_view.IsHitFlashing(id)) {
-                DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f, GOLD);
-            }
-            DrawText(std::to_string(id).c_str(), static_cast<int>(sx) + 9,
-                     static_cast<int>(sy) - 8, 12, DARKGRAY);
-        }
-
-        for (const auto& player : game_view.Players()) {
-            const bool is_self = (player.id == demo.player_id);
-            float px = player.x;
-            float pz = player.z;
-            if (is_self) {
-                // D9: draw our predicted position (reconciled each snapshot).
-                if (predictor.HasPrediction()) {
-                    px = predictor.X();
-                    pz = predictor.Z();
-                }
+            if (demo.login_ok) {
+                std::snprintf(suffix, sizeof(suffix), " session=%llu player=%llu",
+                              static_cast<unsigned long long>(demo.session_id),
+                              static_cast<unsigned long long>(demo.player_id));
             } else {
-                // D9: remote players come from the interpolated buffer.
-                remote_interp.SampleEntity(player.id, px, pz);
+                suffix[0] = '\0';
             }
-            px = to_screen_x(px);
-            pz = to_screen_y(pz);
-            DrawCircleV(Vector2{px, pz}, 9.0f,
-                        !player.alive ? DARKGRAY : (is_self ? BLUE : RED));
-            if (combat_view.IsHitFlashing(player.id)) {
-                DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f, GOLD);
+            std::snprintf(line, sizeof(line), "login %s%s",
+                          SanitizeAscii(demo.login_note.c_str(), ascii_a, sizeof(ascii_a)), suffix);
+            DrawHudText(line, 28, 122, 18,
+                        demo.login_ok ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "match %s",
+                          SanitizeAscii(demo.match_note.c_str(), ascii_b, sizeof(ascii_b)));
+            DrawHudText(line, 28, 144, 18,
+                        demo.in_room ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_dim));
+
+            if (demo.received_any) {
+                std::snprintf(line, sizeof(line), "inbound type=%u seq=%u bytes=%zu",
+                              demo.last_type, demo.last_sequence, demo.last_payload_bytes);
+            } else {
+                std::snprintf(line, sizeof(line), "inbound (none yet)");
             }
-            // HP bar above every player (authoritative hp/max_hp from snapshot).
-            const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4, Fade(RED, 0.25f));
-            DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20,
-                          static_cast<int>(24.0f * hp_ratio), 4, player.alive ? GREEN : GRAY);
-            if (is_self) {
-                // Aim heading we are sending to the server.
-                DrawLineV(Vector2{px, pz},
-                          Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f}, DARKBLUE);
+            DrawHudText(line, 500, 78, 18, ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "ping=%u pong nonce=%llu t=%llu", demo.pings_sent,
+                          static_cast<unsigned long long>(demo.pong_nonce),
+                          static_cast<unsigned long long>(demo.pong_server_time_ms));
+            DrawHudText(line, 500, 100, 18, ToRayColor(theme.text_dim));
+            std::snprintf(line, sizeof(line), "outbound drops=%d", demo.outbound_drops);
+            DrawHudText(line, 500, 122, 18, ToRayColor(theme.text_dim));
+            if (!demo.server_note.empty()) {
+                DrawHudText(SanitizeAscii(demo.server_note.c_str(), ascii_c, sizeof(ascii_c)), 500,
+                            144, 18, ToRayColor(theme.text_danger));
             }
-            DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 12),
-                     static_cast<int>(pz - 8), 16, DARKGRAY);
+            // Queue depths, instant and peak, for both directions (plan metric set).
+            std::snprintf(line, sizeof(line), "queues in=%zu/%zu peak=%zu  out=%zu/%zu peak=%zu",
+                          inbox.Depth(), inbox.Capacity(), inbox.MaxDepth(), client.OutboundDepth(),
+                          client.OutboundCapacity(), client.OutboundMaxDepth());
+            DrawHudText(line, 500, 166, 18, ToRayColor(theme.text_dim));
+            if (rtt.HasValue()) {
+                std::snprintf(line, sizeof(line), "rtt %.1f ms (samples=%llu)", rtt.Milliseconds(),
+                              static_cast<unsigned long long>(rtt_series.Count()));
+            } else {
+                std::snprintf(line, sizeof(line), "rtt (waiting for a pong)");
+            }
+            DrawHudText(line, 500, 188, 18,
+                        rtt.HasValue() ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "keys(dx=%d, dz=%d) vec(%.2f, %.2f) seq=%u @30Hz",
+                          last_sample.dx, last_sample.dz, last_report.vector.x,
+                          last_report.vector.z, last_report.sequence);
+            DrawHudText(line, 28, 236, 18, ToRayColor(theme.text_dim));
+            std::snprintf(line, sizeof(line), "gate=%s shoot=%s alive=%s",
+                          input_enabled ? "open" : InputBlockReason(input_gate),
+                          last_shoot ? "yes" : "no", demo.self_alive ? "yes" : "no");
+            DrawHudText(line, 28, 258, 18,
+                        input_enabled ? ToRayColor(theme.neon_cyan) : ToRayColor(theme.text_warn));
+
+            std::snprintf(line, sizeof(line),
+                          "pending=%zu corr=%.3f predTick=%llu ack=%u spd=%d",
+                          predictor.PendingCount(), predictor.LastCorrectionDistance(),
+                          static_cast<unsigned long long>(predictor.PredictedTick()),
+                          predictor.AckSeq(), static_cast<int>(predictor.MoveSpeed()));
+            DrawHudText(line, 500, 236, 18, ToRayColor(theme.text_dim));
+            std::snprintf(line, sizeof(line), "interp delay=%dt tracks=%zu/%zu",
+                          static_cast<int>(remote_interp.DelayTicks()), remote_interp.Count(),
+                          monster_interp.Count());
+            DrawHudText(line, 500, 258, 18, ToRayColor(theme.text_dim));
+            // Tick rate must read ~30Hz even though snapshots arrive at 10Hz: it comes
+            // from the tick each snapshot carries, not from packet arrival (the plan
+            // calls out that specific confusion).
+            if (server_tick_rate.HasValue()) {
+                std::snprintf(line, sizeof(line), "tick %.1f Hz  predErr %.4f",
+                              server_tick_rate.Hertz(), prediction_error.Distance());
+            } else {
+                std::snprintf(line, sizeof(line), "tick (waiting for two snapshots)  predErr %.4f",
+                              prediction_error.Distance());
+            }
+            DrawHudText(line, 500, 280, 18,
+                        server_tick_rate.HasValue() ? ToRayColor(theme.neon_cyan)
+                                                    : ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "players=%zu room=%llu tick=%llu snaps=%llu",
+                          game_view.PlayerCount(),
+                          static_cast<unsigned long long>(game_view.RoomId()),
+                          static_cast<unsigned long long>(game_view.ServerTick()),
+                          static_cast<unsigned long long>(demo.snapshots_received));
+            DrawHudText(line, 28, 342, 18, ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "stage idx=%u state=%s remain=%u monsters=%zu bullets=%zu",
+                          demo.stage_index, StageStateName(demo.stage_state),
+                          demo.monsters_remaining, combat_view.MonsterCount(),
+                          combat_view.ProjectileCount());
+            DrawHudText(line, 28, 364, 18, ToRayColor(theme.text_dim));
+
+            // D7 stage detail: the global modifiers plus the difficulty / clear-time summary
+            // and the spawn count the server announced. Only A's domain stage messages
+            // (MSG_STAGE_STARTED 400 / MSG_STAGE_CLEARED 401) carry these, and the server does
+            // not send them yet, so the row says "none" instead of rendering zeros.
+            {
+                char modifiers[224] = {0};
+                const bool has_modifiers =
+                    stage_summary.FormatModifiers(modifiers, sizeof(modifiers)) > 0;
+                const bool has_detail = stage_summary.HasDetail();
+                char spawned[16] = "-";
+                if (stage_summary.has_monster_count()) {
+                    std::snprintf(spawned, sizeof(spawned), "%u", stage_summary.monster_count());
+                }
+                char difficulty[16] = "-";
+                if (stage_summary.has_difficulty()) {
+                    std::snprintf(difficulty, sizeof(difficulty), "%u",
+                                  stage_summary.difficulty_score());
+                }
+                char clear_time[24] = "-";
+                if (stage_summary.has_clear_time()) {
+                    std::snprintf(clear_time, sizeof(clear_time), "%.1fs",
+                                  static_cast<double>(stage_summary.clear_time_ms()) / 1000.0);
+                }
+                std::snprintf(line, sizeof(line), "stage spawned=%s diff=%s clear=%s detail=%s",
+                              spawned, difficulty, clear_time,
+                              (has_detail || stage_summary.has_monster_count())
+                                  ? "ok"
+                                  : "none(400/401)");
+                DrawHudText(line, 28, 430, 18,
+                            (has_detail || stage_summary.has_monster_count())
+                                ? ToRayColor(theme.neon_yellow)
+                                : ToRayColor(theme.text_dim));
+                if (has_modifiers) {
+                    DrawHudText(modifiers, 28, 452, 18, ToRayColor(theme.neon_yellow));
+                }
+            }
+
+            // Ready is gated on the authoritative preparing state (A5 C-a): show why
+            // ENTER is unavailable instead of leaving the operator guessing.
+            char ready_text[96] = {0};
+            if (ready_reported) {
+                std::snprintf(ready_text, sizeof(ready_text), "sent");
+            } else if (CanReportReady(demo.in_room, demo.stage_state, reward_view.State(),
+                                      ready_reported)) {
+                std::snprintf(ready_text, sizeof(ready_text), "ready");
+            } else {
+                std::snprintf(ready_text, sizeof(ready_text), "blocked: %s",
+                              ReadyBlockReason(demo.in_room, demo.stage_state, reward_view.State(),
+                                               ready_reported));
+            }
+            std::snprintf(line, sizeof(line), "stats ATK=%d DEF=%d SPD=%d ready=%s seed=%lld",
+                          static_cast<int>(demo.self_attack),
+                          static_cast<int>(demo.self_defense),
+                          static_cast<int>(demo.self_move_speed), ready_text,
+                          static_cast<long long>(combat_view.Stage().seed));
+            DrawHudText(line, 28, 386, 18, ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "hp %d/%d", static_cast<int>(demo.self_hp),
+                          static_cast<int>(demo.self_max_hp));
+            DrawHudText(line, 28, 408, 18, ToRayColor(theme.text_dim));
+
+            // A5 C-c evidence row. The charge count itself is authoritative and has no
+            // snapshot field yet (A3), so this reports what the CLIENT knows: how many
+            // intents it sent and whether one is still latched, plus the key that is doing it.
+            std::snprintf(line, sizeof(line), "potion sent=%llu pending=%s key=Q (charges: await A3)",
+                          static_cast<unsigned long long>(potion_sent),
+                          potion.Pending() ? "yes" : "no");
+            DrawHudText(line, 28, 474, 18, ToRayColor(theme.text_dim));
+
+            std::snprintf(line, sizeof(line), "last event %s",
+                          SanitizeAscii(demo.last_event_note.c_str(), ascii_b, sizeof(ascii_b)));
+            DrawHudText(line, 500, 342, 18, ToRayColor(theme.text_warn));
+            std::snprintf(line, sizeof(line), "events sp=%u dst=%u dmg=%u dth=%u", demo.spawns,
+                          demo.destroys, demo.damages, demo.deaths);
+            DrawHudText(line, 500, 364, 18, ToRayColor(theme.text_dim));
+
+            // Auxiliary UI-command record (plan P3). Text commands only: the HUD routes every
+            // string through one funnel, so this needs no call-site bookkeeping. 0 on a
+            // --no-ui run is the expected reading and doubles as proof that the switch works;
+            // the ImGui submit time is added when P2 lands.
+            std::snprintf(line, sizeof(line), "ui text cmds last=%llu ema=%.1f (imgui: P2)",
+                          static_cast<unsigned long long>(hud_text_cmds_last),
+                          static_cast<double>(hud_text_cmd_ema.Value()));
+            DrawHudText(line, 500, 386, 18, ToRayColor(theme.text_dim));
+
+            // History graphs (the plan asks for the queue-depth EMA chart next to the
+            // numbers; RTT and tick come along because they share the slot). The series are
+            // fixed-capacity rings, so this stays allocation-free. Captions sit INSIDE each
+            // box: the panel only has room for three stacked plots, and a caption above one
+            // box would land on the plot of the box above it. A plot is scaled by the
+            // window's own maximum (floored at 1) so a quiet link does not read as a failure.
+            struct SeriesLine {
+                const MetricSeries* series = nullptr;
+                Color colour{};
+            };
+            const auto draw_plot = [&](float x, float y, float w, float h, const char* caption,
+                                       const SeriesLine* lines, std::size_t line_count) {
+                DrawRectangleLines(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w),
+                                   static_cast<int>(h), ToRayColor(theme.panel_edge));
+                DrawHudText(caption, x + 4.0f, y + 2.0f, 14, ToRayColor(theme.text_dim));
+                float top = 1.0f;
+                for (std::size_t i = 0; i < line_count; ++i) {
+                    if (lines[i].series->MaxValue() > top) {
+                        top = lines[i].series->MaxValue();
+                    }
+                }
+                // Inset the plot under the caption so the line never runs through it.
+                const float plot_top = y + 16.0f;
+                const float plot_h = h - 18.0f;
+                const float step = w / static_cast<float>(MetricSeries::kCapacity - 1);
+                for (std::size_t i = 0; i < line_count; ++i) {
+                    const MetricSeries& series = *lines[i].series;
+                    const std::size_t count = series.Count();
+                    for (std::size_t point = 1; point < count; ++point) {
+                        const float x0 = x + step * static_cast<float>(point - 1);
+                        const float x1 = x + step * static_cast<float>(point);
+                        const float y0 = plot_top + plot_h - (series.At(point - 1) / top) * plot_h;
+                        const float y1 = plot_top + plot_h - (series.At(point) / top) * plot_h;
+                        DrawLineV(Vector2{x0, y0}, Vector2{x1, y1}, lines[i].colour);
+                    }
+                }
+                std::snprintf(line, sizeof(line), "max %.2f", top);
+                DrawHudText(line, x + w - 86.0f, y + 2.0f, 14, ToRayColor(theme.text_dim));
+            };
+            const SeriesLine rtt_lines[] = {{&rtt_series, ToRayColor(theme.neon_cyan)}};
+            const SeriesLine tick_lines[] = {{&tick_series, ToRayColor(theme.neon_magenta)}};
+            const SeriesLine depth_lines[] = {
+                {&inbox_depth_series, ToRayColor(theme.neon_cyan)},
+                {&outbound_depth_series, ToRayColor(theme.text_warn)}};
+            draw_plot(500.0f, 402.0f, 400.0f, 40.0f, "rtt ms (EMA 0.1)", rtt_lines, 1);
+            draw_plot(500.0f, 446.0f, 400.0f, 40.0f, "server tick Hz (expect ~30)", tick_lines, 1);
+            draw_plot(500.0f, 490.0f, 400.0f, 40.0f, "queue depth EMA  in:cyan out:amber",
+                      depth_lines, 2);
+            DrawFPS(860, 22);
+        } else {  // !debug_overlay: the game view
+            // Arena: world [0,20]^2. Self neon blue, peers red, monsters orange,
+            // projectiles amber; all colours come from the Katana Zero theme so the
+            // near-black ground stays readable. Projectiles exist only via
+            // spawn/destroy events.
+            // World -> RT through the shared transform (the same mapping the crosshair
+            // and the damage floaters use), instead of a second local copy of the math.
+            const auto to_screen = [](float wx, float wz) {
+                const Vec2f rt = WorldToRT(Vec2f{wx, wz}, kArenaView);
+                return Vector2{rt.x, rt.y};
+            };
+
+            // Floor: the mandated #0A0A10 clear sits under a one-step-lighter fill
+            // (Theme::arena_floor) so the field reads as a place rather than "black
+            // with a faint grid" - measuring the rendered frame showed 88% of the
+            // play area at 2% luminance. The unit grid gives distance judgement and
+            // the centre lines are brighter still.
+            DrawRectangle(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
+                          static_cast<int>(kArenaW), static_cast<int>(kArenaH),
+                          ToRayColor(theme.arena_floor));
+            for (int i = 0; i <= 20; ++i) {
+                const Color grid_colour =
+                    (i == 10) ? ToRayColor(theme.panel_edge) : ToRayColor(theme.grid);
+                const Vector2 top = to_screen(static_cast<float>(i), 0.0f);
+                const Vector2 bottom = to_screen(static_cast<float>(i), kWorldSize);
+                const Vector2 left = to_screen(0.0f, static_cast<float>(i));
+                const Vector2 right = to_screen(kWorldSize, static_cast<float>(i));
+                DrawLineV(top, bottom, grid_colour);
+                DrawLineV(left, right, grid_colour);
+            }
+            DrawRectangleLines(static_cast<int>(kArenaX), static_cast<int>(kArenaY),
+                               static_cast<int>(kArenaW), static_cast<int>(kArenaH),
+                               ToRayColor(theme.panel_edge));
+
+            for (const auto& [id, projectile] : combat_view.Projectiles()) {
+                (void)id;
+                DrawCircleV(to_screen(projectile.x, projectile.z), 3.0f,
+                            ToRayColor(theme.projectile));
+            }
+
+            char label[32] = {0};
+            for (const auto& [id, monster] : combat_view.Monsters()) {
+                // D9: render monsters from the interpolated 10Hz buffer.
+                float mx = monster.x;
+                float mz = monster.z;
+                monster_interp.SampleEntity(id, mx, mz);
+                const Vector2 screen = to_screen(mx, mz);
+                const float sx = screen.x;
+                const float sy = screen.y;
+                const bool dead = combat_view.IsDead(id);
+                DrawRectangle(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7, 14, 14,
+                              dead ? ToRayColor(theme.dead) : ToRayColor(theme.monster));
+                if (dead) {
+                    // Crossed out corpse: the mark uses the ground colour so it stays
+                    // visible on the dark motif instead of blending into it.
+                    DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) - 7,
+                             static_cast<int>(sx) + 7, static_cast<int>(sy) + 7,
+                             ToRayColor(theme.background));
+                    DrawLine(static_cast<int>(sx) - 7, static_cast<int>(sy) + 7,
+                             static_cast<int>(sx) + 7, static_cast<int>(sy) - 7,
+                             ToRayColor(theme.background));
+                }
+                const float ratio = monster.max_hp > 0.0f ? (monster.hp / monster.max_hp) : 0.0f;
+                DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16, 20, 4,
+                              Fade(ToRayColor(theme.bar_empty), 0.65f));
+                DrawRectangle(static_cast<int>(sx) - 10, static_cast<int>(sy) - 16,
+                              static_cast<int>(20.0f * ratio), 4, ToRayColor(theme.neon_red));
+                if (combat_view.IsHitFlashing(id)) {
+                    DrawCircleLines(static_cast<int>(sx), static_cast<int>(sy), 13.0f,
+                                    ToRayColor(theme.neon_yellow));
+                }
+                std::snprintf(label, sizeof(label), "%llu", static_cast<unsigned long long>(id));
+                DrawHudText(label, sx + 9, sy - 8, 12, ToRayColor(theme.text_dim));
+            }
+
+            for (const auto& player : game_view.Players()) {
+                const bool is_self = (player.id == demo.player_id);
+                float wx = player.x;
+                float wz = player.z;
+                if (is_self) {
+                    // D9: draw our predicted position (reconciled each snapshot).
+                    if (predictor.HasPrediction()) {
+                        wx = predictor.X();
+                        wz = predictor.Z();
+                    }
+                } else {
+                    // D9: remote players come from the interpolated buffer.
+                    remote_interp.SampleEntity(player.id, wx, wz);
+                }
+                const Vector2 screen = to_screen(wx, wz);
+                const float px = screen.x;
+                const float pz = screen.y;
+                DrawCircleV(Vector2{px, pz}, 9.0f,
+                            !player.alive ? ToRayColor(theme.dead)
+                                          : (is_self ? ToRayColor(theme.player)
+                                                     : ToRayColor(theme.peer)));
+                if (combat_view.IsHitFlashing(player.id)) {
+                    DrawCircleLines(static_cast<int>(px), static_cast<int>(pz), 13.0f,
+                                    ToRayColor(theme.neon_yellow));
+                }
+                // HP bar above every player (authoritative hp/max_hp from snapshot).
+                const float hp_ratio = player.max_hp > 0.0f ? (player.hp / player.max_hp) : 0.0f;
+                DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20, 24, 4,
+                              Fade(ToRayColor(theme.bar_empty), 0.65f));
+                DrawRectangle(static_cast<int>(px) - 12, static_cast<int>(pz) - 20,
+                              static_cast<int>(24.0f * hp_ratio), 4,
+                              player.alive ? ToRayColor(theme.bar_fill)
+                                           : ToRayColor(theme.dead));
+                if (is_self) {
+                    // Aim heading we are sending to the server.
+                    DrawLineV(Vector2{px, pz},
+                              Vector2{px + last_aim_x * 26.0f, pz + last_aim_z * 26.0f},
+                              ToRayColor(theme.neon_cyan));
+                }
+                std::snprintf(label, sizeof(label), "%llu",
+                              static_cast<unsigned long long>(player.id));
+                DrawHudText(label, px + 12, pz - 8, 16, ToRayColor(theme.text_dim));
+            }
+
+            // ---- F2: entity / aim / interpolation debug (P3) --------------------------
+            // Annotates the world instead of replacing it: bounding boxes, the aim cone
+            // we are actually sending, and - the point of the view - the distance
+            // between what the server last said and what we are drawing. A large gap
+            // between a raw entity position and its interpolated position is the
+            // snapshot delay; the line from our authoritative position to the predicted
+            // one is the current prediction error.
+            if (ui_enabled && entity_debug) {
+                const Color box_colour = ToRayColor(theme.neon_cyan);
+                const Color raw_colour = ToRayColor(theme.neon_yellow);
+                for (const auto& player : game_view.Players()) {
+                    const bool is_self = (player.id == demo.player_id);
+                    const Vector2 raw = to_screen(player.x, player.z);
+                    float drawn_x = player.x;
+                    float drawn_z = player.z;
+                    if (is_self) {
+                        if (predictor.HasPrediction()) {
+                            drawn_x = predictor.X();
+                            drawn_z = predictor.Z();
+                        }
+                    } else {
+                        remote_interp.SampleEntity(player.id, drawn_x, drawn_z);
+                    }
+                    const Vector2 drawn = to_screen(drawn_x, drawn_z);
+                    DrawRectangleLines(static_cast<int>(drawn.x) - 11, static_cast<int>(drawn.y) - 11,
+                                       22, 22, is_self ? box_colour : ToRayColor(theme.peer));
+                    if (is_self) {
+                        // Authoritative pose, and the error line to the predicted one.
+                        DrawCircleLines(static_cast<int>(raw.x), static_cast<int>(raw.y), 3.0f,
+                                        raw_colour);
+                        DrawLineV(drawn, raw, Fade(raw_colour, 0.75f));
+                        // The aim cone we transmit (heading already normalised).
+                        const float heading = std::atan2(last_aim_z, last_aim_x);
+                        for (const float offset : {-0.26f, 0.26f}) {
+                            const float angle = heading + offset;
+                            DrawLineV(drawn,
+                                      Vector2{drawn.x + std::cos(angle) * 60.0f,
+                                              drawn.y + std::sin(angle) * 60.0f},
+                                      Fade(box_colour, 0.55f));
+                        }
+                    } else {
+                        DrawLineV(drawn, raw, Fade(raw_colour, 0.5f));
+                        DrawCircleLines(static_cast<int>(raw.x), static_cast<int>(raw.y), 2.0f,
+                                        raw_colour);
+                    }
+                }
+                for (const auto& [id, monster] : combat_view.Monsters()) {
+                    float interp_x = monster.x;
+                    float interp_z = monster.z;
+                    monster_interp.SampleEntity(id, interp_x, interp_z);
+                    const Vector2 drawn = to_screen(interp_x, interp_z);
+                    const Vector2 raw = to_screen(monster.x, monster.z);
+                    DrawRectangleLines(static_cast<int>(drawn.x) - 9, static_cast<int>(drawn.y) - 9,
+                                       18, 18, ToRayColor(theme.monster));
+                    DrawCircleLines(static_cast<int>(raw.x), static_cast<int>(raw.y), 2.0f,
+                                    raw_colour);
+                    DrawLineV(drawn, raw, Fade(raw_colour, 0.4f));
+                }
+                // Summary line in the corner, so a screenshot alone is self-explanatory.
+                std::snprintf(line, sizeof(line),
+                              "F2 DEBUG  players=%zu monsters=%zu interpDelay=%dt snaps=%llu",
+                              game_view.PlayerCount(), combat_view.MonsterCount(),
+                              static_cast<int>(remote_interp.DelayTicks()),
+                              static_cast<unsigned long long>(demo.snapshots_received));
+                DrawHudText(line, 24, 448, 16, ToRayColor(theme.neon_cyan));
+            }
+
+            // ---- Game HUD (design sections 3-4) ------------------------------------------
+            // Per-frame feedback clocks (P1b-2): the hit marker expires, the damage
+            // ghost drains and retired floaters are recycled. All three are pure state
+            // updates driven by the injected clock, so behaviour is reproducible.
+            const float now_seconds = static_cast<float>(GetTime());
+            UpdateHitMarker(hit_marker, now_seconds);
+            UpdateDamageGhost(damage_ghost, frame_dt);
+            floater_pool.Tick(now_seconds);
+            if (!in_stage) {
+                hint_shown_at = -1.0;  // re-armed for the next time play starts
+            }
+
+            // Everything below is the UI layer and only the UI layer: with --no-ui the
+            // world above keeps rendering and every gameplay/network path keeps running,
+            // which is what makes the UI-on/off frame-time comparison meaningful.
+            if (ui_enabled) {
+                if (hud_phase == HudPhase::kOffline) {
+                    // Dim the world so the banner reads as an interruption. Kept light:
+                    // the ground is already near-black, and a heavy dim measured out to a
+                    // featureless #050507 across the whole play area.
+                    DrawRectangle(0, 0, kScreenWidth, kScreenHeight, Fade(BLACK, 0.20f));
+                    // Name the actual state: on a first launch nothing was lost, so
+                    // "LINK LOST" would be misleading. The endpoint is included because a
+                    // failed connect is the most common playtest symptom.
+                    char endpoint_text[96] = {0};
+                    std::snprintf(endpoint_text, sizeof(endpoint_text), "%s:%u", endpoint.host.c_str(),
+                                  static_cast<unsigned>(endpoint.port));
+                    if (recovery.Active()) {
+                        std::snprintf(line, sizeof(line), "LINK LOST  -  %s  (%s)",
+                                      SanitizeAscii(recovery.Note().c_str(), ascii_a, sizeof(ascii_a)),
+                                      endpoint_text);
+                    } else if (demo.state == ConnectionState::kFailed) {
+                        std::snprintf(line, sizeof(line), "CONNECTION FAILED  -  %s", endpoint_text);
+                    } else if (demo.state == ConnectionState::kConnecting) {
+                        std::snprintf(line, sizeof(line), "CONNECTING  -  %s", endpoint_text);
+                    } else {
+                        std::snprintf(line, sizeof(line), "NOT CONNECTED  -  %s", endpoint_text);
+                    }
+                    DrawRectangle(0, 12, kScreenWidth, 34, Fade(ToRayColor(theme.neon_red), 0.45f));
+                    DrawRectangleLines(0, 12, kScreenWidth, 34, ToRayColor(theme.neon_red));
+                    DrawHudText(line, CenteredTextX(line, 20), 18, 20, ToRayColor(theme.text));
+                    if (recovery.Phase() == RecoveryPhase::kExhausted ||
+                        recovery.Phase() == RecoveryPhase::kFailed) {
+                        DrawHudText("press R to reconnect", CenteredTextX("press R to reconnect", 18), 54,
+                                    18, ToRayColor(theme.text_warn));
+                    }
+                } else if (in_stage) {
+                    // Objective, top centre: stage number and hostiles still standing.
+                    std::snprintf(line, sizeof(line), "STAGE %02u   HOSTILES %u", demo.stage_index,
+                                  demo.monsters_remaining);
+                    DrawHudText(line, CenteredTextX(line, 20), 24, 20, ToRayColor(theme.text));
+
+                    // D7 difficulty / global modifiers, one quiet line under the objective.
+                    // Hidden while the summary is empty: the server does not send the detail
+                    // messages yet, and an invented "DIFF 0" would be worse than nothing.
+                    char stage_line[256] = {0};
+                    if (stage_summary.FormatLine(stage_line, sizeof(stage_line)) > 0) {
+                        DrawHudText(stage_line, CenteredTextX(stage_line, 16), 46, 16,
+                                    ToRayColor(theme.neon_yellow));
+                    }
+
+                    if (hud_phase == HudPhase::kTransition) {
+                        // Clear / preparing / failed / closed: one centred card, no HUD.
+                        const char* transition = TransitionLabel(demo.stage_state);
+                        const float width = MeasureHudText(transition, 28).x;
+                        const float card_x = (kScreenWidth - width) * 0.5f;
+                        DrawRectangle(static_cast<int>(card_x) - 28, 236,
+                                      static_cast<int>(width) + 56, 60,
+                                      Fade(ToRayColor(theme.panel), 0.92f));
+                        DrawRectangleLines(static_cast<int>(card_x) - 28, 236,
+                                           static_cast<int>(width) + 56, 60,
+                                           ToRayColor(theme.panel_edge));
+                        DrawHudText(transition, card_x, 252, 28, ToRayColor(theme.neon_magenta));
+                        // Clear-time / difficulty result line inside the card, when known.
+                        char cleared_line[96] = {0};
+                        if (stage_summary.FormatCleared(cleared_line, sizeof(cleared_line)) > 0) {
+                            DrawHudText(cleared_line, CenteredTextX(cleared_line, 16), 276, 16,
+                                        ToRayColor(theme.text_dim));
+                        }
+                    }
+                } else if (hud_phase == HudPhase::kLobby) {
+                    // Lobby card: the identity line only belongs on this screen.
+                    const char* headline = !demo.login_ok ? "LOGGING IN"
+                                           : (!demo.in_room ? "MATCHMAKING" : "WAITING FOR STAGE");
+                    DrawHudText("THE RETURN OF THE ODYSSEY",
+                                CenteredTextX("THE RETURN OF THE ODYSSEY", 24), 180, 24,
+                                ToRayColor(theme.neon_cyan));
+                    DrawHudText(headline, CenteredTextX(headline, 32), 226, 32, ToRayColor(theme.text));
+                    std::snprintf(line, sizeof(line), "%s   %s",
+                                  SanitizeAscii(demo.login_note.c_str(), ascii_a, sizeof(ascii_a)),
+                                  SanitizeAscii(demo.match_note.c_str(), ascii_b, sizeof(ascii_b)));
+                    DrawHudText(line, CenteredTextX(line, 18), 274, 18, ToRayColor(theme.text_dim));
+                    if (demo.room_id != 0) {
+                        std::snprintf(line, sizeof(line), "room %llu   player %llu",
+                                      static_cast<unsigned long long>(demo.room_id),
+                                      static_cast<unsigned long long>(demo.player_id));
+                        DrawHudText(line, CenteredTextX(line, 18), 298, 18, ToRayColor(theme.text_dim));
+                    }
+                    DrawHudText("ESC quits   R retries", CenteredTextX("ESC quits   R retries", 18), 340, 18,
+                                ToRayColor(theme.text_dim));
+                }
+
+                if (!demo.banner.empty()) {
+                    const char* banner = SanitizeAscii(demo.banner.c_str(), ascii_c, sizeof(ascii_c));
+                    DrawHudText(banner, CenteredTextX(banner, 28), 64, 28, ToRayColor(theme.neon_magenta));
+                }
+
+                if (reward_view.State() != RewardState::kNone) {
+                    // Treasure chest panel: options come from the server; display text
+                    // comes from the local static table (ids travel on the wire). P2 replaces
+                    // this with the ImGui card tray.
+                    DrawRectangle(20, 452, 920, 72, Fade(ToRayColor(theme.panel), 0.92f));
+                    DrawRectangleLines(20, 452, 920, 72, ToRayColor(theme.panel_edge));
+                    std::snprintf(line, sizeof(line), "REWARD - %s   (keys 1-3 choose)",
+                                  SanitizeAscii(reward_view.Note().c_str(), ascii_a, sizeof(ascii_a)));
+                    DrawHudText(line, 30, 456, 20, ToRayColor(theme.neon_yellow));
+                    // The option row is appended in place: up to three entries with names,
+                    // slots and descriptions must not build a std::string per frame.
+                    char row[512] = {0};
+                    std::size_t used = 0;
+                    const auto& options = reward_view.Options();
+                    for (std::size_t i = 0; i < options.size(); ++i) {
+                        const int written = std::snprintf(
+                            row + used, sizeof(row) - used, "[%zu] %s (%s) %s   ", i + 1,
+                            SanitizeAscii(options[i].display.name.c_str(), ascii_b, sizeof(ascii_b)),
+                            SanitizeAscii(options[i].display.slot.c_str(), ascii_c, sizeof(ascii_c)),
+                            SanitizeAscii(options[i].display.description.c_str(), ascii_a, sizeof(ascii_a)));
+                        if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(row) - used) {
+                            break;  // truncated: keep what fits rather than overflowing
+                        }
+                        used += static_cast<std::size_t>(written);
+                    }
+                    DrawHudText(row, 30, 486, 18, ToRayColor(theme.text));
+                }
+
+                if (in_stage) {
+                    // ---- Player health: segmented energy blocks (P1b-2) --------------
+                    constexpr float kBarX = 24.0f;
+                    constexpr float kBarY = 466.0f;
+                    constexpr float kBarW = 320.0f;
+                    constexpr float kBarH = 22.0f;
+                    constexpr float kBarGap = 4.0f;
+                    constexpr int kBarSegments = 8;
+                    const HealthSegments health =
+                        ComputeHealthSegments(demo.self_hp, demo.self_max_hp, kBarSegments);
+                    const float segment_w = SegmentWidth(kBarW, health.segments, kBarGap);
+                    if (segment_w > 0.0f) {
+                        const auto segment_x = [&](int index) {
+                            return kBarX + static_cast<float>(index) * (segment_w + kBarGap);
+                        };
+                        // Empty sockets first.
+                        for (int i = 0; i < health.segments; ++i) {
+                            DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
+                                          static_cast<int>(segment_w), static_cast<int>(kBarH),
+                                          ToRayColor(theme.bar_empty));
+                        }
+                        // White damage ghost: the level the bar was at before the hit,
+                        // shaken by a deterministic decaying offset. Screen shake can be
+                        // disabled from the accessibility settings.
+                        if (damage_ghost.active) {
+                            const float amplitude = accessibility.disable_screen_shake ? 0.0f : 3.0f;
+                            const float shake = DamageShakeOffset(damage_ghost, amplitude);
+                            const float ghost_blocks = damage_ghost.shown_fraction * kBarSegments;
+                            for (int i = 0; i < health.segments; ++i) {
+                                const float coverage =
+                                    std::clamp(ghost_blocks - static_cast<float>(i), 0.0f, 1.0f);
+                                if (coverage <= 0.0f) {
+                                    break;
+                                }
+                                DrawRectangle(static_cast<int>(segment_x(i) + shake),
+                                              static_cast<int>(kBarY),
+                                              static_cast<int>(segment_w * coverage),
+                                              static_cast<int>(kBarH),
+                                              ToRayColor(theme.bar_damage));
+                            }
+                        }
+                        // Current health on top, so the ghost only shows what was lost.
+                        for (int i = 0; i < health.filled; ++i) {
+                            DrawRectangle(static_cast<int>(segment_x(i)), static_cast<int>(kBarY),
+                                          static_cast<int>(segment_w), static_cast<int>(kBarH),
+                                          ToRayColor(theme.bar_fill));
+                        }
+                        if (health.partial > 0.0f && health.filled < health.segments) {
+                            DrawRectangle(static_cast<int>(segment_x(health.filled)),
+                                          static_cast<int>(kBarY),
+                                          static_cast<int>(segment_w * health.partial),
+                                          static_cast<int>(kBarH), ToRayColor(theme.bar_fill));
+                        }
+                    }
+                    std::snprintf(line, sizeof(line), "HP %d/%d", static_cast<int>(demo.self_hp),
+                                  static_cast<int>(demo.self_max_hp));
+                    DrawHudText(line, kBarX + kBarW + 16.0f, kBarY + 2.0f, 18,
+                                demo.self_alive ? ToRayColor(theme.text)
+                                                : ToRayColor(theme.text_danger));
+
+                    // ---- Pixel hexagon crosshair, anchored to the mouse in RT space --
+                    const Vector2 mouse = GetMousePosition();
+                    const Vec2f mouse_window{mouse.x, mouse.y};
+                    const Vec2f crosshair = WindowToRT(mouse_window, layout);
+                    float hexagon[kCrosshairPoints * 2] = {0};
+                    const float spin = accessibility.disable_glitch_fx
+                                           ? 0.0f
+                                           : now_seconds * 0.6f;  // glitch: slow rotation
+                    if (HexagonCrosshair(crosshair.x, crosshair.y, 7.0f, spin, hexagon,
+                                         kCrosshairPoints * 2) == kCrosshairPoints * 2) {
+                        Color crosshair_colour = ToRayColor(theme.neon_cyan);
+                        if (!IsInsideTarget(mouse_window, layout)) {
+                            // Pointer is in a letterbox bar: keep the last aim direction
+                            // but show that it is outside the play area.
+                            crosshair_colour.a = 90;
+                        }
+                        for (int i = 0; i < kCrosshairPoints; ++i) {
+                            const int next = (i + 1) % kCrosshairPoints;
+                            DrawLineV(Vector2{hexagon[i * 2], hexagon[i * 2 + 1]},
+                                      Vector2{hexagon[next * 2], hexagon[next * 2 + 1]},
+                                      crosshair_colour);
+                        }
+                        DrawCircleV(Vector2{crosshair.x, crosshair.y}, 1.5f, crosshair_colour);
+                    }
+
+                    // ---- Damage floaters on top of the world -------------------------
+                    for (std::size_t i = 0; i < FloaterPool::kCapacity; ++i) {
+                        Floater floater;
+                        if (!floater_pool.At(i, floater)) {
+                            continue;
+                        }
+                        const float progress =
+                            floater.lifetime > 0.0f
+                                ? std::clamp((now_seconds - floater.born_seconds) / floater.lifetime,
+                                             0.0f, 1.0f)
+                                : 1.0f;
+                        const Vector2 at = to_screen(floater.world_x, floater.world_z);
+                        std::snprintf(line, sizeof(line), "-%d", static_cast<int>(floater.value));
+                        DrawHudText(line, at.x - 8.0f, at.y - 20.0f - progress * 18.0f, 16,
+                                    Fade(ToRayColor(theme.neon_yellow), 1.0f - progress));
+                    }
+
+                    // ---- Hit direction: an arc around the player towards the source --
+                    if (hit_marker.active) {
+                        float self_x = 0.0f;
+                        float self_z = 0.0f;
+                        bool have_self = false;
+                        if (predictor.HasPrediction()) {
+                            self_x = predictor.X();
+                            self_z = predictor.Z();
+                            have_self = true;
+                        } else if (const auto* self = game_view.Find(demo.player_id)) {
+                            self_x = self->x;
+                            self_z = self->z;
+                            have_self = true;
+                        }
+                        if (have_self) {
+                            const Vector2 centre = to_screen(self_x, self_z);
+                            const float angle = std::atan2(hit_marker.dir_z, hit_marker.dir_x);
+                            const float fade = HitMarkerFade(hit_marker, now_seconds);
+                            DrawRing(centre, 40.0f, 46.0f, (angle - 0.35f) * RAD2DEG,
+                                     (angle + 0.35f) * RAD2DEG, 16,
+                                     Fade(ToRayColor(theme.neon_red), 0.9f * fade));
+                        }
+                    }
+
+                    // ---- Control hint: fades out a few seconds into play -------------
+                    if (hint_shown_at < 0.0) {
+                        hint_shown_at = GetTime();
+                    }
+                    const float hint_age = now_seconds - static_cast<float>(hint_shown_at);
+                    const float hint_alpha = std::clamp(1.0f - (hint_age - 5.0f), 0.0f, 1.0f);
+                    if (hint_alpha > 0.01f) {
+                        const char* hint =
+                            "WASD move   mouse aim   SPACE shoot   Q potion   ENTER ready";
+                        DrawHudText(hint, CenteredTextX(hint, 18), 508, 18,
+                                    Fade(ToRayColor(theme.text_dim), hint_alpha));
+                    }
+                }
+            }  // end UI layer
+        }  // end game view
+
+        // ---- F3: accessibility menu (P3) -----------------------------------------
+        // Drawn inside the render target so it scales with everything else. Raylib for
+        // now; the same state feeds the ImGui menu once that layer lands.
+        if (ui_enabled && accessibility_menu) {
+            constexpr float kMenuW = 520.0f;
+            constexpr float kMenuH = 210.0f;
+            const float menu_x = (kScreenWidth - kMenuW) * 0.5f;
+            const float menu_y = (kScreenHeight - kMenuH) * 0.5f;
+            DrawRectangle(static_cast<int>(menu_x), static_cast<int>(menu_y),
+                          static_cast<int>(kMenuW), static_cast<int>(kMenuH),
+                          Fade(ToRayColor(theme.panel), 0.96f));
+            DrawRectangleLines(static_cast<int>(menu_x), static_cast<int>(menu_y),
+                               static_cast<int>(kMenuW), static_cast<int>(kMenuH),
+                               ToRayColor(theme.panel_edge));
+            DrawHudText("ACCESSIBILITY  (F3)", menu_x + 20.0f, menu_y + 14.0f, 22,
+                        ToRayColor(theme.neon_cyan));
+
+            const char* rows[3] = {"disable glitch effects", "disable screen shake",
+                                   "disable damage floaters"};
+            const bool switches[3] = {accessibility.disable_glitch_fx,
+                                      accessibility.disable_screen_shake,
+                                      accessibility.disable_damage_floaters};
+            for (int i = 0; i < 3; ++i) {
+                const float row_y = menu_y + 62.0f + static_cast<float>(i) * 32.0f;
+                if (i == accessibility_cursor) {
+                    DrawRectangle(static_cast<int>(menu_x) + 12, static_cast<int>(row_y) - 4,
+                                  static_cast<int>(kMenuW) - 24, 28,
+                                  Fade(ToRayColor(theme.neon_cyan), 0.18f));
+                }
+                std::snprintf(line, sizeof(line), "%s %s", switches[i] ? "[x]" : "[ ]", rows[i]);
+                DrawHudText(line, menu_x + 28.0f, row_y, 18,
+                            i == accessibility_cursor ? ToRayColor(theme.text)
+                                                      : ToRayColor(theme.text_dim));
+            }
+            DrawHudText("UP/DOWN select   ENTER or SPACE toggle   ESC close",
+                        menu_x + 20.0f, menu_y + kMenuH - 30.0f, 16,
+                        ToRayColor(theme.text_dim));
         }
 
-        if (!demo.banner.empty()) {
-            DrawText(demo.banner.c_str(), 300, 20, 32, MAROON);
+        if (target_ready) {
+            EndTextureMode();
+            ClearBackground(ToRayColor(theme.letterbox));
+            // Raylib render textures are stored bottom-up, hence the negative
+            // source height; the destination rectangle carries the integer scale
+            // and the letterbox offset computed on resize.
+            const Rectangle source{0.0f, 0.0f, static_cast<float>(kScreenWidth),
+                                   -static_cast<float>(kScreenHeight)};
+            const Rectangle destination{layout.offset_x, layout.offset_y,
+                                        static_cast<float>(kScreenWidth) * layout.scale,
+                                        static_cast<float>(kScreenHeight) * layout.scale};
+            DrawTexturePro(target.texture, source, destination, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            // Submit the pending batch before other render paths (ImGui in P2) touch
+            // the GL state.
+            rlDrawRenderBatchActive();
         }
-
-        if (reward_view.State() != RewardState::kNone) {
-            // Treasure chest panel: options come from the server; display text
-            // comes from the local static table (ids travel on the wire).
-            DrawRectangle(20, 452, 920, 72, Fade(LIGHTGRAY, 0.45f));
-            DrawText(("REWARD - " + reward_view.Note() + "   (keys 1-3 choose)").c_str(),
-                     30, 456, 20, MAROON);
-            std::string row;
-            const auto& options = reward_view.Options();
-            for (std::size_t i = 0; i < options.size(); ++i) {
-                row += "[" + std::to_string(i + 1) + "] " + options[i].display.name + " (" +
-                       options[i].display.slot + ") " + options[i].display.description + "   ";
-            }
-            DrawText(row.c_str(), 30, 486, 18, DARKGRAY);
-        } else {
-            DrawText("WASD move | mouse aim | SPACE shoot | ENTER ready (reward) | R retry | ESC quit",
-                     24, kScreenHeight - 60, 20, LIGHTGRAY);
-        }
-        DrawFPS(kScreenWidth - 90, 12);
-
         EndDrawing();
         // This raylib build enables SUPPORT_CUSTOM_FRAME_CONTROL: EndDrawing
         // flushes drawing commands, but presenting the frame is our job.
@@ -979,6 +2328,32 @@ int main() {
         // Manual frame pacing fallback: hold each frame to ~1/60s even when
         // raylib's built-in timing is not applied by the linked build.
         const double frame_elapsed = GetTime() - frame_start;
+        // Auxiliary UI-command diagnostic: how many HUD text commands this frame submitted.
+        // Read after the draw block so it describes the frame that was just issued; a
+        // --no-ui run reports 0, which is the evidence that the switch really skipped the
+        // layer it claims to skip.
+        hud_text_cmds_last = TakeHudTextCommands();
+        hud_text_cmd_ema.Add(static_cast<float>(hud_text_cmds_last));
+        // Perf capture measures the CPU time of the frame (everything above except the
+        // deliberate sleep), so UI-on and UI-off runs compare the same quantity.
+        if (perf.Sampling()) {
+            perf.Add(frame_elapsed * 1000.0);
+            if (perf.Complete()) {
+                const PerfSummary summary = perf.Summary();
+                if (!config.options.perf_log.empty()) {
+                    const bool wrote = perf.Dump(config.options.perf_log);
+                    std::printf("main: perf capture wrote %s (%s)\n",
+                                config.options.perf_log.c_str(), wrote ? "ok" : "FAILED");
+                }
+                std::printf("main: perf frames=%zu mean=%.3fms median=%.3fms p95=%.3fms "
+                            "max=%.3fms min=%.3fms ui=%s trigger=%s\n",
+                            summary.sampled, summary.mean_ms, summary.median_ms, summary.p95_ms,
+                            summary.max_ms, summary.min_ms, ui_enabled ? "on" : "off",
+                            ToString(config.options.perf_trigger));
+                std::fflush(stdout);
+                break;
+            }
+        }
         if (frame_elapsed < kFrameSeconds) {
             WaitTime(kFrameSeconds - frame_elapsed);
         }
@@ -988,6 +2363,10 @@ int main() {
     std::printf("main: loop exited, stopping net thread\n"); fflush(stdout);
     client.Stop();
     std::printf("main: net stopped, closing window\n"); fflush(stdout);
+    if (target_ready) {
+        UnloadRenderTexture(target);
+    }
+    ReleaseHudFont();
     CloseWindow();
     std::printf("main: exit\n"); fflush(stdout);
     return 0;

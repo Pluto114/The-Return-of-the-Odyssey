@@ -75,8 +75,53 @@ public:
     bool HasSent() const { return sequence_ > 0; }
     void Reset() { sequence_ = 0; }
 
+    // Resuming a session must not look like a replay: raise the counter so the
+    // next Tick() is strictly greater than every sequence the server has already
+    // processed on that session. Never lowers the counter.
+    void EnsureGreaterThan(std::uint32_t sequence) {
+        if (sequence_ < sequence) {
+            sequence_ = sequence;
+        }
+    }
+
 private:
     std::uint32_t sequence_ = 0;
+};
+
+// One-shot "use potion" intent (A5 item C-c).
+//
+// The key must not auto-repeat while held, and one press may consume at most one charge,
+// so a press is latched and then cleared by the single report that actually carries it.
+// A press that arrives while the input gate is closed is dropped rather than queued: the
+// server owns potion availability, and replaying an old intent after a death, a stage
+// transition or a recovery would spend a charge the player did not ask for at that moment.
+// The caller drops the latch when the gate flips closed, exactly like MovementPredictor's
+// remembered direction (C-b).
+class PotionIntent {
+public:
+    // Records a key press. `allowed` is the caller's input gate: a blocked press leaves
+    // the latch untouched so it can neither queue up nor cancel an already admitted one.
+    void Press(bool allowed) {
+        if (allowed) {
+            pending_ = true;
+        }
+    }
+
+    bool Pending() const { return pending_; }
+
+    // True exactly once per admitted press; the send path calls this so a request can
+    // never be duplicated by a later tick reusing the same latch.
+    bool Consume() {
+        const bool was_pending = pending_;
+        pending_ = false;
+        return was_pending;
+    }
+
+    // Gate closed / session change: forget the latch instead of replaying it later.
+    void Clear() { pending_ = false; }
+
+private:
+    bool pending_ = false;
 };
 
 }  // namespace odyssey::client::input

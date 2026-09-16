@@ -1,8 +1,10 @@
 # 角色 C：客户端与接入契约
 
-状态（第二周 D4–D9 客户端侧已完成）：分支 `feature/week2-client-gameplay`（基于 main）。
+状态（第二周 D4–D9 客户端侧已完成，A5 缺口硬化进行中）：开发分支 `feature/week2-client-hardening`（基于集成后的 main）。
 战斗输入/事件消费、血条与死亡表现、奖励宝箱、断线恢复、预测/校正与插值均已实现并通过无头测试
-（`ctest` 四套件；`odyssey_logic_tests` 158 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
+（`ctest` 五套件；`odyssey_logic_tests` 233 checks、`odyssey_config_tests` 129 checks）。控件与运行方式见 [client/README.md](../../client/README.md)。
+A5 硬化进度：C-a（Ready 门控）、C-b（阶段/存活/恢复输入门控）、C-d（tick 驱动预测 + 服务器移速）、C-e（恢复期匹配/续号/输入静默）、C-f（有界等待/二次闪断）、C-g（端点配置化）已完成；
+剩 C-c（药水，阻塞于 A2/A3 协议字段）与 Token 轮换（待 A4）；其余见 [WEEK2-AD-FINALIZATION](../plans/WEEK2-AD-FINALIZATION.md) 的 C 缺口清单。
 仍待：D7 的难度/Modifier/Director 摘要需要协议先补字段（当前 `StageState` 只有 index/seed/state/monsters_remaining）；
 端到端验收（双客户端三关、断线恢复、Bot/指标）依赖服务器侧路由与 D 的平台工作。
 
@@ -15,6 +17,8 @@
 | Frame 编解码 | `client/src/core/Frame.{h,cpp}` | 16B 大端帧头编解码；body 超限在分配前拒绝 |
 | 流式组帧 | `client/src/core/FramingReader.{h,cpp}` | TCP 字节流 → 完整帧；拆包/粘包；坏 Magic/Version/超限/EOF 截断分类 |
 | 有界队列 | `client/src/core/BoundedQueue.h` | 线程安全有界队列：Push(丢最旧)/TryPush(拒绝)；Close 唤醒等待者 |
+| 端点配置 | `client/src/core/ClientConfig.h` | 命令行/环境变量解析 + 校验（host/port），默认本机；无 raylib/asio/protobuf 依赖，可无头测试 |
+| 装备显示表 `[LOCAL_DISPLAY]` | `client/CMakeLists.txt`（配置期生成）→ `<exe>/assets/equipment.tsv` 与 `<exe>/equipment.tsv` | 从 `data/equipment/catalog.json`（唯一手写源，D 负责）生成 TSV 客户端显示表；`CMAKE_CONFIGURE_DEPENDS` 保证目录变更即重新生成；客户端运行期不解析 JSON、也没有第二张手维护表。**这是纯展示层：只把 ID 翻译成名称/槽位/描述，不参与任何战斗计算**（伤害、命中、属性结算全部以权威快照为准，见本文 §数据权威）；缺表时回退显示 `[RAW_ID_<id>]` |
 | 网络线程 | `client/src/network/NetClient.{h,cpp}` | Asio TCP 客户端，独立 Network Thread；异步连接/读写；断连事件 |
 | 消息 ID 适配 | `client/src/network/ProtocolIds.h` | A 的 `MessageType` 枚举 → 客户端 constexpr 常量（单一映射点） |
 | 载荷编解码 | `client/src/network/PayloadCodec.h` | Ping/Pong/Login/Resume/Match/Input/Snapshot/战斗事件/奖励 ↔ POD 视图 |
@@ -22,9 +26,13 @@
 | 输入 | `client/src/input/InputSample.h`、`InputSampler.{h,cpp}` | WASD→移动意图、鼠标→瞄准、SPACE→射击、对角限长、30Hz InputSeq |
 | 玩家/快照视图 | `client/src/sync/GameView.h` | 全量快照语义：缺失移除、closed 清空、self ack、HP/alive/属性 |
 | 战斗视图 | `client/src/sync/CombatView.h` | 怪物全量集合、子弹仅由 Spawn/Destroy 事件增删、受击闪环/死亡标记 |
-| 奖励视图 | `client/src/sync/RewardView.h` | 奖励选项/选择/超时/Applied 状态；本地静态装备显示表（可选文件） |
+| 奖励视图 | `client/src/sync/RewardView.h` | 奖励选项/选择/超时/Applied 状态；本地静态装备显示表（CMake 从 `catalog.json` 生成的 TSV，字段 `id/name/slot/description`） |
 | 恢复状态机 | `client/src/sync/RecoveryState.h` | 有界退避重连、Resume 与全新登录决策、令牌失效处理 |
-| 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | 本地预测+服务器校正（只重放未确认输入）；远端/怪物 10Hz 插值 |
+| 预测/插值 | `client/src/sync/Prediction.h`、`Interpolation.h` | tick 驱动的本地预测 + 服务器校正（每 30Hz 边界一步、按 tick 而非按包重放，采用快照移速与存活）；远端/怪物 10Hz 插值 |
+| 会话/关卡门控 | `client/src/sync/SessionGate.h` | 纯谓词：StageState 与服务器 iota 对齐、可否发输入（需本会话首帧快照）、可否报 Ready（权威 `PreparingNextStage` + 自身奖励结清 + 每关一次）、InputSeq 下界 |
+| UI 基础设施（P0a） | `client/src/ui/UiGeometry.h`、`HealthBar.h`、`FloaterPool.h`、`AssetPath.h`、`Theme.h` | 960×540 整数缩放 + Letterbox 布局与三支坐标变换（Window→RT、RT↔World、World→Window）、分段血条数学、128 槽飘字池与 `(server_tick, source, target)` 去重表、资源根/设置路径解析（纯决策部分）、Katana Zero 主题与 `AccessibilityConfig`；**全部 raylib-free**，测试并入 `odyssey_logic_tests` |
+| 渲染管线（P0b） | `client/src/main.cpp`、`client/src/ui/AssetPath.cpp` | 可缩放窗口 + `SetWindowMinSize(960,540)` + `SetExitKey(KEY_NULL)`（不启用 HIGHDPI）；`LoadRenderTexture(960×540)` + `IsRenderTextureValid`（raylib 6.0 名，5.x 叫 `IsRenderTextureReady`）+ `TEXTURE_FILTER_POINT` + 退出时 `UnloadRenderTexture`；世界与 HUD 统一画进 RT，双层清屏（RT 内 `theme.background`、默认帧缓冲 BLACK）后按 `-540` 负高度翻转 blit，`rlDrawRenderBatchActive()` 提交批处理；`IsWindowResized` 时重算缩放/黑边；assets 由 CMake post-build 拷到 exe 旁 |
+| HUD 字体与文本（P1a） | `client/src/ui/PixelFont.{h,cpp}`、`client/src/ui/HudMath.h` | `LoadFontEx(assets/fonts/pixel_hud.ttf)` 启动加载一次 + `IsFontValid` 回退默认字体并告警；`DrawHudText`/`MeasureHudText`（像素字距、整数坐标）；`SanitizeAscii`/`FormatRawIdFallback` 做非 ASCII 降级；`HudMath` 提供受击方向、血条受伤残影（含确定性抖动）与六边形准星顶点（纯逻辑、可无头测试） |
 | 窗口/HUD | `client/src/main.cpp` | 连接/登录/匹配/战斗/奖励/恢复/网络统计 HUD；R 重试；ESC/关窗干净退出 |
 
 构建与自检：
@@ -43,7 +51,7 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 | Transport | TCP 长连接 | 定稿 |
 | Frame 头 | 16B、大端：Magic 2B `0x4E52` + Version 1B `1` + Flags 1B + MessageType 2B + Reserved 2B + BodyLength 4B + Sequence 4B | A 复核 |
 | Body 上限 | 64 KiB，**解码端在读到长度后、分配前检查** | A 复核 |
-| 连接端点 | 默认 `127.0.0.1:7777`（当前为 main.cpp 常量；地址进配置由 A/D 的 config 阶段统一） | A + D |
+| 连接端点 | 默认 `127.0.0.1:7777`；由 `--host`/`--port`/`--server`（命令行）或 `ODYSSEY_SERVER_HOST`/`ODYSSEY_SERVER_PORT`（环境变量）覆盖，优先级 命令行 > 环境变量 > 默认；非法值一律报错退出，不静默回退 | C 已实现（`core/ClientConfig.h`）；A/D 只需对齐同名环境变量 |
 | 入站解码 | Network Thread 只产出 `NetEvent`（见 §4），payload 不在此层解析 | A 提供 proto |
 
 Frame Sequence 与 Input Sequence 相互独立（架构 §8.1）。客户端不使用 Sequence 做可靠性判断。
@@ -83,6 +91,7 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 | 5.3 | 开发登录（dev token → Session/Player ID） | ✅ 客户端已实现登录流程（A 网络层支持 dev 登录） | 真实服务器就绪后联调 |
 | 5.4 | 可联调的真实 Go Server + 地址/端口（及 D 的 lobby/匹配） | ⏳ A 网络层可独立起服；Room/匹配未接线 | 用于 D2/D3 验收（stub 只到 D1） |
 | 5.5 | B 域语义（出生/速度/地图/30Hz/InputSeq） | ✅ GAME-CORE-PHASE1 已声明，客户端对齐 | 轴符号与 `move` 方向在联调前确认 |
+| 5.6 | **Ready 屏障的服务端处理**（`MSG_NEXT_STAGE_REQUEST`） | ⏳ 全仓仅存在于 `server/internal/session/session.go` 的合法性表，**无任何 handler 消费**；`PreparingNextStage` 由服务器在奖励轮次 `Complete()` 后自行推进（`server/internal/game/rewards.go`） | C 已按 A5 把发送时机收敛到 `PreparingNextStage`；A 接线后才能做屏障端到端验收 |
 
 ## 6. 输入契约（C → 服务器）
 
@@ -90,7 +99,10 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 - **只发意图，不发坐标/速度/最终结果**。释放按键产生零向量（服务器停止）。
 - 键盘映射：A/D → 服务器平面 x ∓、W/S → y（客户端 x/z 语义）；对角输入归一化到单位圆。
 - 已按 A 的 `PlayerInput{input_seq, client_tick_ms, move(Vec2), aim, shoot}` 编码（`PayloadCodec::EncodePlayerInput`）。
-- 真发门控：需「已登录 + 已入房（MatchFound/Join 回执）」状态；当前 A 服务器未接 Room，先留门控，联调时放开。
+- 真发门控（A5 C-a/C-b/C-e）：需「已登录 + 已入房 + 本会话已收到首帧权威快照 + 无恢复进行中 + 自己存活 + 权威 `stage.state == playing`」；不满足即静默（不消耗 InputSeq、不发包），恢复会话在首帧快照到达前完全静默。
+- 门控翻转（进入静默）时丢弃已记住的方向意图，避免阶段切换/死亡/恢复后带着旧意图多走一步；`kStageStartedEvent` 同样清空意图。切关时对在途旧输入的服务器侧处理策略仍待 A 确认（客户端当前不重放、序号保持单调）。
+- Ready 门控（A5 C-a）：只在权威 `stage.state == PreparingNextStage` 且自身奖励已结清（无待选项、无待确认选择）时报一次，按关卡 latch；提前按只产生可见的拦截原因，不发包。
+- 恢复续号（A5 C-e）：Resume 成功后不重发 MatchRequest；恢复会话首帧快照把 InputSeq 抬到 `max(断线前最高已发, last_processed_input)` 之上，绝不重放旧区间。
 
 ## 7. 快照消费契约（服务器 → C）
 
@@ -119,5 +131,59 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 
 - 输入轴符号（W/S 在服务器平面上的正负）需在联调前与 A/B 定稿，防止方向镜像。
 - PlayerInput 真发、Match/入房门控、双人绘制画面验收，依赖 5.4（Room 接线 + D lobby）与本机渲染环境修复。
-- 预测/校正/插值（渲染平滑）不在本阶段；10Hz 阶梯感不作为失败项。
+- 预测/校正（A5 C-d）：tick 驱动。每 30Hz 边界恰好一步，步数按服务器 tick 时间线计算，**不按收发包数**；移速取自快照 `self.move_speed`（装备/属性加成即时生效），死亡时不推进。因此收包频率（30Hz/300Hz）不改变预测速度。
+- 恢复等待（A5 C-f）全部有界：重连最多 5 次（退避 2s→10s），用尽后进入终止态 `kExhausted`（需按 R，不再无声重试）；`ResumeRequest`/`LoginRequest` 5s 无响应即超时 → 丢弃令牌回落全新登录，超时与连接失败共用同一预算；恢复成功后再次闪断会重置预算（可反复恢复）。Token 轮换需协议先给新 token 字段（A4）。
 - 本机 raylib 动态库呈现问题（纯色图元不上屏）记录在验证文档，属环境待办，不影响逻辑/网络联调。
+
+## 10. UI 重构（Katana Zero 风格）分期状态
+
+界面信息架构与视觉规范见 **[CLIENT-HUD-DESIGN.md](CLIENT-HUD-DESIGN.md)**（布局图、状态矩阵、元素↔数据源映射、诊断迁移到 F1 的清单）。按定稿提示词分四期推进；`ui/*.cpp` **不链接进任何测试目标**，可测部分一律放在 raylib-free 的 `ui/*.h`。
+
+| 期 | 范围 | 状态 |
+| --- | --- | --- |
+| **P0a** | `ui/Theme.h`、`ui/UiGeometry.h`（布局 + 三支坐标变换，含 `scale=1` 与 `scale≥2` 用例）、`ui/HealthBar.h`、`ui/FloaterPool.h`（128 槽 FIFO + 去重键 + 过期）、`ui/AssetPath.h`（资源根与 settings 路径的纯决策） | ✅ 已完成（`odyssey_logic_tests` 内 192 项新断言） |
+| **P0b** | `main.cpp` 渲染闭环接线：可缩放窗口 + `SetWindowMinSize(960,540)`、`SetExitKey(KEY_NULL)`、RenderTexture(960×540) 生命周期与 `TEXTURE_FILTER_POINT`、双层清屏、`-540` 翻转 blit、`IsWindowResized` 重算 layout、assets post-build 拷贝、`ui/AssetPath.cpp` 平台实现（exe 目录 / `%APPDATA%` / XDG） | ✅ 已完成（窗口表现待本地构建目视确认） |
+| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | ✅ P1a（字体 + `DrawTextEx` + 零分配）、P1b-1（F1 整屏诊断视图、世界居中、目标行/过渡卡/大厅卡/断线横幅）、P1b-2（准星/分段血条+残影/受击弧/飘字/提示淡出）均已完成；**字体文件仍缺**，现走默认字体回退（见 §11） |
+| **P2** | ImGui 顶层：奖励面板与 Raylib 旧面板互斥、单次提交锁定、键鼠门控、ESC 优先级 | ⏸ 门禁：rlImGui 依赖审批（供应商代码已入库并登记，只等 A 审 `RLIMGUI-INTEGRATION.md`） |
+| **P3** | F1/F2/F3 调试与无障碍面板、双向队列深度 EMA 折线、`--no-ui`/`ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收 | ✅ 已完成：F1（含双向队列深度 EMA 折线、RTT/Tick/预测误差 EMA、辅助 UI 命令记录）、F2、F3（写 `settings.ini`）、`--no-ui`、性能采集与一键验收脚本；**Release 验收已执行并 PASS** —— UI 每帧增量中位数 **0.1224 ms ≤ 1.5 ms**（3 轮各 600 帧，见 `docs/verification/phase2-c/release-ui-perf-2026-09-16-2355/report.md`） |
+
+---
+
+## 11. UI 模块文件命名偏差与拆分方案（**请 A 评审认可**）
+
+### 11.1 偏差是什么
+
+定稿 §四.1 / §五.1 点名要生成 `ui/Theme.h`、`ui/HudRenderer.h/.cpp`、`ui/RewardWindow.h/.cpp`、`ui/DebugOverlay.h/.cpp`。**现状**：`ui/Theme.h` 存在；**后三个文件不存在**，HUD / 奖励 / 调试的**绘制代码全部在 `client/src/main.cpp`**（约 2276 行，其中绘制块约 800 行），可测逻辑则已按定稿要求下沉到 raylib-free 的 `ui/*.h`：
+
+| 现状文件 | 职责 | 对应定稿要求的模块 |
+| --- | --- | --- |
+| `ui/Theme.h`、`ui/UiGeometry.h`、`ui/HealthBar.h`、`ui/FloaterPool.h`、`ui/HudMath.h`、`ui/Metrics.h`、`ui/PerfCapture.h`、`ui/PixelFont.{h,cpp}` | 调色板、布局与坐标变换、分段血条数学、飘字池、受击/准星数学、指标 EMA、性能采集、字体加载与 `DrawHudText` | 已有等价物（`Theme.h` 本身就是定稿点名的文件） |
+| `main.cpp` 绘制块：F1 诊断视图（~270 行）、F2 实体调试（~65 行）、F3 无障碍菜单（~60 行） | 调试面板的三块绘制 | 语义上属于 `ui/DebugOverlay` |
+| `main.cpp` 绘制块：战斗 HUD（目标行、过渡卡、大厅卡、断线横幅、血条、准星、飘字、受击弧、提示淡出，~260 行） | 游戏层 HUD 绘制 | 语义上属于 `ui/HudRenderer` |
+| `main.cpp` 绘制块：奖励托盘（~30 行） | 奖励选项绘制（P2 将被 ImGui 卡片取代） | 语义上属于 `ui/RewardWindow` |
+
+**功能等价性**：三块的绘制、状态矩阵、零分配约束与 F1/F2/F3 快捷键行为均已实现并通过 Release 性能验收；偏差只在**文件组织**，不在功能。可测逻辑（布局、数学、池、EMA、格式化）已经在 `ui/*.h` 里并被 `odyssey_logic_tests` 覆盖 733 项断言。
+
+### 11.2 拆分方案（精确到搬迁对象）
+
+这不是"改文件名"，而是约 600 行的行为等价搬迁，且**必须先外移三样东西**才能动：
+
+1. **`DemoState`（`main.cpp` ~85 行）→ 独立 header**。HUD/F1 大量读 `demo.*`；若不外移，就得每帧把字段拷进上下文结构，而 `banner` / `login_note` / `match_note` 等是 `std::string` —— **每帧拷贝字符串违反"渲染块内零分配"的硬约束**，所以只能传引用。
+2. **绘制辅助件 → 共享的 raylib 侧头**：`ToRayColor()`、`CenteredTextX()`、`kScreenWidth/kScreenHeight`，以及每帧复用的 `line` / `ascii_a|b|c` 定长缓冲（缓冲可各自在模块内声明）。
+3. **上下文结构体**：`HudRendererContext`、`DebugOverlayContext`、`RewardWindowContext`，字段按引用传入；模块内用**引用别名**把 `ctx` 字段还原成原变量名，使搬迁代码逐字不动（这是把"能编译"变成"行为不变"的关键手法）。
+
+搬迁顺序（每步单独提交、单独编译验证）：`RewardWindow`（最小、上下文仅 `theme` + `reward_view`）→ `DebugOverlay` → `HudRenderer`。`client/CMakeLists.txt` 增加三个 `.cpp`（**仍然只进客户端 target，绝不链接进 `odyssey_*_tests`**）。
+
+### 11.3 为什么本轮不拆（如实说明）
+
+- 该类搬迁的典型失败模式是**"能编译但画面画错"**，而唯一可靠的验证是"完整构建 + 目视 + 性能复测"；本轮交付窗口内优先保证了实现与性能验收（唯一硬指标）。
+- 性能 P0–P3 的数字是在**当前结构**上测得的；在报告前做结构性搬迁会同时移动"代码组织"与"已验证基线"。
+- 结论：**本轮以等价结构交付，请 A 在评审中确认接受**；拆分安排在报告之后进行，届时按 §11.2 执行，并重跑 `ctest` 与 Release 性能验收作为回归证据。
+
+### 11.4 请 A 明确回答
+
+1. 是否接受本轮"`ui/*.h` 承担可测逻辑 + `main.cpp` 承担绘制"的等价结构？
+2. 若接受：是否同意拆分排在报告之后（§11.2 已给出可执行方案）？
+3. 若要求本轮必须拆分：请确认可以接受"仅编译级验证 + 需要一次完整构建目视"的验证强度与相应时间成本。
+
+> 另注：`client/assets/fonts/pixel_hud.ttf` 缺失（需 B/D 提供），当前走 raylib 默认字体回退 —— 与本条偏差无关，但同属"交付物与定稿不完全一致"的清单，一并在此登记。

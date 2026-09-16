@@ -6,13 +6,19 @@
 #include "common.pb.h"
 #include "lobby.pb.h"
 #include "session.pb.h"
+#include "stage.pb.h"
 #include "system.pb.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#if defined(_MSC_VER)
+#include <crtdbg.h>  // _CrtSetReportMode: keep a Debug build headless (see main)
+#endif
 
 namespace {
 
@@ -42,11 +48,16 @@ using odyssey::client::network::payload::EncodeRewardChoice;
 using odyssey::client::network::payload::DecodeResumeResponse;
 using odyssey::client::network::payload::EncodeResumeRequest;
 using odyssey::client::network::payload::DecodeStageEvent;
+using odyssey::client::network::payload::DecodeStageClearedDetail;
+using odyssey::client::network::payload::DecodeStageStartedDetail;
 using odyssey::client::network::payload::DecodeWorldSnapshot;
 using odyssey::client::network::payload::EncodeLoginRequest;
 using odyssey::client::network::payload::EncodeMatchRequest;
 using odyssey::client::network::payload::EncodePing;
 using odyssey::client::network::payload::EncodePlayerInput;
+using odyssey::client::network::payload::StageClearedDetail;
+using odyssey::client::network::payload::StageStartedDetail;
+using odyssey::client::network::payload::kMaxStageModifiers;
 using odyssey::client::network::payload::LoginRequestData;
 using odyssey::client::network::payload::LoginResponseData;
 using odyssey::client::network::payload::PingData;
@@ -166,6 +177,7 @@ void TestPlayerInputWire() {
     data.aim_x = 0.0f;
     data.aim_z = 1.0f;
     data.shoot = true;
+    data.use_potion = true;
     data.client_tick_ms = 12345;
     const auto bytes = EncodePlayerInput(data);
 
@@ -184,6 +196,9 @@ void TestPlayerInputWire() {
         CHECK(parsed.aim().y() == data.aim_z);
     }
     CHECK(parsed.shoot());
+    // A5 item C-c: the potion intent must travel on the wire, and its absence must be a
+    // plain false rather than an unset field the server could misread.
+    CHECK(parsed.use_potion());
     // Zero-intent (release) encodes fine with seq and no direction magnitude.
     odyssey::client::network::payload::PlayerInputData idle;
     idle.input_seq = 78;
@@ -191,6 +206,8 @@ void TestPlayerInputWire() {
     odyssey::protocol::v1::PlayerInput idle_parsed;
     CHECK(idle_parsed.ParseFromArray(idle_bytes.data(), static_cast<int>(idle_bytes.size())));
     CHECK(idle_parsed.input_seq() == 78);
+    CHECK(!idle_parsed.use_potion());
+    CHECK(!idle_parsed.shoot());
     if (idle_parsed.has_move()) {
         CHECK(idle_parsed.move().x() == 0.0f);
         CHECK(idle_parsed.move().y() == 0.0f);
@@ -346,6 +363,83 @@ void TestCombatEventsDecode() {
     CHECK(stage_view.server_tick == 200);
 }
 
+void TestStageDetailDecode() {
+    // StageStarted (MSG_STAGE_STARTED 400): the only message that can carry the stage's
+    // global modifiers, which the reliable StageStartedEvent (325) has no field for.
+    odyssey::protocol::v1::StageStarted started;
+    started.set_stage_index(3);
+    started.set_server_tick(900);
+    started.set_monster_count(6);
+    started.set_seed(4242);
+    started.add_monster_archetype_ids(1);
+    auto* player_modifier = started.add_modifiers();
+    player_modifier->set_target(odyssey::protocol::v1::StatModifier::PLAYER);
+    player_modifier->set_op(odyssey::protocol::v1::StatModifier::MULTIPLY);
+    player_modifier->set_stat(odyssey::protocol::v1::StatModifier::ATTACK);
+    player_modifier->set_value(1.2f);
+    auto* monster_modifier = started.add_modifiers();
+    monster_modifier->set_target(odyssey::protocol::v1::StatModifier::MONSTER);
+    monster_modifier->set_op(odyssey::protocol::v1::StatModifier::ADD);
+    monster_modifier->set_stat(odyssey::protocol::v1::StatModifier::DEFENSE);
+    monster_modifier->set_value(5.0f);
+
+    StageStartedDetail started_view;
+    CHECK(DecodeStageStartedDetail(Serialize(started), started_view));
+    CHECK(started_view.stage_index == 3);
+    CHECK(started_view.server_tick == 900);
+    CHECK(started_view.monster_count == 6);
+    CHECK(started_view.seed == 4242);
+    CHECK(started_view.modifier_count == 2);
+    CHECK(started_view.modifier_overflow == 0);
+    CHECK(started_view.modifiers[0].target == 1);  // PLAYER
+    CHECK(started_view.modifiers[0].op == 2);      // MULTIPLY
+    CHECK(started_view.modifiers[0].stat == 1);    // ATTACK
+    CHECK(std::fabs(started_view.modifiers[0].value - 1.2f) < 1e-6);
+    CHECK(started_view.modifiers[1].target == 2);
+    CHECK(started_view.modifiers[1].op == 1);
+    CHECK(started_view.modifiers[1].stat == 2);
+    CHECK(std::fabs(started_view.modifiers[1].value - 5.0f) < 1e-6);
+
+    // The decode buffer is fixed: extra modifiers are counted, never written out of bounds.
+    odyssey::protocol::v1::StageStarted flooded;
+    for (std::size_t i = 0; i < kMaxStageModifiers + 3; ++i) {
+        auto* modifier = flooded.add_modifiers();
+        modifier->set_stat(odyssey::protocol::v1::StatModifier::ATTACK);
+        modifier->set_value(1.0f);
+    }
+    StageStartedDetail flooded_view;
+    CHECK(DecodeStageStartedDetail(Serialize(flooded), flooded_view));
+    CHECK(flooded_view.modifier_count == kMaxStageModifiers);
+    CHECK(flooded_view.modifier_overflow == 3);
+
+    // StageCleared (MSG_STAGE_CLEARED 401) is a different shape - it has no server_tick at
+    // all - which is exactly why it must not be parsed as a StageStartedEvent.
+    odyssey::protocol::v1::StageCleared cleared;
+    cleared.set_stage_index(3);
+    cleared.set_clear_time_ms(42500);
+    cleared.set_difficulty_score(3);
+    StageClearedDetail cleared_view;
+    CHECK(DecodeStageClearedDetail(Serialize(cleared), cleared_view));
+    CHECK(cleared_view.stage_index == 3);
+    CHECK(cleared_view.clear_time_ms == 42500);
+    CHECK(cleared_view.difficulty_score == 3);
+
+    // An unpopulated message decodes to zeros, which the client reads as "no data" rather
+    // than as a real difficulty of 0.
+    odyssey::protocol::v1::StageCleared empty;
+    StageClearedDetail empty_view;
+    CHECK(DecodeStageClearedDetail(Serialize(empty), empty_view));
+    CHECK(empty_view.difficulty_score == 0);
+    CHECK(empty_view.clear_time_ms == 0);
+
+    // Garbage must fail loudly instead of decoding to a plausible-looking stage.
+    const std::vector<std::uint8_t> garbage{0xFF, 0xFF, 0xFF, 0xFF};
+    StageStartedDetail bad_started;
+    CHECK(!DecodeStageStartedDetail(garbage, bad_started));
+    StageClearedDetail bad_cleared;
+    CHECK(!DecodeStageClearedDetail(garbage, bad_cleared));
+}
+
 void TestRewardWire() {
     // RewardOptions (S -> C)
     odyssey::protocol::v1::RewardOptions options;
@@ -432,6 +526,16 @@ void TestDisconnectDecode() {
 }  // namespace
 
 int main() {
+#if defined(_MSC_VER) && defined(_DEBUG)
+    // A Debug build runs the CRT heap checks. Their default report mode opens a MODAL dialog,
+    // which turns a headless `ctest` run into a hang instead of a failure, so send the report
+    // to stderr: the test still aborts with a non-zero exit code, and the evidence lands in
+    // the test log where the regression run can see it.
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
     TestPingWireRoundTrip();
     TestPongDecodeFromServer();
     TestLoginRequestWire();
@@ -441,6 +545,7 @@ int main() {
     TestPlayerInputWire();
     TestWorldSnapshotDecode();
     TestCombatEventsDecode();
+    TestStageDetailDecode();
     TestRewardWire();
     TestResumeWire();
     TestDisconnectDecode();

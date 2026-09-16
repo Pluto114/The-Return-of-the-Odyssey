@@ -7,3 +7,8 @@
 *.ogg binary
 *.wav binary
 *.glb binary
+
+# Vendored third-party sources are kept byte-identical to upstream: no line-ending
+# normalisation, no whitespace fixups, so a re-vendor stays a clean copy and the
+# recorded blob hashes in client/third_party/rlImGui/VENDORED.md keep matching.
+client/third_party/** -text

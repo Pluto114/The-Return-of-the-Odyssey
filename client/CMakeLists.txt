@@ -19,6 +19,9 @@ set(_equipment_catalog "${PROJECT_SOURCE_DIR}/data/equipment/catalog.json")
 if(NOT EXISTS "${_equipment_catalog}")
     message(FATAL_ERROR "Missing equipment catalog: ${_equipment_catalog}")
 endif()
+# Regenerate when the catalog changes: file(READ) alone does not make CMake
+# re-run, so without this the TSV would silently go stale after a catalog edit.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_equipment_catalog}")
 file(READ "${_equipment_catalog}" _equipment_json)
 string(JSON _equipment_version GET "${_equipment_json}" version)
 if(NOT _equipment_version EQUAL 1)
@@ -110,6 +113,13 @@ if(BUILD_TESTING)
     set_target_properties(odyssey_logic_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
     add_test(NAME odyssey_logic_tests COMMAND odyssey_logic_tests)
 
+    # Endpoint configuration parsing: header-only, so this target needs no
+    # library beyond its own translation unit.
+    add_executable(odyssey_config_tests tests/config_tests.cpp)
+    target_include_directories(odyssey_config_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set_target_properties(odyssey_config_tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    add_test(NAME odyssey_config_tests COMMAND odyssey_config_tests)
+
     add_executable(odyssey_protocol_tests tests/protocol_tests.cpp)
     target_include_directories(odyssey_protocol_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(odyssey_protocol_tests PRIVATE odyssey_protocol)
@@ -119,16 +129,54 @@ endif()
 
 # The game client executable. Ping/Login now use A's generated protocol;
 # PlayerInput transmission and WorldSnapshot decoding land in the next slices.
-add_executable(odyssey_client src/main.cpp src/input/InputSampler.cpp)
+# ui/*.cpp (theme-adjacent platform code, HUD renderers) is compiled here only -
+# never into the test targets, which must stay window-free.
+add_executable(odyssey_client
+    src/main.cpp
+    src/input/InputSampler.cpp
+    src/ui/AssetPath.cpp
+    src/ui/PixelFont.cpp)
 target_include_directories(odyssey_client PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(odyssey_client PRIVATE
     odyssey_client_dependencies odyssey_client_net odyssey_client_core odyssey_protocol)
 set_target_properties(odyssey_client PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+
+# Vendored rlImGui (raylib + Dear ImGui glue). Compiled into the client target ONLY -
+# never into the test targets, which must stay window-free. Dear ImGui itself comes
+# from vcpkg through odyssey_client_dependencies; NO_FONT_AWESOME keeps the Font
+# Awesome icon font (and its 1.4MB data) out, since the HUD is ASCII-only.
+set(_rlimgui_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rlImGui")
+if(EXISTS "${_rlimgui_dir}/rlImGui.cpp")
+    target_sources(odyssey_client PRIVATE "${_rlimgui_dir}/rlImGui.cpp")
+    target_include_directories(odyssey_client PRIVATE "${_rlimgui_dir}")
+    target_compile_definitions(odyssey_client PRIVATE NO_FONT_AWESOME)
+    message(STATUS "Odyssey: vendored rlImGui enabled (${_rlimgui_dir})")
+else()
+    # Keeps the tree buildable before/without the vendored copy; the UI falls back to
+    # the raylib-drawn panels.
+    message(STATUS "Odyssey: rlImGui not vendored; ImGui panels disabled")
+endif()
+# The generated table is copied beside the executable, and again into its assets/
+# directory after the assets copy: the client tries the asset root first (its normal
+# resolution path) and keeps the executable directory as a fallback, so a shipped
+# folder and a bare exe both work.
 add_custom_command(TARGET odyssey_client POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${_equipment_display}" "$<TARGET_FILE_DIR:odyssey_client>/equipment.tsv"
     COMMENT "Copying generated equipment display table"
     VERBATIM)
+
+# Ship the assets beside the executable: the client resolves its asset root as
+# <exe>/assets first, so it never depends on the working directory.
+add_custom_command(TARGET odyssey_client POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:odyssey_client>/assets"
+    # After the assets copy, so the generated table is not merged over: the client
+    # resolves it through the asset root first.
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${_equipment_display}" "$<TARGET_FILE_DIR:odyssey_client>/assets/equipment.tsv"
+    COMMENT "Copying client assets and the generated equipment table next to odyssey_client")
 
 # Diagnostic: raylib window with no network/protocol (isolates environment
 # issues from client-logic hangs). Prints markers to stdout.

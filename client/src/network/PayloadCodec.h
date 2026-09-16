@@ -86,6 +86,10 @@ struct PlayerInputData {
     float aim_x = 0.0f;           // aim heading, world x (finite; required when shoot)
     float aim_z = 0.0f;           // aim heading, world z
     bool shoot = false;
+    // One-shot potion intent (A5 C-c). The server owns availability: it consumes at most
+    // one charge per intent, and a request that arrives while the gate rejects the input
+    // is never sent at all - the caller latches a press exactly once (PotionIntent).
+    bool use_potion = false;
     std::uint64_t client_tick_ms = 0;
 };
 
@@ -100,6 +104,7 @@ inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) 
     aim->set_x(data.aim_x);
     aim->set_y(data.aim_z);
     proto.set_shoot(data.shoot);
+    proto.set_use_potion(data.use_potion);
     std::vector<std::uint8_t> out(proto.ByteSizeLong());
     proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
     return out;
@@ -328,6 +333,87 @@ inline bool DecodeStageEvent(const std::vector<std::uint8_t>& payload, StageEven
     }
     out.stage_index = proto.stage_index();
     out.server_tick = proto.server_tick();
+    return true;
+}
+
+// ---- Stage detail (A's domain messages, MSG_STAGE_STARTED 400 / MSG_STAGE_CLEARED 401) --
+//
+// The reliable stage EVENTS (325/326) carry only the index and the tick, so the global
+// modifiers and the difficulty / clear-time summary can only arrive on these two messages.
+// The server does not send them yet; decoding them here keeps the client half of that seam
+// ready, and an unpopulated message simply leaves the summary empty.
+//
+// NOTE: these are separate messages, not longer versions of the events. Their field numbers
+// do not line up (StageStarted: index=1 tick=2 monster_count=3 seed=4 ids=5 modifiers=6;
+// StageCleared: index=1 clear_time_ms=2 difficulty_score=3), so parsing one payload with the
+// other's type silently moves values into the wrong field - e.g. a cleared stage's
+// clear_time_ms would be read as StageStartedEvent.server_tick.
+
+struct StageModifierData {
+    std::uint32_t target = 0;  // 1 player / 2 monster
+    std::uint32_t op = 0;      // 1 add / 2 multiply
+    std::uint32_t stat = 0;    // 1 attack / 2 defense / 3 max hp / 4 move speed / 5 attack speed
+    float value = 0.0f;
+};
+
+// Fixed cap: decoding must not allocate, and the HUD shows at most a handful. Anything
+// beyond it is counted so the UI can say "+N more" instead of silently dropping it.
+inline constexpr std::size_t kMaxStageModifiers = 8;
+
+struct StageStartedDetail {
+    std::uint32_t stage_index = 0;
+    std::uint64_t server_tick = 0;
+    std::uint32_t monster_count = 0;
+    std::uint32_t seed = 0;
+    StageModifierData modifiers[kMaxStageModifiers] = {};
+    std::size_t modifier_count = 0;
+    std::size_t modifier_overflow = 0;
+};
+
+struct StageClearedDetail {
+    std::uint32_t stage_index = 0;
+    // No server_tick: the domain StageCleared has none (index=1, clear_time_ms=2,
+    // difficulty_score=3), unlike StageStarted where field 2 is the tick.
+    std::uint64_t clear_time_ms = 0;
+    std::uint32_t difficulty_score = 0;
+};
+
+inline bool DecodeStageStartedDetail(const std::vector<std::uint8_t>& payload,
+                                     StageStartedDetail& out) {
+    odyssey::protocol::v1::StageStarted proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.stage_index = proto.stage_index();
+    out.server_tick = proto.server_tick();
+    out.monster_count = proto.monster_count();
+    out.seed = proto.seed();
+    out.modifier_count = 0;
+    out.modifier_overflow = 0;
+    for (const auto& modifier : proto.modifiers()) {
+        if (out.modifier_count >= kMaxStageModifiers) {
+            ++out.modifier_overflow;
+            continue;
+        }
+        StageModifierData& slot = out.modifiers[out.modifier_count];
+        slot.target = static_cast<std::uint32_t>(modifier.target());
+        slot.op = static_cast<std::uint32_t>(modifier.op());
+        slot.stat = static_cast<std::uint32_t>(modifier.stat());
+        slot.value = modifier.value();
+        ++out.modifier_count;
+    }
+    return true;
+}
+
+inline bool DecodeStageClearedDetail(const std::vector<std::uint8_t>& payload,
+                                     StageClearedDetail& out) {
+    odyssey::protocol::v1::StageCleared proto;
+    if (!proto.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        return false;
+    }
+    out.stage_index = proto.stage_index();
+    out.clear_time_ms = proto.clear_time_ms();
+    out.difficulty_score = proto.difficulty_score();
     return true;
 }
 
