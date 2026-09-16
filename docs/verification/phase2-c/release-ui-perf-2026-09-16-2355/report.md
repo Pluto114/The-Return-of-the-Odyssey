@@ -2,7 +2,7 @@
 
 Date: 2026-09-16 23:56  
 Endpoint: 127.0.0.1:7777  
-Build: `C:\Users\xunxue\Desktop\The-Return-of-the-Odyssey-main\build\client-windows-release\client\odyssey_client.exe`  
+Build: `build/client-windows-release/client/odyssey_client.exe` (repository-relative)  
 Frames per run: 600 (plan floor 600)  
 Budget: mean(UI on) - mean(UI off) <= 1.5 ms  
 Script: scripts/verify/client-release-ui-perf.ps1
@@ -42,6 +42,7 @@ Round-to-round spread: 0.0344 ms
 - **HUD font**: `client/assets/fonts/pixel_hud.ttf` is absent from the repository, so both runs used the raylib default font (the client logged the fallback warning). This is identical in the UI-on and UI-off runs and therefore does not affect the delta, but the pixel bitmap font deliverable is still waiting on that asset.
 - **Outliers**: the maximum per-frame times (8.4–9.6 ms) are two orders of magnitude above the means (0.10–0.24 ms) while p95 stays at 0.12–0.37 ms, i.e. isolated single-frame hitches rather than a sustained cost. The per-round max delta (0.089 / 0.967 / 1.214 ms) also stays inside the 1.5 ms budget, so no max-exception note is required; a longer run on an idle machine would be the way to characterise them further.
 - **Sampling**: 600 counted frames per run after the 10 warm-up frames that `PerfCapture` discards (frame 0 carries the font atlas upload).
+- **Raw evidence keeps machine paths**: the client prints its asset root and the perf-log destination at startup, so `ui-on-N.log` / `ui-off-N.log` contain this machine's absolute paths by design. That is deliberate - those lines are how a reviewer confirms which assets and which CSV the run actually used. Only this summary is kept path-neutral.
 
 ## Evidence
 

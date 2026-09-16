@@ -388,12 +388,19 @@ if ($validRows.Count -gt 0) {
 }
 
 $report = Join-Path $evidenceDir 'report.md'
+# Keep the summary path-neutral: the criteria forbid personal absolute paths in the documents
+# a reviewer follows, so an exe inside the repository is reported relative to it. (The raw
+# client logs still carry machine paths by design - they are how the run is verified.)
+$buildShown = $clientExe
+if ($clientExe.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+    $buildShown = $clientExe.Substring($root.Length).TrimStart('\', '/')
+}
 $lines = @()
 $lines += '# Release UI performance acceptance run'
 $lines += ''
 $lines += "Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm')  "
 $lines += "Endpoint: $endpoint  "
-$lines += "Build: ``$clientExe``  "
+$lines += "Build: ``$buildShown``  "
 $lines += "Frames per run: $Frames (plan floor 600)  "
 $lines += "Budget: mean(UI on) - mean(UI off) <= $BudgetMs ms  "
 $lines += "Script: scripts/verify/client-release-ui-perf.ps1"
