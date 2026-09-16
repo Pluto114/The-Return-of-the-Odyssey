@@ -143,6 +143,47 @@ NetMessage { message_type:u16, sequence:u32, payload:bytes }   // payload 不透
 | --- | --- | --- |
 | **P0a** | `ui/Theme.h`、`ui/UiGeometry.h`（布局 + 三支坐标变换，含 `scale=1` 与 `scale≥2` 用例）、`ui/HealthBar.h`、`ui/FloaterPool.h`（128 槽 FIFO + 去重键 + 过期）、`ui/AssetPath.h`（资源根与 settings 路径的纯决策） | ✅ 已完成（`odyssey_logic_tests` 内 192 项新断言） |
 | **P0b** | `main.cpp` 渲染闭环接线：可缩放窗口 + `SetWindowMinSize(960,540)`、`SetExitKey(KEY_NULL)`、RenderTexture(960×540) 生命周期与 `TEXTURE_FILTER_POINT`、双层清屏、`-540` 翻转 blit、`IsWindowResized` 重算 layout、assets post-build 拷贝、`ui/AssetPath.cpp` 平台实现（exe 目录 / `%APPDATA%` / XDG） | ✅ 已完成（窗口表现待本地构建目视确认） |
-| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | 🟡 P1a（字体 + `DrawTextEx` + 零分配）✅；P1b-1（F1 整屏诊断视图、世界居中、目标行/过渡卡/大厅卡/断线横幅）✅；P1b-2（准星/分段血条+残影/受击弧/飘字/提示淡出）⏳ |
-| **P2** | ImGui 顶层：奖励面板与 Raylib 旧面板互斥、单次提交锁定、键鼠门控、ESC 优先级 | ⏸ 门禁：rlImGui 依赖审批 |
-| **P3** | F1/F2/F3 调试与无障碍面板、双向队列深度 EMA 折线、`--no-ui`/`ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收 | ⏸ 门禁：D 的 Release 预设 |
+| **P1** | RT 内像素 HUD：`DrawText → DrawTextEx`、像素准星、分段能量血条（Damaged Shake）、受击方向指示；字体文件就位后加载 | ✅ P1a（字体 + `DrawTextEx` + 零分配）、P1b-1（F1 整屏诊断视图、世界居中、目标行/过渡卡/大厅卡/断线横幅）、P1b-2（准星/分段血条+残影/受击弧/飘字/提示淡出）均已完成；**字体文件仍缺**，现走默认字体回退（见 §11） |
+| **P2** | ImGui 顶层：奖励面板与 Raylib 旧面板互斥、单次提交锁定、键鼠门控、ESC 优先级 | ⏸ 门禁：rlImGui 依赖审批（供应商代码已入库并登记，只等 A 审 `RLIMGUI-INTEGRATION.md`） |
+| **P3** | F1/F2/F3 调试与无障碍面板、双向队列深度 EMA 折线、`--no-ui`/`ODYSSEY_UI_OFF=1` 开关、Release 下 ≤1.5ms 整帧增量验收 | ✅ 已完成：F1（含双向队列深度 EMA 折线、RTT/Tick/预测误差 EMA、辅助 UI 命令记录）、F2、F3（写 `settings.ini`）、`--no-ui`、性能采集与一键验收脚本；**Release 验收已执行并 PASS** —— UI 每帧增量中位数 **0.1224 ms ≤ 1.5 ms**（3 轮各 600 帧，见 `docs/verification/phase2-c/release-ui-perf-2026-09-16-2355/report.md`） |
+
+---
+
+## 11. UI 模块文件命名偏差与拆分方案（**请 A 评审认可**）
+
+### 11.1 偏差是什么
+
+定稿 §四.1 / §五.1 点名要生成 `ui/Theme.h`、`ui/HudRenderer.h/.cpp`、`ui/RewardWindow.h/.cpp`、`ui/DebugOverlay.h/.cpp`。**现状**：`ui/Theme.h` 存在；**后三个文件不存在**，HUD / 奖励 / 调试的**绘制代码全部在 `client/src/main.cpp`**（约 2276 行，其中绘制块约 800 行），可测逻辑则已按定稿要求下沉到 raylib-free 的 `ui/*.h`：
+
+| 现状文件 | 职责 | 对应定稿要求的模块 |
+| --- | --- | --- |
+| `ui/Theme.h`、`ui/UiGeometry.h`、`ui/HealthBar.h`、`ui/FloaterPool.h`、`ui/HudMath.h`、`ui/Metrics.h`、`ui/PerfCapture.h`、`ui/PixelFont.{h,cpp}` | 调色板、布局与坐标变换、分段血条数学、飘字池、受击/准星数学、指标 EMA、性能采集、字体加载与 `DrawHudText` | 已有等价物（`Theme.h` 本身就是定稿点名的文件） |
+| `main.cpp` 绘制块：F1 诊断视图（~270 行）、F2 实体调试（~65 行）、F3 无障碍菜单（~60 行） | 调试面板的三块绘制 | 语义上属于 `ui/DebugOverlay` |
+| `main.cpp` 绘制块：战斗 HUD（目标行、过渡卡、大厅卡、断线横幅、血条、准星、飘字、受击弧、提示淡出，~260 行） | 游戏层 HUD 绘制 | 语义上属于 `ui/HudRenderer` |
+| `main.cpp` 绘制块：奖励托盘（~30 行） | 奖励选项绘制（P2 将被 ImGui 卡片取代） | 语义上属于 `ui/RewardWindow` |
+
+**功能等价性**：三块的绘制、状态矩阵、零分配约束与 F1/F2/F3 快捷键行为均已实现并通过 Release 性能验收；偏差只在**文件组织**，不在功能。可测逻辑（布局、数学、池、EMA、格式化）已经在 `ui/*.h` 里并被 `odyssey_logic_tests` 覆盖 733 项断言。
+
+### 11.2 拆分方案（精确到搬迁对象）
+
+这不是"改文件名"，而是约 600 行的行为等价搬迁，且**必须先外移三样东西**才能动：
+
+1. **`DemoState`（`main.cpp` ~85 行）→ 独立 header**。HUD/F1 大量读 `demo.*`；若不外移，就得每帧把字段拷进上下文结构，而 `banner` / `login_note` / `match_note` 等是 `std::string` —— **每帧拷贝字符串违反"渲染块内零分配"的硬约束**，所以只能传引用。
+2. **绘制辅助件 → 共享的 raylib 侧头**：`ToRayColor()`、`CenteredTextX()`、`kScreenWidth/kScreenHeight`，以及每帧复用的 `line` / `ascii_a|b|c` 定长缓冲（缓冲可各自在模块内声明）。
+3. **上下文结构体**：`HudRendererContext`、`DebugOverlayContext`、`RewardWindowContext`，字段按引用传入；模块内用**引用别名**把 `ctx` 字段还原成原变量名，使搬迁代码逐字不动（这是把"能编译"变成"行为不变"的关键手法）。
+
+搬迁顺序（每步单独提交、单独编译验证）：`RewardWindow`（最小、上下文仅 `theme` + `reward_view`）→ `DebugOverlay` → `HudRenderer`。`client/CMakeLists.txt` 增加三个 `.cpp`（**仍然只进客户端 target，绝不链接进 `odyssey_*_tests`**）。
+
+### 11.3 为什么本轮不拆（如实说明）
+
+- 该类搬迁的典型失败模式是**"能编译但画面画错"**，而唯一可靠的验证是"完整构建 + 目视 + 性能复测"；本轮交付窗口内优先保证了实现与性能验收（唯一硬指标）。
+- 性能 P0–P3 的数字是在**当前结构**上测得的；在报告前做结构性搬迁会同时移动"代码组织"与"已验证基线"。
+- 结论：**本轮以等价结构交付，请 A 在评审中确认接受**；拆分安排在报告之后进行，届时按 §11.2 执行，并重跑 `ctest` 与 Release 性能验收作为回归证据。
+
+### 11.4 请 A 明确回答
+
+1. 是否接受本轮"`ui/*.h` 承担可测逻辑 + `main.cpp` 承担绘制"的等价结构？
+2. 若接受：是否同意拆分排在报告之后（§11.2 已给出可执行方案）？
+3. 若要求本轮必须拆分：请确认可以接受"仅编译级验证 + 需要一次完整构建目视"的验证强度与相应时间成本。
+
+> 另注：`client/assets/fonts/pixel_hud.ttf` 缺失（需 B/D 提供），当前走 raylib 默认字体回退 —— 与本条偏差无关，但同属"交付物与定稿不完全一致"的清单，一并在此登记。

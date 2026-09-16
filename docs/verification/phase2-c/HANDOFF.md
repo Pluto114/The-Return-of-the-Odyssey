@@ -41,7 +41,7 @@
 | 5 | 截图证据链 | `docs/verification/phase2-c` 目前**无截图**（唯一的性能证据是 CSV/日志/report）。`disconnected`/`login` 与 **`playing`** 现在都能截（已实测能进战斗：`match ready room=1` → `stage started stage=1`）；**`reward` 截图需 A 的奖励路由**（bot README 明确 A2/A3 奖励与 Ready 路由未进主线）。要求：统一分辨率、无个人绝对路径 | 0.5 天 |
 | 6 | ~~Release ≤1.5ms 性能验收~~ | ✅ **已完成并 PASS（2026-09-16）**：[release-ui-perf-2026-09-16-2355](release-ui-perf-2026-09-16-2355/report.md) —— 3 轮 ×（UI 开 + `--no-ui`）各 600 帧，UI 每帧增量中位数 **0.1224 ms ≤ 1.5 ms**，轮间离散 0.0344 ms。复跑只需两条命令（`build-client-release.ps1` + `client-release-ui-perf.ps1`），脚本每次运行自动起 bot、自动出 PASS/FAIL/UNSTABLE | — |
 | 7 | 填写 `hardware.md` 的 6 个 TODO | 性能报告要求附测试机说明；内存 / GPU 与驱动 / 存储 / 电源模式 / 后台负载这几项 WMI 读不到（沙箱拒绝），只有本机能填 | 5 分钟 |
-| 8 | 交付文件命名偏差（需拍板） | 定稿点名 `ui/HudRenderer.h/.cpp`、`ui/RewardWindow.h/.cpp`、`ui/DebugOverlay.h/.cpp`；现状是功能都在 `main.cpp` + `ui/*.h` 纯逻辑头。二选一：拆分重构（0.5–1 天，有回归风险）或在 `CLIENT-PHASE1.md` 写明等价结构并请 A 认可（见 §二.C） | 0.5–1 天 |
+| 8 | 交付文件命名偏差（**已按"文档 + 请 A 认可"处理**） | 定稿点名 `ui/HudRenderer.h/.cpp`、`ui/RewardWindow.h/.cpp`、`ui/DebugOverlay.h/.cpp`；现状是功能都在 `main.cpp` + `ui/*.h` 纯逻辑头。**已写入 [CLIENT-PHASE1.md](../../architecture/CLIENT-PHASE1.md) §11**：偏差说明、精确到搬迁对象的拆分方案（含必须先外移 `DemoState` 与共享绘制辅助件的原因）、为何本轮不拆、以及请 A 回答的三个问题。重构分支未建立（避免半成品），报告后可随时执行 | A 评审 |
 
 ### B. 卡在其他人接线
 
