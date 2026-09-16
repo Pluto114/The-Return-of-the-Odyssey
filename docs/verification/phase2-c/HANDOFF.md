@@ -37,7 +37,7 @@
 | 1 | ~~C-c 药水输入通路~~ | ✅ **已完成（2026-09-16）**：`PotionIntent` 一次性 latch + `use_potion` 编码 + `Q` 键 + 真正发出时才消费；门控关闭丢弃、翻转即清。权威药水槽/HP 显示仍待 A3 | — |
 | 2 | ~~F1 双向队列深度 EMA 折线图~~ | ✅ **已完成（2026-09-16）**：`Ema(0.1)` 平滑、按快照 10Hz 采样，F1 第三条曲线（in=cyan/out=amber），三条图像改为框内标题 | — |
 | 3 | ~~辅助指标 UI 命令记录~~ | ✅ **已完成客户端侧（2026-09-16）**：`ui/Metrics.h::CommandCounter` + `DrawHudText` 自动计数，F1 `ui text cmds last/ema`；ImGui 提交耗时随 P2 | — |
-| 4 | 文档补漏 | `client/README.md` 的 `ODYSSEY_PERF_*` 与 `Q` 键已补；**剩** `CLIENT-PHASE1.md` 的 `[LOCAL_DISPLAY]` 措辞、C-b 在途旧输入按 `ErrStaleInput` 的书面收口（§五） | 1h |
+| 4 | ~~文档补漏~~ | ✅ **已完成（2026-09-16）**：`client/README.md` 补 `ODYSSEY_PERF_*` 三变量、`Q` 键、药水与 F1 行；`CLIENT-PHASE1.md` 把装备表标为纯展示层 `[LOCAL_DISPLAY]`（不参与战斗计算）；C-b 在途旧输入按服务端 `ErrStaleInput` 书面收口 | — |
 | 5 | 截图证据链 | `docs/verification/phase2-c` 目前**无截图**。`disconnected`/`login` 与 **`playing`** 现在都能截（main 已有 D 的首关启动 `1bcec34`，`loadbot` 可陪玩补满房间）；**`reward` 截图需 A 的奖励路由**（bot README 明确 A2/A3 奖励与 Ready 路由未进主线）。要求：统一分辨率、无个人绝对路径 | 0.5 天 |
 | 6 | **Release ≤1.5ms 性能验收** | 采集、方案、一键脚本均已就绪，且**不再等 D 的预设**：`pwsh -File scripts/verify/build-client-release.ps1` 建独立 Release 树 → 起 gameserver + `loadbot` → `pwsh -File scripts/verify/client-release-ui-perf.ps1 -Rounds 3 -Frames 600`，脚本直接给出 PASS/FAIL/UNSTABLE 与 `report.md` | 半天 |
 
