@@ -1,6 +1,6 @@
 # Release UI 性能验收方案（角色 C）
 
-状态：**方案就绪，待 Release 构建预设到位即可执行**（预设由 D/A 提供，见 §2）。
+状态：**已执行并 PASS（2026-09-16）** —— 结果与证据见 [release-ui-perf-2026-09-16-2355/report.md](release-ui-perf-2026-09-16-2355/report.md)（3 轮 ×（UI 开 + `--no-ui`）各 600 帧，UI 每帧增量中位数 **0.1224 ms ≤ 1.5 ms**，轮间离散 0.0344 ms）。本文保留为**可复现的口径与方法说明**，供复核与后续版本重跑；D 的共享 Release 预设仍未提供，但已不再阻塞测量（见 §2.2 的临时路径）。
 依据：定稿提示词 §四.3 的性能验收唯一口径；指标语义与 [CLIENT-HUD-DESIGN.md](../../architecture/CLIENT-HUD-DESIGN.md) §附录一致。
 被测对象：`build/client-windows-release/client/odyssey_client.exe`。
 
