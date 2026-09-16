@@ -65,7 +65,7 @@ $exe = ".\build\client-windows\client\odyssey_client.exe"
 | --- | --- | --- | --- | --- |
 | 1 | 启动 | `main: server endpoint 127.0.0.1:7777 (source=cli)`、`main: viewport <W>x<H> scale=<n> offset=(..)`、`main: asset root '...' (settings '...')`、`main: loaded 6 equipment entries from ...equipment.tsv` | 窗口按显示器最大整数倍打开 | ☐ |
 | 2 | 连接 | `main: net state -> connecting (127.0.0.1:7777)` → `-> connected` | 顶部横幅从 `CONNECTING` 变为消失 | ☐ |
-| 3 | 登录 | `main: net state -> connected` 后无错误；F1 面板 `login ok session=N player=M` | 大厅卡从 `LOGGING IN` → `MATCHMAKING` | ☐ |
+| 3 | 登录 | `main: net state -> connected` 后无错误；`main: match request sent (queued)` 表示已入匹配队列；F1 面板 `login ok session=N player=M` | 大厅卡从 `LOGGING IN` → `MATCHMAKING` | ☐ |
 | 4 | 匹配同房 | `main: match ready room=<R> teammates=1`（两个客户端的 `<R>` **必须相同**） | 大厅卡显示 `room R   player M` | ☐ |
 | 5 | 首帧快照 | `main: first world snapshot tick=<T>` 与 `main: input enabled after first snapshot` | 出现竞技场网格 | ☐ |
 | 6 | **首关启动（A1 关键项）** | `main: stage started index=1 tick=<T>`、`main: input enabled stage=playing alive=yes` | 顶部出现 `STAGE 01   HOSTILES <n>`；按 F1 应见 `gate=open` | ☐ |

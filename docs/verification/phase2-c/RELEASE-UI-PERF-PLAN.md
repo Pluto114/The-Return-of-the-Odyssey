@@ -99,8 +99,11 @@ cmake --build build/client-windows-release --target odyssey_client
 
 - 本机起 `gameserver`（默认 `127.0.0.1:7777`，见 [FIRST-STAGE-PLAYTEST.md](FIRST-STAGE-PLAYTEST.md) §2）。
 - 第二名玩家用 **`loadbot`**（不是第二个 GUI 客户端）：房间容量为 2，匹配满员后服务器才 `StartStage`，用 bot 凑人数可以让**被测客户端是唯一的 GUI 进程**，避免两个客户端互相抢占 CPU 污染数据。
-- 两次运行（UI 开 / UI 关）之间**不重启服务器**，场景保持同一关；若中途清场进入下一关，需重跑该轮并在报告中注明。
-- **bot 必须活过整轮测量**：`-mode functional` 打完一局就退出，因此 3 轮（6 次客户端运行）会从第 2 轮起没有对手 → 客户端进不了 `playing` → 没有数据。用 **`-mode sustained`** 并给足 `-duration`（读完一局自动开新会话，直到时限结束）。`-stages 1` 是有意的：奖励/Ready 路由尚未进 main，只要求第一关的战斗与 `StageCleared`。
+- **⚠️ 手动起 bot 时顺序不能错（实测踩过）**：服务器把人数写死为 2（`server/cmd/gameserver/application.go:101` 的 `lobby.NewMatchmaker(2)`），而 bot **每条等待消息只有 5 秒读超时**（`bot/internal/client/worker.go` 的 `readUntil`），且 `-mode sustained` 不会重试失败的工作单元。**单跑一个 bot 必然失败**：队列只有 1 人 → 服务器不发 `MatchFound` → 5 秒后 `phase_failed.match=1`、`first_failure: read tcp ... i/o timeout`（`elapsed` 正好 ≈5.0s）。
+  正确做法有两条：
+  1. **交给验收脚本（推荐）**：`client-release-ui-perf.ps1` 默认**每次运行自动起一个 bot**，并且是**等到被测客户端打印 `main: match request sent (queued)` 之后**才起（客户端在匹配阶段没有 5 秒上限，会一直等；bot 有，所以必须让客户端先入队）。
+  2. **手动**：先启动被测客户端，等它出现 `main: match request sent (queued)`，**再**启动 bot（两者都在队列里，配对立即成立）。
+- 两次运行（UI 开 / UI 关）之间**不重启服务器**，场景保持同一关；每轮两次运行各自都是**新的 stage 1 + 新的 bot 对局**，因此可比性来自"同一关同一起点"，而不是同一个房间。
 
 **目录与终端要点**
 
@@ -113,9 +116,11 @@ cmake --build build/client-windows-release --target odyssey_client
 cd <repo-root>
 go run ./server/cmd/gameserver
 
-# 终端 2：第二名玩家（工作目录 = 仓库根；sustained 保证跨全部轮次都有对手）
+# 终端 2（可选，仅当不用脚本自动起 bot 时）：先客户端、后 bot，顺序不能反
+#   1) 启动被测客户端（另开终端或由脚本启动），等日志出现：main: match request sent (queued)
+#   2) 紧接着启动 bot：
 cd <repo-root>
-go run ./bot/cmd/loadbot -mode sustained -clients 1 -stages 1 -duration 15m -ramp 0s -use-potion=false
+go run ./bot/cmd/loadbot -mode functional -clients 1 -stages 1 -duration 5m -ramp 0s -use-potion=false -resume=false
 
 # 一次性依赖（已完成，可跳过；每个模块一次，上游新增 filippo.io/edwards25519）
 go -C server mod download all
@@ -148,18 +153,21 @@ go -C bot    mod download all
 ## 3. 测量流程（逐步可执行）
 
 > **一键路径**：`scripts/verify/client-release-ui-perf.ps1` 已把本节与 §5 自动化——它按轮次跑
-> UI 开/关、解析 CSV、算出 Δ 与轮间离散度、判定 PASS/FAIL/UNSTABLE，并写出 `report.md` +
-> `hardware.md` 模板。它**不启动 bot**、也不在两次运行之间重启服务器（场景必须一致），并且
-> **拒绝**对看起来不是 Release 的二进制出结论。手动流程保留在下面，用于核对脚本行为或分步排查。
+> UI 开/关、**每次运行自动起一个对位 bot**、解析 CSV、算出 Δ 与轮间离散度、判定
+> PASS/FAIL/UNSTABLE，并写出 `report.md` + `hardware.md` 模板。它**不启动服务器**（两次运行之间必须
+> 不重启服务器），并且**拒绝**对看起来不是 Release 的二进制出结论。手动流程保留在下面，用于核对
+> 脚本行为或分步排查。
 >
 > ```powershell
 > pwsh -File scripts/verify/client-release-ui-perf.ps1 -Rounds 3 -Frames 600
 > # 服务器在别的机器/探测被拦时：-NoServer -ServerHost 192.168.1.20
-> # 只让脚本起服务器（仍需自己让第二名玩家入房）：-StartServer
+> # 让脚本连服务器一起起：-StartServer
+> # 自己提供第二名玩家（脚本不起 bot）：-NoBot
 > ```
 >
-> 脚本**不启动 bot**，所以开跑前必须已有 bot 在等匹配（§2.3 的 sustained 命令）；判据是客户端日志里
-> 出现 `main: perf capture started (stage=playing alive=yes)`。这一行始终不出现就说明场景没起来
+> bot 的启动时机以**客户端日志为准**：脚本先起客户端，等到它打印 `main: match request sent (queued)`
+> 才起 bot（原因见 §2.3 的 5 秒窗口说明）。判定场景是否真的起来的唯一依据仍是客户端日志里的
+> `main: perf capture started (stage=playing alive=yes)`。这一行始终不出现就说明场景没起来
 > （房间没满 / 匹配没成 / 玩家死亡），此时**没有有效数据**，而不是"性能很好"。
 
 客户端内建采集：设置 `ODYSSEY_PERF_FRAMES`（1..4096，建议 600）后，客户端**先待命**，并在

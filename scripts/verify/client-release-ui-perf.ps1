@@ -11,10 +11,16 @@ the UI layer enabled and once with --no-ui - and checks the plan's budget:
 
 Plan and rationale: docs/verification/phase2-c/RELEASE-UI-PERF-PLAN.md
 
-This script automates only the mechanical part: arming the capture, launching the two
-runs, parsing the CSV summaries and writing report.md/hardware.md. It deliberately does
-NOT start the gameserver or the bot: the plan requires an unchanged scene across the two
-runs, so the server must stay up between them (start it yourself, or pass -StartServer).
+This script automates the mechanical part: arming the capture, launching the two runs, the
+counterpart bot, parsing the CSV summaries and writing report.md/hardware.md. It deliberately
+does NOT start the gameserver: the plan requires an unchanged scene across the two runs of a
+round, so the server must stay up between them (start it yourself, or pass -StartServer).
+
+The counterpart bot IS started here, one per run, because the server pairs exactly two
+players (lobby.NewMatchmaker(2)) while the bot waits at most 5 seconds per expected message:
+a lone bot dies with a match-phase read timeout before any client arrives. The measured
+client has no such cap, so the order is client first, bot a moment later. Pass -NoBot to
+bring your own second player instead.
 
 The client must be a Release build. Debug numbers are not acceptance evidence and the
 script refuses to produce a verdict from them unless -AllowNonRelease is given.
@@ -23,6 +29,7 @@ script refuses to produce a verdict from them unless -AllowNonRelease is given.
 pwsh -File scripts/verify/client-release-ui-perf.ps1
 pwsh -File scripts/verify/client-release-ui-perf.ps1 -Rounds 3 -Frames 600
 pwsh -File scripts/verify/client-release-ui-perf.ps1 -NoServer -ServerHost 192.168.1.20
+pwsh -File scripts/verify/client-release-ui-perf.ps1 -NoBot      # bring your own counterpart
 #>
 [CmdletBinding()]
 param(
@@ -41,6 +48,8 @@ param(
     # probe is blocked). The scene still has to be live, or no run will ever finish.
     [switch]$NoServer,
     [int]$ServerWaitSeconds = 30,
+    # Bring your own second player instead of letting the script start one per run.
+    [switch]$NoBot,
     # Allow a non-Release binary to run (smoke test only; the report is marked invalid).
     [switch]$AllowNonRelease,
     # Do not stop on the first failed run; keep collecting what is collectable.
@@ -130,13 +139,17 @@ if ($NoServer) {
         exit 1
     }
     Write-Host 'Server is listening.' -ForegroundColor Green
-    Write-Host 'Reminder: a second player (bot or client) must join so the stage actually starts.' -ForegroundColor Yellow
+    if ($NoBot) {
+        Write-Host 'Reminder (-NoBot): a second player must already be queued, or no stage will start.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'The script starts one loadbot per run, as soon as the client reports matching.' -ForegroundColor Green
+    }
 } elseif (-not (Test-Endpoint -Host_ $ServerHost -Port $ServerPort)) {
     throw @"
 Nothing is listening on $endpoint.
 
-The measurement needs a live battle scene. Start the server (and the bot that fills the
-room) first, or pass -StartServer to have this script start only the server.
+The measurement needs a live battle scene. Start the server first, or pass -StartServer to
+have this script start it. The counterpart bot is started by this script unless -NoBot.
 "@
 }
 
@@ -152,6 +165,66 @@ if ($stray) {
 $env:ODYSSEY_PERF_FRAMES = "$Frames"
 $env:ODYSSEY_PERF_TRIGGER = 'playing'
 
+# Waits until the measured client has actually queued for a match, keyed on its own log
+# line rather than a fixed sleep. The counterpart bot dies after 5 seconds of waiting for a
+# message, so it has to start when the client is already queued - a client that is merely
+# launched is not enough, and its startup time varies with the machine's load.
+function Wait-ForClientQueued {
+    param($Client, [string]$Log, [int]$TimeoutMs = 60000)
+
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        if ($Client.HasExited) {
+            return $false  # the client gave up first; no point starting a counterpart
+        }
+        if (Test-Path -LiteralPath $Log) {
+            if (Select-String -LiteralPath $Log -Pattern 'match request sent' -Quiet -ErrorAction SilentlyContinue) {
+                return $true
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    return $false
+}
+
+# Starts one counterpart bot for a measured run and returns its process, or $null.
+#
+# Why the bot has to start AFTER the client has queued: the server pairs exactly two players
+# (lobby.NewMatchmaker(2) in the gameserver), and the bot waits at most 5 seconds for each
+# expected message (readUntil in bot/internal/client/worker.go). A lone bot therefore dies
+# with a match-phase read timeout before any client shows up, which is the failure this
+# automation removes. The measured client has no such cap - it sits in matchmaking - so the
+# client queues first and the bot second, and the pair forms immediately.
+function Start-BotCounterpart {
+    param([string]$Label)
+
+    $botLog = Join-Path $evidenceDir "bot-$Label.log"
+    $botArgs = @('run', './bot/cmd/loadbot', '-mode', 'functional', '-clients', '1',
+                 '-stages', '1', '-duration', '5m', '-ramp', '0s', '-use-potion=false',
+                 '-resume=false', '-server', $endpoint)
+    $process = Start-Process -FilePath 'go' -ArgumentList $botArgs `
+        -WorkingDirectory $root -PassThru -NoNewWindow `
+        -RedirectStandardOutput $botLog `
+        -RedirectStandardError (Join-Path $evidenceDir "bot-$Label.err.log")
+    Write-Host " (bot $($process.Id))" -ForegroundColor DarkGray -NoNewline
+    return [pscustomobject]@{ Process = $process; Log = $botLog }
+}
+
+# Kills the `go run` wrapper AND the bot binary it spawned; stopping only the wrapper
+# would leave the bot holding a seat in the room and poison the next run.
+function Stop-BotCounterpart {
+    param($Bot)
+
+    if (-not $Bot) {
+        return
+    }
+    if (-not $Bot.Process.HasExited) {
+        & taskkill /F /T /PID $Bot.Process.Id 2>&1 | Out-Null
+    }
+    # Give the server a moment to see the seat free up before the next run matches.
+    Start-Sleep -Milliseconds 700
+}
+
 # One run. Returns the means parsed out of the CSV, or $null when the run produced none.
 function Invoke-PerfRun {
     param([string]$Label, [string[]]$ExtraArgs)
@@ -165,11 +238,26 @@ function Invoke-PerfRun {
     $process = Start-Process -FilePath $clientExe -ArgumentList $arguments `
         -WorkingDirectory $root -PassThru -NoNewWindow `
         -RedirectStandardOutput $log -RedirectStandardError (Join-Path $evidenceDir "$Label.err.log")
+
+    # Client first, counterpart second, and only once the client has actually queued.
+    $bot = $null
+    if (-not $NoBot) {
+        $queued = Wait-ForClientQueued -Client $process -Log $log
+        if (-not $queued -and -not $process.HasExited) {
+            Write-Host ' (client never reported matching; starting the bot anyway)' -ForegroundColor DarkYellow -NoNewline
+        }
+        if (-not $process.HasExited) {
+            $bot = Start-BotCounterpart -Label $Label
+        }
+    }
+
     if (-not $process.WaitForExit(600000)) {
         Stop-Process -Id $process.Id -Force
+        Stop-BotCounterpart -Bot $bot
         Write-Host ' TIMEOUT (10 min); no battle scene was reached?' -ForegroundColor Red
         return $null
     }
+    Stop-BotCounterpart -Bot $bot
 
     if (-not (Test-Path $csv)) {
         Write-Host " NO CSV (exit $($process.ExitCode)) - see $log" -ForegroundColor Red
@@ -317,8 +405,12 @@ $lines += '| File | Contents |'
 $lines += '| --- | --- |'
 $lines += '| ui-on-N.csv / ui-off-N.csv | Per-frame CPU times plus the summary line |'
 $lines += '| ui-on-N.log / ui-off-N.log | Client stdout: capture start line, summary line, startup lines |'
+$lines += '| bot-ui-on-N.log | Counterpart bot report (JSON) for that run, when the script started it |'
 $lines += '| hardware.md | Test machine template (must be filled in) |'
 $lines += '| server.log | Only when -StartServer was used |'
+$lines += ''
+$lines += "Counterpart: $(if ($NoBot) { 'provided externally (-NoBot)' } else { 'one loadbot per run, started once the client reports matching' })  "
+$lines += "Frames per run: $Frames; rounds: $Rounds; budget: $BudgetMs ms"
 $lines += ''
 $lines += 'Raw data is authoritative: this report is a summary of it.'
 $lines | Set-Content -LiteralPath $report -Encoding utf8

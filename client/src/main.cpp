@@ -1408,6 +1408,12 @@ int main(int argc, char** argv) {
                 demo.match_sent = true;
                 demo.match_note = "queued";
                 SendPayload(kMatchRequest, payload::EncodeMatchRequest());
+                // Evidence chain + automation hook: the room only forms once two players are
+                // queued, and the counterpart bot gives up after 5s of waiting for a message,
+                // so whatever starts that second player (scripts/verify/client-release-ui-perf.ps1)
+                // waits for exactly this line instead of guessing with a sleep.
+                std::printf("main: match request sent (queued)\n");
+                std::fflush(stdout);
             }
 
             // Heartbeat with a real Ping payload; Pong echoes nonce back.
