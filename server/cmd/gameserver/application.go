@@ -94,6 +94,9 @@ type gameApplication struct {
 	resultWriter   interface {
 		Submit(persistence.ResultEnvelope) error
 	}
+	// Allows a deterministic failure of the authoritative start receipt in the
+	// rematch regression test; production uses the room's real control queue.
+	rematchStageStarter func(*room.Room, stage.Plan) error
 }
 
 func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics) (*gameApplication, error) {
@@ -501,9 +504,27 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 			return
 		}
 	}
+	// StageStarted is a reliable event. Hold the new room's events until its
+	// StartStage receipt succeeds and MatchFound has entered each connection's
+	// reliable queue; otherwise the Bot can discard the start before matching.
+	pendingEvents := make(map[entity.ID]*deferredEventSink, len(players))
+	for _, p := range players {
+		_, playerID := p.session.Identity()
+		sink := newDeferredEventSink(closingSink{connection: p.conn})
+		pendingEvents[entity.ID(playerID)] = sink
+		next.events.Subscribe(entity.ID(playerID), sink)
+	}
+	startStage := startRematchStage
+	if a.rematchStageStarter != nil {
+		startStage = a.rematchStageStarter
+	}
+	if err := startStage(newRoom, plan); err != nil {
+		a.logger.Error("rematch stage failed", "room_id", newID, "err", err)
+		return // old room and player bindings are still intact
+	}
 
 	a.mu.Lock()
-	if a.rooms[oldID] != old {
+	if a.rooms[oldID] != old || a.rooms[newID] != next {
 		a.mu.Unlock()
 		return
 	}
@@ -520,10 +541,8 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 		old.events.Unsubscribe(entity.ID(playerID))
 		old.close.Unsubscribe(entity.ID(playerID))
 		p.session.BindRoom(uint64(newID))
-		wire := closingSink{connection: p.conn}
 		next.snapshots.Subscribe(entity.ID(playerID), p.conn)
-		next.events.Subscribe(entity.ID(playerID), wire)
-		next.close.Subscribe(entity.ID(playerID), wire)
+		next.close.Subscribe(entity.ID(playerID), closingSink{connection: p.conn})
 	}
 	a.publishMetricsLocked()
 	a.mu.Unlock()
@@ -543,32 +562,39 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 		}
 	}
 	for _, p := range players {
+		_, playerID := p.session.Identity()
+		pendingEvents[entity.ID(playerID)].Release()
+	}
+	for _, p := range players {
 		sessionID, _ := p.session.Identity()
 		go a.leaveFormerRoom(old.room, room.SessionID(sessionID))
 	}
-	// Backpressure on the trusted control queue is transient. Never announce a
-	// successful rematch if the first encounter did not actually start.
+	succeeded = true
+	a.logger.Info("rematch ready", "old_room", oldID, "new_room", newID, "players", len(players))
+}
+
+func startRematchStage(rm *room.Room, plan stage.Plan) error {
 	for attempt := 0; attempt < 10; attempt++ {
-		receipt, startErr := newRoom.StartStage(plan)
-		if errors.Is(startErr, room.ErrQueueFull) {
-			time.Sleep(10 * time.Millisecond)
+		receipt, err := rm.StartStage(plan)
+		if errors.Is(err, room.ErrQueueFull) {
+			select {
+			case <-rm.Done():
+				return room.ErrClosed
+			case <-time.After(10 * time.Millisecond):
+			}
 			continue
 		}
-		if startErr == nil {
-			startErr = <-receipt
+		if err != nil {
+			return err
 		}
-		if startErr != nil {
-			a.logger.Error("rematch stage failed", "room_id", newID, "err", startErr)
-			return // deferred Close notifies the clients; old room is already leaving
+		select {
+		case result := <-receipt:
+			return result
+		case <-rm.Done():
+			return room.ErrClosed
 		}
-		succeeded = true
-		break
 	}
-	if !succeeded {
-		a.logger.Error("rematch stage admission exhausted", "room_id", newID)
-		return
-	}
-	a.logger.Info("rematch ready", "old_room", oldID, "new_room", newID, "players", len(players))
+	return room.ErrQueueFull
 }
 
 // Leaving the former room must not clear the session's *new* binding.

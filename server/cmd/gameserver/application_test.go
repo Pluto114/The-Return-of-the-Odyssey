@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -441,6 +442,13 @@ func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testin
 		}
 	}
 	for i := range peers {
+		var started pb.StageStartedEvent
+		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
+		if started.StageIndex != 1 {
+			t.Fatalf("peer %d rematch stage start = %d, want 1", i, started.StageIndex)
+		}
+	}
+	for i := range peers {
 		deadline = time.Now().Add(3 * time.Second)
 		for {
 			var snap pb.WorldSnapshot
@@ -468,6 +476,158 @@ func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testin
 		t.Errorf("duplicate click created extra rooms: %d", len(app.rooms))
 	}
 	app.mu.Unlock()
+}
+
+func TestApplicationRematchStartFailureKeepsTeamInFailedRoom(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app, err := newGameApplication(ctx, logger, metrics.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.roomConfig.EmptyTimeout = 150 * time.Millisecond
+	startAttempted := make(chan struct{}, 1)
+	app.rematchStageStarter = func(*room.Room, stage.Plan) error {
+		startAttempted <- struct{}{}
+		return errors.New("injected stage receipt failure")
+	}
+	srv := network.NewServer(app.handle, logger)
+	srv.OnDisconnect(app.disconnected)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx, listener) }()
+	defer func() {
+		cancel()
+		srv.CloseConnections()
+		if err := <-serveDone; err != nil {
+			t.Error(err)
+		}
+	}()
+
+	peers := make([]appPeer, 2)
+	for i := range peers {
+		conn, dialErr := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
+		defer conn.Close()
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		var login pb.LoginResponse
+		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
+		if login.Reason != pb.ReasonCode_REASON_OK {
+			t.Fatalf("login failed: %v", login.Reason)
+		}
+		peers[i].id = login.PlayerId
+	}
+	oldID, old, err := app.newActiveRoom()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range peers {
+		var member *session.Session
+		var serverConn *network.Connection
+		app.mu.Lock()
+		for conn, candidate := range app.connections {
+			_, playerID := candidate.Identity()
+			if playerID == peers[i].id {
+				member, serverConn = candidate, conn
+				break
+			}
+		}
+		app.mu.Unlock()
+		if member == nil || !member.Transition(session.StateMatching) {
+			t.Fatal("peer did not enter matching")
+		}
+		if err := router.Join(member, old.room, uint64(oldID)); err != nil {
+			t.Fatal(err)
+		}
+		old.snapshots.Subscribe(entity.ID(peers[i].id), serverConn)
+		old.events.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
+		old.close.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
+	}
+	spawn := stage.Spawn{Position: app.roomConfig.World.Spawn, Radius: 0.4,
+		AttackRange: 1, Stats: entity.CombatStats{MaxHealth: 100, Attack: 1000, AttackCooldownTicks: 1}}
+	receipt, err := old.room.StartStage(stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{spawn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-receipt; err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for old.room.LatestSnapshot().Stage.State != stage.Failed && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if old.room.LatestSnapshot().Stage.State != stage.Failed {
+		t.Fatal("old match did not fail")
+	}
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
+	select {
+	case <-startAttempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rematch did not attempt to start its first stage")
+	}
+	deadline = time.Now().Add(time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		app.mu.Lock()
+		ready = !old.rematching && len(app.rooms) == 1
+		app.mu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("failed rematch did not release the new room and reset the retry guard")
+	}
+	for i := range peers {
+		app.mu.Lock()
+		var boundRoom uint64
+		for _, member := range app.connections {
+			_, playerID := member.Identity()
+			if playerID == peers[i].id {
+				boundRoom = member.RoomID()
+			}
+		}
+		app.mu.Unlock()
+		if boundRoom != uint64(oldID) {
+			t.Errorf("peer %d moved to room %d after start failed; want old room %d", i, boundRoom, oldID)
+		}
+		if err := peers[i].conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			header, _, readErr := network.ReadFrame(peers[i].reader)
+			if timeout, ok := readErr.(net.Error); ok && timeout.Timeout() {
+				break
+			}
+			if readErr != nil {
+				t.Fatalf("peer %d disconnected after rematch start failed: %v", i, readErr)
+			}
+			if header.MessageType == uint16(pb.MessageType_MSG_MATCH_FOUND) {
+				t.Errorf("peer %d received MatchFound before stage start succeeded", i)
+			}
+		}
+	}
+	app.rematchStageStarter = nil // the same two players can try again
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{})
+	for i := range peers {
+		var found pb.MatchFound
+		appRead(t, peers[i], pb.MessageType_MSG_MATCH_FOUND, &found)
+		if found.RoomId == uint64(oldID) || found.RoomId == 0 {
+			t.Fatalf("peer %d could not retry after failed rematch: %+v", i, &found)
+		}
+		var started pb.StageStartedEvent
+		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
+		if started.StageIndex != 1 {
+			t.Fatalf("peer %d retry did not start stage 1: %+v", i, &started)
+		}
+	}
 }
 
 func appSend(t *testing.T, peer appPeer, messageType pb.MessageType, sequence uint32, message proto.Message) {
