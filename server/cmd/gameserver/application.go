@@ -41,6 +41,8 @@ type participant struct {
 
 type activeRoom struct {
 	room       *room.Room
+	matchID    string
+	createdAt  time.Time
 	snapshots  *router.SnapshotDispatcher
 	events     *router.EventDispatcher
 	close      *router.CloseWatcher
@@ -49,12 +51,14 @@ type activeRoom struct {
 	// The application owns progression between B's authoritative Room phases.
 	// These fields are guarded by gameApplication.mu. The stage number makes
 	// StageCleared handling idempotent if a reliable batch is ever replayed.
-	rewardStage uint32
-	rewarded    map[entity.ID]bool
-	delivered   map[entity.ID]bool
-	ready       map[entity.ID]bool
-	advancing   bool
-	completed   bool
+	rewardStage      uint32
+	rewarded         map[entity.ID]bool
+	delivered        map[entity.ID]bool
+	ready            map[entity.ID]bool
+	advancing        bool
+	completed        bool
+	resultSubmitting bool
+	resultQueued     bool
 
 	monsters    int
 	projectiles map[entity.ID]struct{}
@@ -94,9 +98,9 @@ type gameApplication struct {
 	resultWriter   interface {
 		Submit(persistence.ResultEnvelope) error
 	}
-	// Allows a deterministic failure of the authoritative start receipt in the
-	// rematch regression test; production uses the room's real control queue.
-	rematchStageStarter func(*room.Room, stage.Plan) error
+	// Allows deterministic failure of the authoritative opening-stage receipt
+	// in network regressions; production uses the room's real control queue.
+	openingStageStarter func(*room.Room, stage.Plan) error
 }
 
 func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics) (*gameApplication, error) {
@@ -380,14 +384,36 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 		}
 	}
 
-	teammates := make([]uint64, 0, len(players)-1)
+	pendingEvents := make(map[entity.ID]*deferredEventSink, len(players))
 	for _, p := range players {
 		_, playerID := p.session.Identity()
 		active.snapshots.Subscribe(entity.ID(playerID), p.conn)
 		reliable := closingSink{connection: p.conn}
-		active.events.Subscribe(entity.ID(playerID), reliable)
-		active.close.Subscribe(entity.ID(playerID), reliable)
+		pendingEvents[entity.ID(playerID)] = newDeferredEventSink(reliable)
+		active.events.Subscribe(entity.ID(playerID), pendingEvents[entity.ID(playerID)])
+		active.close.Subscribe(entity.ID(playerID), pendingEvents[entity.ID(playerID)])
 	}
+	seed := a.firstStageSeed(roomID)
+	firstStage, err := game.NewFirstStagePlan(a.roomConfig.World, seed)
+	if err != nil {
+		a.logger.Error("first-stage plan failed", "room_id", roomID, "err", err)
+		detachPendingMatch(active, players)
+		a.failMatch(players, err)
+		rm.Close()
+		return
+	}
+	startStage := startOpeningStage
+	if a.openingStageStarter != nil {
+		startStage = a.openingStageStarter
+	}
+	if err := startStage(rm, firstStage); err != nil {
+		a.logger.Error("start stage failed", "room_id", roomID, "err", err)
+		detachPendingMatch(active, players)
+		a.failMatch(players, err)
+		rm.Close()
+		return
+	}
+	teammates := make([]uint64, 0, len(players)-1)
 	for _, p := range players {
 		_, selfID := p.session.Identity()
 		teammates = teammates[:0]
@@ -406,20 +432,9 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 			p.conn.Close()
 		}
 	}
-
-	seed := a.firstStageSeed(roomID)
-	firstStage, err := game.NewFirstStagePlan(a.roomConfig.World, seed)
-	if err != nil {
-		a.logger.Error("first-stage plan failed", "room_id", roomID, "err", err)
-		a.failMatch(players, err)
-		rm.Close()
-		return
-	}
-	if _, err := rm.StartStage(firstStage); err != nil {
-		a.logger.Error("start stage failed", "room_id", roomID, "err", err)
-		a.failMatch(players, err)
-		rm.Close()
-		return
+	for _, p := range players {
+		_, playerID := p.session.Identity()
+		pendingEvents[entity.ID(playerID)].Release()
 	}
 	oldest := time.Now()
 	for _, p := range players {
@@ -429,6 +444,15 @@ func (a *gameApplication) createMatch(players []*participant, sequence uint32) {
 	}
 	_ = a.metrics.ObserveMatch(time.Since(oldest))
 	a.logger.Info("match ready", "room_id", roomID, "players", len(players))
+}
+
+func detachPendingMatch(active *activeRoom, players []*participant) {
+	for _, p := range players {
+		_, playerID := p.session.Identity()
+		active.snapshots.Unsubscribe(entity.ID(playerID))
+		active.events.Unsubscribe(entity.ID(playerID))
+		active.close.Unsubscribe(entity.ID(playerID))
+	}
 }
 
 func (a *gameApplication) firstStageSeed(roomID room.ID) int64 {
@@ -514,9 +538,9 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 		pendingEvents[entity.ID(playerID)] = sink
 		next.events.Subscribe(entity.ID(playerID), sink)
 	}
-	startStage := startRematchStage
-	if a.rematchStageStarter != nil {
-		startStage = a.rematchStageStarter
+	startStage := startOpeningStage
+	if a.openingStageStarter != nil {
+		startStage = a.openingStageStarter
 	}
 	if err := startStage(newRoom, plan); err != nil {
 		a.logger.Error("rematch stage failed", "room_id", newID, "err", err)
@@ -573,7 +597,7 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 	a.logger.Info("rematch ready", "old_room", oldID, "new_room", newID, "players", len(players))
 }
 
-func startRematchStage(rm *room.Room, plan stage.Plan) error {
+func startOpeningStage(rm *room.Room, plan stage.Plan) error {
 	for attempt := 0; attempt < 10; attempt++ {
 		receipt, err := rm.StartStage(plan)
 		if errors.Is(err, room.ErrQueueFull) {
@@ -622,6 +646,10 @@ func (a *gameApplication) leaveFormerRoom(rm *room.Room, sessionID room.SessionI
 // newActiveRoom wires each dispatcher exactly once, for both first matches and
 // rematches. The old room stays alive until its former members leave.
 func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
+	matchID, err := newMatchID()
+	if err != nil {
+		return 0, nil, err
+	}
 	roomID := room.ID(a.nextRoomID.Add(1))
 	rm, err := room.Start(a.ctx, roomID, a.roomConfig)
 	if err != nil {
@@ -629,6 +657,8 @@ func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
 	}
 	active := &activeRoom{
 		room:        rm,
+		matchID:     matchID,
+		createdAt:   time.Now().UTC(),
 		snapshots:   router.NewSnapshotDispatcher(),
 		events:      router.NewEventDispatcher(),
 		close:       router.NewCloseWatcher(),
@@ -678,10 +708,20 @@ func (a *gameApplication) disconnected(c *network.Connection) {
 		return
 	}
 	_, playerID := sess.Identity()
+	roomID := room.ID(sess.RoomID())
 	key := lobby.PlayerID(strconv.FormatUint(playerID, 10))
 	a.matcher.Cancel(key)
 	delete(a.waiting, key)
-	active := a.rooms[room.ID(sess.RoomID())]
+	active := a.rooms[roomID]
+	lastConnected := true
+	if active != nil {
+		for _, other := range a.connections {
+			if other.RoomID() == sess.RoomID() {
+				lastConnected = false
+				break
+			}
+		}
+	}
 	if active != nil {
 		active.snapshots.Unsubscribe(entity.ID(playerID))
 		active.events.Unsubscribe(entity.ID(playerID))
@@ -691,7 +731,14 @@ func (a *gameApplication) disconnected(c *network.Connection) {
 	a.publishMetricsLocked()
 	a.mu.Unlock()
 	if active != nil {
-		go a.leaveRoom(sess, active.room)
+		if lastConnected {
+			// Detach the last player's result before Leave, but do not keep the
+			// room alive while a full persistence queue waits for admission.
+			go a.submitGameResultAfterCapture(roomID, game.GameAbandoned,
+				func() { go a.leaveRoom(sess, active.room) })
+		} else {
+			go a.leaveRoom(sess, active.room)
+		}
 	}
 }
 
@@ -773,8 +820,11 @@ func (a *gameApplication) observeEvents(roomID room.ID, rm *room.Room, dispatche
 		a.recordEventMetrics(roomID, batch)
 		dispatcher.Dispatch(batch)
 		for _, event := range batch.Events {
-			if event.Kind == game.StageCleared {
+			switch event.Kind {
+			case game.StageCleared:
 				go a.beginRewardStage(roomID, event.StageIndex)
+			case game.TeamDefeated:
+				go a.submitGameResult(roomID, game.GameDefeat)
 			}
 		}
 	}
@@ -795,6 +845,7 @@ func (a *gameApplication) beginRewardStage(roomID room.ID, stageIndex uint32) {
 	if stageIndex >= a.gameplay.StageLimit() {
 		active.completed = true
 		a.mu.Unlock()
+		go a.submitGameResult(roomID, game.GameVictory)
 		a.logger.Info("expedition complete", "room_id", roomID, "stage", stageIndex)
 		return
 	}

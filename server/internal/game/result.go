@@ -1,6 +1,7 @@
 package game
 
 import (
+	"cmp"
 	"errors"
 	"slices"
 
@@ -111,10 +112,17 @@ func (w *World) GameResult(outcome GameOutcome) (GameResult, error) {
 	}
 	result := GameResult{Outcome: outcome, StartedAtTick: w.runStartedAtTick, EndedAtTick: endTick,
 		FinalStageIndex: w.stage.Index, ClearedStages: slices.Clone(w.completedStages)}
-	for _, id := range orderedIDs(w.players) {
-		player := w.players[id].player
-		result.Players = append(result.Players, PlayerResult{PlayerID: player.ID, Alive: player.Alive, Health: player.Health,
-			Stats: player.CurrentStats, Equipment: player.Equipment})
+	for _, id := range orderedIDs(w.departedPlayers) {
+		result.Players = append(result.Players, w.departedPlayers[id])
 	}
+	for _, id := range orderedIDs(w.players) {
+		result.Players = append(result.Players, playerResult(w.players[id].player))
+	}
+	slices.SortFunc(result.Players, func(a, b PlayerResult) int { return cmp.Compare(a.PlayerID, b.PlayerID) })
 	return result, nil
+}
+
+func playerResult(player entity.Player) PlayerResult {
+	return PlayerResult{PlayerID: player.ID, Alive: player.Alive, Health: player.Health,
+		Stats: player.CurrentStats, Equipment: player.Equipment}
 }

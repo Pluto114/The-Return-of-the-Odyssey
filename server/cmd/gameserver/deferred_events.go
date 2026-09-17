@@ -3,7 +3,8 @@ package main
 import "sync"
 
 // deferredEventSink keeps the first authoritative StageStarted (and any
-// following reliable events) ordered behind MatchFound during a team rematch.
+// following reliable events) ordered behind MatchFound during initial matching
+// and team rematching.
 // Send is called by the room's sole dispatcher; Release may run concurrently.
 type deferredEventSink struct {
 	mu         sync.Mutex

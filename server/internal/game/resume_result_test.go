@@ -165,3 +165,32 @@ func TestGameResultIsDetachedAndTerminalTicksAreStable(t *testing.T) {
 		t.Fatalf("defeat terminal tick moved: before=%+v after=%+v err=%v", defeat, later, err)
 	}
 }
+
+func TestAbandonedResultRetainsPlayerWhoAlreadyLeft(t *testing.T) {
+	w := world(t)
+	if err := w.AddPlayer(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.StartStage(stage.Plan{Index: 1, Seed: 7, DifficultyScore: 1, Monsters: []stage.Spawn{target(19, 19, 100)}}); err != nil {
+		t.Fatal(err)
+	}
+	w.RemovePlayer(2)
+	if len(w.Snapshot().Players) != 1 {
+		t.Fatal("departed player still appears in live snapshots")
+	}
+	result, err := w.GameResult(game.GameAbandoned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Players) != 2 || result.Players[0].PlayerID != 1 || result.Players[1].PlayerID != 2 ||
+		!result.Players[1].Alive || result.Players[1].Health <= 0 {
+		t.Fatalf("missing or invalid departed player in final result: %+v", result.Players)
+	}
+	w.Clear()
+	if err := w.AddPlayer(2); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Snapshot().Players) != 1 {
+		t.Fatal("clearing a run did not clear its departed-player history")
+	}
+}

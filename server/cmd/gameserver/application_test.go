@@ -144,6 +144,13 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 			t.Fatalf("peers matched into different rooms: %d and %d", roomID, found.RoomId)
 		}
 	}
+	for i := range peers {
+		var started pb.StageStartedEvent
+		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
+		if started.StageIndex != 1 {
+			t.Fatalf("peer %d initial stage start = %d, want 1", i, started.StageIndex)
+		}
+	}
 
 	appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 4, &pb.PlayerInput{
 		InputSeq: 1,
@@ -196,6 +203,59 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("connections or empty room were not reclaimed")
+}
+
+func TestApplicationFirstStageFailureDoesNotAnnounceMatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app, err := newGameApplication(ctx, logger, metrics.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.openingStageStarter = func(*room.Room, stage.Plan) error {
+		return errors.New("injected first-stage receipt failure")
+	}
+	srv := network.NewServer(app.handle, logger)
+	srv.OnDisconnect(app.disconnected)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx, listener) }()
+	defer func() {
+		cancel()
+		srv.CloseConnections()
+		if err := <-serveDone; err != nil {
+			t.Error(err)
+		}
+	}()
+	peers := make([]appPeer, 2)
+	for i := range peers {
+		conn, dialErr := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
+		defer conn.Close()
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		var login pb.LoginResponse
+		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
+		if login.Reason != pb.ReasonCode_REASON_OK {
+			t.Fatalf("peer %d login failed: %v", i, login.Reason)
+		}
+	}
+	for i := range peers {
+		appSend(t, peers[i], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
+	}
+	for i := range peers {
+		var disconnected pb.Disconnect
+		// A MatchFound before the injected failure makes appRead fail immediately.
+		appRead(t, peers[i], pb.MessageType_MSG_DISCONNECT, &disconnected)
+		if disconnected.Reason != pb.ReasonCode_REASON_ROOM_CLOSED {
+			t.Fatalf("peer %d unexpected first-stage failure reason: %+v", i, &disconnected)
+		}
+	}
 }
 
 func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
@@ -487,7 +547,7 @@ func TestApplicationRematchStartFailureKeepsTeamInFailedRoom(t *testing.T) {
 	}
 	app.roomConfig.EmptyTimeout = 150 * time.Millisecond
 	startAttempted := make(chan struct{}, 1)
-	app.rematchStageStarter = func(*room.Room, stage.Plan) error {
+	app.openingStageStarter = func(*room.Room, stage.Plan) error {
 		startAttempted <- struct{}{}
 		return errors.New("injected stage receipt failure")
 	}
@@ -614,7 +674,7 @@ func TestApplicationRematchStartFailureKeepsTeamInFailedRoom(t *testing.T) {
 			}
 		}
 	}
-	app.rematchStageStarter = nil // the same two players can try again
+	app.openingStageStarter = nil // the same two players can try again
 	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{})
 	for i := range peers {
 		var found pb.MatchFound

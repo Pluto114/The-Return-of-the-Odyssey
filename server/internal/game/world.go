@@ -102,9 +102,12 @@ type playerState struct {
 // World is deliberately not concurrent. Only its Room goroutine may call its
 // methods. Snapshot returns detached values suitable for publication.
 type World struct {
-	config           Config
-	tick             uint64
-	players          map[entity.ID]*playerState
+	config  Config
+	tick    uint64
+	players map[entity.ID]*playerState
+	// Permanent departures leave their final combat/equipment state in the
+	// terminal result without keeping them in live snapshots or the simulation.
+	departedPlayers  map[entity.ID]PlayerResult
 	monsters         map[entity.ID]*monsterState
 	projectiles      map[entity.ID]entity.Projectile
 	nextEntity       entity.ID
@@ -127,7 +130,7 @@ func NewWorld(config Config) (*World, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &World{config: config, players: make(map[entity.ID]*playerState), monsters: make(map[entity.ID]*monsterState), projectiles: make(map[entity.ID]entity.Projectile)}, nil
+	return &World{config: config, players: make(map[entity.ID]*playerState), departedPlayers: make(map[entity.ID]PlayerResult), monsters: make(map[entity.ID]*monsterState), projectiles: make(map[entity.ID]entity.Projectile)}, nil
 }
 
 func (w *World) AddPlayer(id entity.ID) error {
@@ -145,11 +148,15 @@ func (w *World) AddPlayer(id entity.ID) error {
 	}
 	stats := w.config.Combat.PlayerStats
 	stats.MoveSpeed = w.config.MoveSpeed
+	delete(w.departedPlayers, id)
 	w.players[id] = &playerState{player: entity.Player{ID: id, Position: w.config.Spawn, BaseStats: stats, CurrentStats: stats, Health: stats.MaxHealth, Alive: true, Aim: entity.Vec2{X: 1}}}
 	return nil
 }
 
 func (w *World) RemovePlayer(id entity.ID) {
+	if member, exists := w.players[id]; exists && w.runStarted {
+		w.departedPlayers[id] = playerResult(member.player)
+	}
 	delete(w.players, id)
 	if w.rewardRound != nil && w.rewardRound.RemovePlayer(id) && w.stage.State == stage.Reward && w.PlayerCount() > 0 && w.rewardRound.Complete() {
 		w.stage.State = stage.PreparingNextStage
@@ -157,6 +164,7 @@ func (w *World) RemovePlayer(id entity.ID) {
 }
 func (w *World) Clear() {
 	clear(w.players)
+	clear(w.departedPlayers)
 	clear(w.monsters)
 	clear(w.projectiles)
 	w.events = nil
