@@ -12,6 +12,9 @@ import (
 
 func TestThreeStageServerCoreLoop(t *testing.T) {
 	config := game.DefaultConfig()
+	// This exercises the stage lifecycle with a stationary, zero-speed enemy;
+	// cover collision is covered separately by arena_test.go.
+	config.CoverEnabled = false
 	w, err := game.NewWorld(config)
 	if err != nil {
 		t.Fatal(err)

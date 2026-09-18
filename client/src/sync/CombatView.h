@@ -10,6 +10,8 @@
 // Pure data + logic: no raylib/asio/protobuf here so it stays unit-testable.
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -35,8 +37,23 @@ struct ProjectileVisual {
     float z = 0.0f;
     float vx = 0.0f;
     float vz = 0.0f;
+    float origin_x = 0.0f;
+    float origin_z = 0.0f;
+    float impact_x = 0.0f;
+    float impact_z = 0.0f;
+    float impact_time_left = 0.0f;
+    float flight_age = 0.0f;
+    bool finishing = false;
     std::uint64_t expires_at_tick = 0;
     std::uint64_t server_tick = 0;
+};
+
+struct ProjectileImpact {
+    float x = 0.0f;
+    float z = 0.0f;
+    float vx = 0.0f;
+    float vz = 0.0f;
+    float age = 0.0f;
 };
 
 struct StageInfo {
@@ -74,19 +91,52 @@ public:
     std::size_t MonsterCount() const { return monsters_.size(); }
     const std::map<std::uint64_t, MonsterEntity>& Monsters() const { return monsters_; }
 
-    // Projectiles: created only by spawn events, removed only by destroy events.
+    // Spawn/destroy events are authoritative. A destroy can arrive in the same
+    // network drain as its spawn; finish that short flight visually before
+    // removing the sprite, without changing server-side collision or damage.
     void SpawnProjectile(const ProjectileVisual& projectile) {
-        projectiles_[projectile.id] = projectile;
+        auto visual = projectile;
+        visual.origin_x = projectile.x;
+        visual.origin_z = projectile.z;
+        visual.finishing = false;
+        visual.impact_time_left = 0.0f;
+        visual.flight_age = 0.0f;
+        projectiles_[projectile.id] = visual;
+    }
+
+    bool DestroyProjectile(std::uint64_t id, float x, float z) {
+        const auto it = projectiles_.find(id);
+        if (it == projectiles_.end()) return false;
+        auto& visual = it->second;
+        const float dx = x - visual.x;
+        const float dz = z - visual.z;
+        const float distance = std::hypot(dx, dz);
+        const float speed = std::hypot(visual.vx, visual.vz);
+        // Do not fly backwards when a late destroy follows local extrapolation.
+        if (distance < 0.02f || speed < 0.01f ||
+            (dx * visual.vx + dz * visual.vz) <= 0.0f) {
+            impacts_.push_back({x, z, visual.vx, visual.vz, 0.0f});
+            projectiles_.erase(it);
+            return true;
+        }
+        visual.finishing = true;
+        visual.impact_x = x;
+        visual.impact_z = z;
+        visual.impact_time_left = std::clamp(distance / speed, 0.08f, 0.30f);
+        return true;
     }
 
     bool DestroyProjectile(std::uint64_t id) {
-        return projectiles_.erase(id) > 0;
+        const auto it = projectiles_.find(id);
+        return it != projectiles_.end() && DestroyProjectile(id, it->second.x, it->second.z);
     }
 
-    void ClearProjectiles() { projectiles_.clear(); }
+    void ClearProjectiles() { projectiles_.clear(); impacts_.clear(); }
 
     std::size_t ProjectileCount() const { return projectiles_.size(); }
     const std::map<std::uint64_t, ProjectileVisual>& Projectiles() const { return projectiles_; }
+    const std::vector<ProjectileImpact>& Impacts() const { return impacts_; }
+    static constexpr float kImpactSeconds = 0.20f;
 
     void SetStage(const StageInfo& stage) { stage_ = stage; }
     const StageInfo& Stage() const { return stage_; }
@@ -99,6 +149,31 @@ public:
 
     // Decays transient feedback (call once per frame with the frame delta).
     void Tick(float dt) {
+        for (auto it = projectiles_.begin(); it != projectiles_.end();) {
+            auto& projectile = it->second;
+            projectile.flight_age += dt;
+            if (projectile.finishing) {
+                const float fraction = std::min(1.0f, dt / projectile.impact_time_left);
+                projectile.x += (projectile.impact_x - projectile.x) * fraction;
+                projectile.z += (projectile.impact_z - projectile.z) * fraction;
+                projectile.impact_time_left -= dt;
+                if (projectile.impact_time_left <= 0.0f || fraction >= 1.0f) {
+                    impacts_.push_back({projectile.impact_x, projectile.impact_z,
+                                        projectile.vx, projectile.vz, 0.0f});
+                    it = projectiles_.erase(it);
+                    continue;
+                }
+            } else {
+                projectile.x += projectile.vx * dt;
+                projectile.z += projectile.vz * dt;
+            }
+            ++it;
+        }
+        for (auto it = impacts_.begin(); it != impacts_.end();) {
+            it->age += dt;
+            if (it->age >= kImpactSeconds) it = impacts_.erase(it);
+            else ++it;
+        }
         for (auto it = hit_flash_.begin(); it != hit_flash_.end();) {
             it->second -= dt;
             if (it->second <= 0.0f) {
@@ -116,6 +191,7 @@ public:
     void Clear() {
         monsters_.clear();
         projectiles_.clear();
+        impacts_.clear();
         hit_flash_.clear();
         dead_.clear();
         stage_ = StageInfo{};
@@ -126,6 +202,7 @@ private:
 
     std::map<std::uint64_t, MonsterEntity> monsters_;
     std::map<std::uint64_t, ProjectileVisual> projectiles_;
+    std::vector<ProjectileImpact> impacts_;
     std::map<std::uint64_t, float> hit_flash_;
     std::set<std::uint64_t> dead_;
     StageInfo stage_;

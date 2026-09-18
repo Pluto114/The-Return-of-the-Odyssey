@@ -15,6 +15,8 @@
 #include <deque>
 #include <utility>
 
+#include "sync/Arena.h"
+
 namespace odyssey::client::sync {
 
 // Movement rules shared with the server plan (not tuning knobs: changing them
@@ -39,13 +41,8 @@ inline std::pair<float, float> StepMovement(float x, float z, float dx, float dz
         dx *= inv;
         dz *= inv;
     }
-    x += dx * kMoveSpeedUnitsPerSecond * dt;
-    z += dz * kMoveSpeedUnitsPerSecond * dt;
-    if (x < kArenaMin) x = kArenaMin;
-    if (x > kArenaMax) x = kArenaMax;
-    if (z < kArenaMin) z = kArenaMin;
-    if (z > kArenaMax) z = kArenaMax;
-    return {x, z};
+    return MoveAroundCover(x, z, dx * kMoveSpeedUnitsPerSecond * dt,
+                           dz * kMoveSpeedUnitsPerSecond * dt);
 }
 
 class MovementPredictor {

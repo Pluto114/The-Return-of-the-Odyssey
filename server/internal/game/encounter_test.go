@@ -34,7 +34,7 @@ func TestFirstStagePlanIsDeterministicAndValid(t *testing.T) {
 	if err := game.ValidateStage(a, config); err != nil {
 		t.Fatalf("generated plan failed validation: %v", err)
 	}
-	if a.Index != 1 || a.DifficultyScore != 1 || len(a.Monsters) != 3 {
+	if a.Index != 1 || a.DifficultyScore != 1 || len(a.Monsters) != 8 {
 		t.Fatalf("unexpected first-stage shape: %+v", a)
 	}
 	seen := make(map[entity.Vec2]bool)
@@ -51,7 +51,7 @@ func TestFirstStagePlanIsDeterministicAndValid(t *testing.T) {
 
 func TestFirstStagePlanRejectsInsufficientCapacity(t *testing.T) {
 	config := game.DefaultConfig()
-	config.Combat.MaxMonsters = 2
+	config.Combat.MaxMonsters = 7
 	if _, err := game.NewFirstStagePlan(config, 1); err == nil {
 		t.Fatal("first-stage plan ignored monster capacity")
 	}
@@ -84,7 +84,7 @@ func TestFirstStagePlanStartsExactlyOnce(t *testing.T) {
 		t.Fatalf("got %d StageStarted events, want 1", got)
 	}
 	snapshot := w.Snapshot()
-	if snapshot.Stage.State != stage.Playing || snapshot.Stage.Seed != 99 || snapshot.Stage.MonstersRemaining != 3 || len(snapshot.Monsters) != 3 {
+	if snapshot.Stage.State != stage.Playing || snapshot.Stage.Seed != 99 || snapshot.Stage.MonstersRemaining != 8 || len(snapshot.Monsters) != 8 {
 		t.Fatalf("unexpected started stage: %+v", snapshot)
 	}
 }

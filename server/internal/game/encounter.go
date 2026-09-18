@@ -8,7 +8,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/stage"
 )
 
-const firstStageMonsterCount = 3
+const firstStageMonsterCount = 8
 
 // NewFirstStagePlan builds the server-owned opening encounter. The supplied
 // seed selects and orders positions from a fixed arena-relative layout, so a
@@ -60,7 +60,7 @@ func NewFirstStagePlan(config Config, seed int64) (stage.Plan, error) {
 	ordered = append(ordered, deferred...)
 
 	plan := stage.Plan{Index: 1, Seed: seed, DifficultyScore: 1, Monsters: make([]stage.Spawn, firstStageMonsterCount)}
-	monsterStats := entity.CombatStats{Attack: 8, MaxHealth: 40, MoveSpeed: 1.5, AttackCooldownTicks: TickRate}
+	monsterStats := entity.CombatStats{Attack: 5, MaxHealth: 30, MoveSpeed: 1.7, AttackCooldownTicks: TickRate + TickRate/2}
 	for i := range plan.Monsters {
 		plan.Monsters[i] = stage.Spawn{
 			Position:    ordered[i],

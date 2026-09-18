@@ -136,7 +136,8 @@ func (w *World) StartStage(plan stage.Plan) error {
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
 	for _, spawn := range plan.Monsters {
 		id := w.allocateID()
-		w.monsters[id] = &monsterState{monster: entity.Monster{ID: id, Position: spawn.Position, BaseStats: spawn.Stats, CurrentStats: spawn.Stats,
+		position := w.clearSpawnFromCover(spawn.Position, spawn.Radius)
+		w.monsters[id] = &monsterState{monster: entity.Monster{ID: id, Position: position, BaseStats: spawn.Stats, CurrentStats: spawn.Stats,
 			Health: spawn.Stats.MaxHealth, Radius: spawn.Radius, AttackRange: spawn.AttackRange, State: entity.MonsterIdle}}
 	}
 	w.emit(Event{Kind: StageStarted, StageIndex: plan.Index, ServerTick: w.tick + 1})
@@ -179,6 +180,7 @@ func (w *World) stepCombat() {
 		return
 	}
 	playerIDs, monsterIDs := orderedIDs(w.players), orderedIDs(w.monsters)
+	assigned := make(map[entity.ID]int, len(playerIDs))
 	for _, id := range playerIDs {
 		p := w.players[id]
 		if !p.player.Alive || !p.firing || w.tick < p.nextShot || len(w.projectiles) >= w.config.Combat.MaxProjectiles {
@@ -197,19 +199,30 @@ func (w *World) stepCombat() {
 		m := w.monsters[id]
 		m.previous = m.monster.Position
 		if (w.tick-1)%AIDecisionEvery == 0 {
+			previousTarget := m.target
 			m.target = 0
-			nearest := math.Inf(1)
+			bestScore := math.Inf(1)
 			for _, pid := range playerIDs {
 				p := w.players[pid].player
 				if !p.Alive {
 					continue
 				}
 				d := math.Hypot(p.Position.X-m.monster.Position.X, p.Position.Y-m.monster.Position.Y)
-				if d < nearest {
-					nearest = d
+				// Spread equal-distance attackers across the team while still
+				// favoring a nearby player. A little target persistence avoids
+				// visible direction changes at every decision tick.
+				score := d + float64(assigned[pid])*2
+				if pid == previousTarget {
+					score -= 0.5
+				}
+				if score < bestScore {
+					bestScore = score
 					m.target = pid
 				}
 			}
+		}
+		if m.target != 0 {
+			assigned[m.target]++
 		}
 		m.monster.Velocity = entity.Vec2{}
 		p := w.players[m.target]
@@ -219,12 +232,21 @@ func (w *World) stepCombat() {
 		}
 		dx, dy := p.player.Position.X-m.monster.Position.X, p.player.Position.Y-m.monster.Position.Y
 		distance := math.Hypot(dx, dy)
-		if distance > m.monster.AttackRange {
+		_, covered := w.firstCoverHit(m.monster.Position, p.player.Position, 0)
+		if distance > m.monster.AttackRange || covered {
 			m.monster.State = entity.MonsterChase
-			step := math.Min(m.monster.CurrentStats.MoveSpeed*StepSeconds, distance-m.monster.AttackRange)
-			m.monster.Velocity = entity.Vec2{X: dx / distance * step / StepSeconds, Y: dy / distance * step / StepSeconds}
-			m.monster.Position.X += m.monster.Velocity.X * StepSeconds
-			m.monster.Position.Y += m.monster.Velocity.Y * StepSeconds
+			waypoint := w.routeAroundCover(m.monster.Position, p.player.Position, m.monster.Radius)
+			steerX, steerY := waypoint.X-m.monster.Position.X, waypoint.Y-m.monster.Position.Y
+			steerDistance := math.Hypot(steerX, steerY)
+			if steerDistance > 0 {
+				step := math.Min(m.monster.CurrentStats.MoveSpeed*StepSeconds, steerDistance)
+				if !covered {
+					step = math.Min(step, math.Max(0, distance-m.monster.AttackRange))
+				}
+				m.monster.Position = w.moveWithCover(m.monster.Position,
+					entity.Vec2{X: steerX / steerDistance * step, Y: steerY / steerDistance * step}, m.monster.Radius)
+				m.monster.Velocity = entity.Vec2{X: (m.monster.Position.X - m.previous.X) / StepSeconds, Y: (m.monster.Position.Y - m.previous.Y) / StepSeconds}
+			}
 		} else {
 			m.monster.State = entity.MonsterAttack
 			if w.tick >= m.nextAttack {
@@ -253,6 +275,7 @@ func (w *World) stepCombat() {
 			}
 		}
 		end = entity.Vec2{X: p.Position.X + (end.X-p.Position.X)*fraction, Y: p.Position.Y + (end.Y-p.Position.Y)*fraction}
+		coverHit, hitsCover := w.firstCoverHit(p.Position, end, p.Radius)
 		closest := math.Inf(1)
 		var target entity.ID
 		for _, mid := range monsterIDs {
@@ -265,9 +288,12 @@ func (w *World) stepCombat() {
 				target = mid
 			}
 		}
-		if target != 0 {
+		if target != 0 && (!hitsCover || closest < coverHit) {
 			p.Position = entity.Vec2{X: p.Position.X + (end.X-p.Position.X)*closest, Y: p.Position.Y + (end.Y-p.Position.Y)*closest}
 			requests = append(requests, systems.DamageRequest{SourceID: p.OwnerID, TargetID: target, Attack: p.Attack})
+			w.destroyProjectile(p)
+		} else if hitsCover {
+			p.Position = entity.Vec2{X: p.Position.X + (end.X-p.Position.X)*coverHit, Y: p.Position.Y + (end.Y-p.Position.Y)*coverHit}
 			w.destroyProjectile(p)
 		} else if fraction < 1 {
 			p.Position = end

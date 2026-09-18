@@ -14,14 +14,18 @@ import (
 )
 
 func run() error {
-	w, err := game.NewWorld(game.DefaultConfig())
+	config := game.DefaultConfig()
+	// The fixed-position offline shooter exercises combat math and stage
+	// completion; arena cover is exercised by the game arena tests.
+	config.CoverEnabled = false
+	w, err := game.NewWorld(config)
 	if err != nil {
 		return err
 	}
 	if err = w.AddPlayer(1); err != nil {
 		return err
 	}
-	plan, err := game.NewFirstStagePlan(game.DefaultConfig(), 42)
+	plan, err := game.NewFirstStagePlan(config, 42)
 	if err != nil {
 		return err
 	}

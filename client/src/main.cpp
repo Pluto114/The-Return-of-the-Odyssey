@@ -24,6 +24,7 @@
 #include "ui/RewardChoiceInput.h"
 
 #include <cmath>
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -428,6 +429,7 @@ int main() {
     std::printf("main: net thread started, entering loop\n"); fflush(stdout);
 
     double last_ping_sent = 0.0;
+    double last_frame_time = GetTime();
 
     auto SendPayload = [&client, &demo](std::uint16_t message_type,
                                         const std::vector<std::uint8_t>& payload) {
@@ -447,8 +449,13 @@ int main() {
         const CanvasViewport viewport = CurrentCanvasViewport();
         const Vector2 canvas_mouse = CanvasMousePosition(viewport);
         const double frame_start = GetTime();
-        // Decay transient combat feedback (hit flashes, banner).
-        const float frame_dt = GetFrameTime();
+        // This raylib package uses SUPPORT_CUSTOM_FRAME_CONTROL. EndDrawing()
+        // does not update GetFrameTime(), so measure wall-clock time ourselves
+        // for projectile flight and transient effects. Clamp long stalls to
+        // keep visual extrapolation bounded after a window drag or breakpoint.
+        const float frame_dt = std::clamp(static_cast<float>(frame_start - last_frame_time),
+                                          0.0f, 0.05f);
+        last_frame_time = frame_start;
         combat_view.Tick(frame_dt);
         if (demo.banner_ttl > 0.0f) {
             demo.banner_ttl -= frame_dt;
@@ -891,7 +898,8 @@ int main() {
                     } else if (event->message.message_type == kProjectileDestroy) {
                         ProjectileDestroyData destroy;
                         if (payload::DecodeProjectileDestroy(event->message.payload, destroy)) {
-                            combat_view.DestroyProjectile(destroy.projectile_id);
+                            combat_view.DestroyProjectile(destroy.projectile_id,
+                                                          destroy.pos_x, destroy.pos_z);
                             ++demo.destroys;
                             demo.last_event_note = "projectile destroy id=" +
                                                    std::to_string(destroy.projectile_id);
@@ -1121,11 +1129,18 @@ int main() {
         const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
         const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
 
-        for (const auto& [id, projectile] : combat_view.Projectiles()) {
-            (void)id;
-            const Vector2 point{to_screen_x(projectile.x), to_screen_y(projectile.z)};
-            DrawCircleV(point, 6.0f, Fade(kGold, 0.18f));
-            DrawCircleV(point, 3.0f, kGold);
+        for (const auto& cover : odyssey::client::sync::kCoverBlocks) {
+            const Rectangle wall{to_screen_x(cover.min_x), to_screen_y(cover.min_z),
+                                 to_screen_x(cover.max_x) - to_screen_x(cover.min_x),
+                                 to_screen_y(cover.max_z) - to_screen_y(cover.min_z)};
+            DrawRectangleRec(wall, kPanelRaised);
+            DrawRectangleLinesEx(wall, 2.0f, Fade(kCyan, 0.75f));
+            DrawLineEx(Vector2{wall.x + 8, wall.y + 8},
+                       Vector2{wall.x + wall.width - 8, wall.y + wall.height - 8},
+                       2.0f, Fade(kCyan, 0.35f));
+            DrawLineEx(Vector2{wall.x + wall.width - 8, wall.y + 8},
+                       Vector2{wall.x + 8, wall.y + wall.height - 8},
+                       2.0f, Fade(kCyan, 0.35f));
         }
 
         for (const auto& [id, monster] : combat_view.Monsters()) {
@@ -1196,6 +1211,64 @@ int main() {
             if (show_debug) {
                 DrawText(std::to_string(player.id).c_str(), static_cast<int>(px + 20),
                          static_cast<int>(pz + 8), 12, kMuted);
+            }
+        }
+
+        // A dart has a bright directional body and a long tapered wake. The
+        // wake grows from its actual launch point, so even a spawn/destroy pair
+        // received in one frame reads as flight instead of a static dot.
+        for (const auto& [id, projectile] : combat_view.Projectiles()) {
+            (void)id;
+            const Vector2 head{to_screen_x(projectile.x), to_screen_y(projectile.z)};
+            const Vector2 origin{to_screen_x(projectile.origin_x),
+                                 to_screen_y(projectile.origin_z)};
+            const float screen_vx = projectile.vx * kArenaW / kWorldSize;
+            const float screen_vz = projectile.vz * kArenaH / kWorldSize;
+            const float screen_speed = std::hypot(screen_vx, screen_vz);
+            if (screen_speed < 1.0f) continue;
+            const Vector2 forward{screen_vx / screen_speed, screen_vz / screen_speed};
+            const Vector2 side{-forward.y, forward.x};
+            const float wake_length = std::min(94.0f,
+                                               std::hypot(head.x - origin.x, head.y - origin.y));
+            const Vector2 wake{head.x - forward.x * wake_length,
+                               head.y - forward.y * wake_length};
+            const Vector2 mid{head.x - forward.x * wake_length * 0.48f,
+                              head.y - forward.y * wake_length * 0.48f};
+            if (wake_length > 1.0f) {
+                DrawLineEx(wake, head, 15.0f, Fade(kCyan, 0.12f));
+                DrawLineEx(wake, mid, 5.0f, Fade(kCyan, 0.35f));
+                DrawLineEx(mid, head, 6.0f, Fade(kCyan, 0.70f));
+                DrawLineEx(mid, head, 2.0f, Fade(kStarlight, 0.88f));
+            }
+            const Vector2 tip{head.x + forward.x * 10.0f,
+                              head.y + forward.y * 10.0f};
+            const Vector2 left{head.x - forward.x * 7.0f + side.x * 5.0f,
+                               head.y - forward.y * 7.0f + side.y * 5.0f};
+            const Vector2 right{head.x - forward.x * 7.0f - side.x * 5.0f,
+                                head.y - forward.y * 7.0f - side.y * 5.0f};
+            DrawTriangle(tip, left, right, kStarlight);
+            if (projectile.flight_age < 0.12f) {
+                const float fade = 1.0f - projectile.flight_age / 0.12f;
+                DrawCircleLines(static_cast<int>(origin.x), static_cast<int>(origin.y),
+                                9.0f + (1.0f - fade) * 10.0f, Fade(kCyan, fade * 0.7f));
+            }
+        }
+        for (const auto& impact : combat_view.Impacts()) {
+            const float progress = std::min(1.0f, impact.age / CombatView::kImpactSeconds);
+            const float alpha = 1.0f - progress;
+            const Vector2 center{to_screen_x(impact.x), to_screen_y(impact.z)};
+            const float radius = 5.0f + 23.0f * progress;
+            DrawRing(center, radius - 1.5f, radius + 1.5f, 0.0f, 360.0f, 24,
+                     Fade(kCyan, 0.85f * alpha));
+            DrawCircleV(center, 7.0f * alpha, Fade(kStarlight, 0.7f * alpha));
+            for (int ray = 0; ray < 4; ++ray) {
+                const float angle = 0.785398f + ray * 1.570796f;
+                const Vector2 direction{std::cos(angle), std::sin(angle)};
+                const Vector2 start{center.x + direction.x * (6.0f + 8.0f * progress),
+                                    center.y + direction.y * (6.0f + 8.0f * progress)};
+                const Vector2 end{center.x + direction.x * (12.0f + 14.0f * progress),
+                                  center.y + direction.y * (12.0f + 14.0f * progress)};
+                DrawLineEx(start, end, 2.0f, Fade(kGold, alpha * 0.8f));
             }
         }
 

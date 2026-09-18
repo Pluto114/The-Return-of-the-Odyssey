@@ -247,16 +247,44 @@ void TestCombatViewProjectilesAndStage() {
     projectile.owner_id = 10;
     projectile.x = 3.0f;
     projectile.z = 4.0f;
+    projectile.vx = 20.0f;
     projectile.expires_at_tick = 500;
     view.SpawnProjectile(projectile);
     CHECK(view.ProjectileCount() == 1);
     CHECK(view.Projectiles().at(42).x == 3.0f);
+    view.Tick(0.05f);
+    CHECK(std::fabs(view.Projectiles().at(42).x - 4.0f) < kEps);
 
     // Duplicate spawn (should not happen with one dispatcher) overwrites, and
     // destroy of an unknown id is a no-op.
     CHECK(!view.DestroyProjectile(99));
-    CHECK(view.DestroyProjectile(42));
+    CHECK(view.DestroyProjectile(42, 6.0f, 4.0f));
+    CHECK(view.ProjectileCount() == 1);  // animate the authoritative final segment
+    CHECK(view.Projectiles().at(42).finishing);
+    view.Tick(0.05f);
+    CHECK(view.Projectiles().at(42).x > 4.0f);
+    CHECK(view.Projectiles().at(42).x < 6.0f);
+    view.Tick(0.05f);
     CHECK(view.ProjectileCount() == 0);
+    CHECK(view.Impacts().size() == 1);
+    CHECK(view.Impacts()[0].x == 6.0f);
+    ProjectileVisual instant;
+    instant.id = 43;
+    instant.x = 3.0f;
+    instant.z = 4.0f;
+    instant.vx = 20.0f;
+    view.SpawnProjectile(instant);
+    CHECK(view.DestroyProjectile(43, 7.0f, 4.0f));
+    CHECK(view.ProjectileCount() == 1);  // spawn and hit in one network drain
+    view.Tick(0.1f);
+    CHECK(view.Projectiles().at(43).x > 3.0f);
+    CHECK(view.Projectiles().at(43).x < 7.0f);
+    view.Tick(0.1f);
+    CHECK(view.ProjectileCount() == 0);
+    CHECK(view.Impacts().size() == 1);
+    CHECK(view.Impacts()[0].x == 7.0f);
+    view.Tick(CombatView::kImpactSeconds);
+    CHECK(view.Impacts().empty());
 
     StageInfo stage;
     stage.index = 2;
@@ -490,6 +518,13 @@ void TestStepMovementRules() {
     const auto [x4, z4] = StepMovement(19.9f, 19.9f, 1.0f, 1.0f, kSimulationStepSeconds);
     CHECK(x4 <= kArenaMax);
     CHECK(z4 <= kArenaMax);
+
+    // Local prediction stops at the same cover edge as the server.
+    float x = 15.0f;
+    for (int i = 0; i < 10; ++i) {
+        x = StepMovement(x, 8.9f, -1.0f, 0.0f, kSimulationStepSeconds).first;
+    }
+    CHECK(x > 14.72f && x < 15.0f);
 }
 
 void TestSnapshotInterpolation() {

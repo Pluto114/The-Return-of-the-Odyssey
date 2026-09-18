@@ -40,12 +40,13 @@ type Config struct {
 	Spawn        entity.Vec2
 	MoveSpeed    float64
 	InputTimeout time.Duration
+	CoverEnabled bool
 	Combat       CombatConfig
 }
 
 func DefaultConfig() Config {
 	return Config{Capacity: 2, Max: entity.Vec2{X: 20, Y: 20}, Spawn: entity.Vec2{X: 10, Y: 10},
-		MoveSpeed: 5, InputTimeout: 200 * time.Millisecond, Combat: DefaultCombatConfig()}
+		MoveSpeed: 5, InputTimeout: 200 * time.Millisecond, CoverEnabled: true, Combat: DefaultCombatConfig()}
 }
 
 func (c Config) Validate() error {
@@ -232,7 +233,10 @@ func (w *World) Step(now time.Time) {
 		if !now.Before(p.receivedAt) {
 			p.pending = false
 		}
+		previous := p.player.Position
 		systems.Move(&p.player, direction, p.player.CurrentStats.MoveSpeed, StepSeconds, w.config.Min, w.config.Max)
+		p.player.Position = w.moveWithCover(previous, entity.Vec2{X: p.player.Position.X - previous.X, Y: p.player.Position.Y - previous.Y}, 0.32)
+		p.player.Velocity = entity.Vec2{X: (p.player.Position.X - previous.X) / StepSeconds, Y: (p.player.Position.Y - previous.Y) / StepSeconds}
 	}
 	w.tick++
 	w.stepCombat()
