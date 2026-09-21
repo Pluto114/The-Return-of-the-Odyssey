@@ -38,8 +38,8 @@ message PlayerInput {
   Vec2 aim = 4;
   // Shoot button held this tick (auto-fire handled by server cooldown).
   bool shoot = 5;
-  // Use-potion trigger. Server checks Potion availability. Reserved for a
-  // later combat extension; not yet consumed by the room.
+  // One-shot use-potion trigger. Server validates and consumes the equipped
+  // Potion during an active stage; clients should send true for one input tick.
   bool use_potion = 6;
 }
 
@@ -62,6 +62,9 @@ message WorldSnapshot {
   repeated MonsterSnapshot monsters = 5;
   // Stage state (index / seed / state / monsters remaining).
   StageState stage = 6;
+  // Full set of uncollected stage pickups. Missing from a newer snapshot means
+  // another player collected it or the stage changed.
+  repeated PickupSnapshot pickups = 7;
 }
 
 // Snapshot row for a player. Includes everything the HUD + prediction engine
@@ -79,6 +82,9 @@ message PlayerSnapshot {
   float defense = 8;
   float move_speed = 9;
   bool alive = 10;           // false => dead, input suppressed for this entity
+  uint32 weapon_id = 11;
+  uint32 relic_id = 12;
+  uint32 potion_id = 13;
 }
 
 // Compact snapshot for a monster. Mirrors B's game.MonsterView. Only what the
@@ -92,6 +98,22 @@ message MonsterSnapshot {
   // Monster state: 0 idle / 1 chase / 2 attack / 3 dead. Aligned with
   // entity.MonsterState enum.
   uint32 state = 6;
+}
+
+enum PickupKind {
+  PICKUP_KIND_UNSPECIFIED = 0;
+  PICKUP_KIND_HEALTH = 1;
+  PICKUP_KIND_WEAPON = 2;
+}
+
+message PickupSnapshot {
+  uint64 pickup_id = 1;
+  PickupKind kind = 2;
+  Vec2 position = 3;
+  // Non-zero for weapon pickups; resolved through the shared equipment table.
+  uint32 equipment_id = 4;
+  // Immediate heal amount for health pickups.
+  float value = 5;
 }
 
 // Stage state embedded in WorldSnapshot. Aligned with game/stage.View.

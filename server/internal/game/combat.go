@@ -134,6 +134,7 @@ func (w *World) StartStage(plan stage.Plan) error {
 	w.performance = stagePerformance{startedAtTick: w.tick, equipmentPower: w.equipmentPower()}
 	w.currentPlan = plan.Clone()
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
+	w.spawnStagePickups(plan.Index)
 	for _, spawn := range plan.Monsters {
 		id := w.allocateID()
 		position := w.clearSpawnFromCover(spawn.Position, spawn.Radius)

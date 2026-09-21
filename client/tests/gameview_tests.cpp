@@ -1,19 +1,25 @@
 // Headless tests for the D2-direction logic slice: input normalization &
 // sequencing, and full-snapshot application semantics. No window, no sockets.
 #include "input/InputSample.h"
+#include "input/OneShotAction.h"
 #include "sync/CombatView.h"
 #include "sync/GameView.h"
 #include "sync/Interpolation.h"
+#include "sync/MatchScore.h"
 #include "sync/Prediction.h"
 #include "sync/RecoveryState.h"
 #include "sync/RewardView.h"
+#include "ui/ChineseLabels.h"
+#include "ui/ReplayInput.h"
 #include "ui/RewardChoiceInput.h"
+#include "ui/TextUtils.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -34,6 +40,7 @@ using odyssey::client::input::InputReport;
 using odyssey::client::input::InputSample;
 using odyssey::client::input::InputSequencer;
 using odyssey::client::input::NormalizeInput;
+using odyssey::client::input::OneShotAction;
 using odyssey::client::sync::CombatView;
 using odyssey::client::sync::EquipmentTable;
 using odyssey::client::sync::GameView;
@@ -41,9 +48,11 @@ using odyssey::client::sync::InputCommand;
 using odyssey::client::sync::kArenaMax;
 using odyssey::client::sync::kSimulationStepSeconds;
 using odyssey::client::sync::MonsterEntity;
+using odyssey::client::sync::MatchScoreboard;
 using odyssey::client::sync::MovementPredictor;
 using odyssey::client::sync::ParseEquipmentTable;
 using odyssey::client::sync::PlayerView;
+using odyssey::client::sync::PickupEntity;
 using odyssey::client::sync::ProjectileVisual;
 using odyssey::client::sync::RecoveryPhase;
 using odyssey::client::sync::RecoveryState;
@@ -55,6 +64,56 @@ using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StepMovement;
 
 constexpr float kEps = 1e-5f;
+
+void TestAuthoritativeMatchScoreboard() {
+    MatchScoreboard scoreboard;
+    constexpr std::uint64_t monster = odyssey::client::sync::kFirstWorldEntityId | 7;
+    scoreboard.ObservePlayer(10, 80.0f, 100.0f, true);
+    scoreboard.ObservePlayer(20, 50.0f, 100.0f, true);
+    scoreboard.ObserveStageStarted(1, 30);
+    scoreboard.ObserveDamage(10, monster, 35.6);
+    scoreboard.ObserveDamage(monster, 10, 20.0);
+    scoreboard.ObserveDamage(20, monster, 9.0);
+    scoreboard.ObserveDeath(monster, 10);
+    scoreboard.ObserveDeath(20, monster);
+    scoreboard.ObserveStageCleared(1, 330);
+    scoreboard.ObserveStageCleared(1, 330);  // reliable duplicate is idempotent
+
+    const auto ranking = scoreboard.Rankings();
+    CHECK(ranking.size() == 2);
+    CHECK(ranking[0].player_id == 10);
+    CHECK(ranking[0].kills == 1);
+    CHECK(std::fabs(ranking[0].damage_dealt - 35.6) < kEps);
+    CHECK(std::fabs(ranking[0].damage_taken - 20.0) < kEps);
+    CHECK(ranking[0].score == 396);
+    CHECK(ranking[1].player_id == 20);
+    CHECK(ranking[1].deaths == 1);
+    CHECK(ranking[1].score == 0);
+    CHECK(scoreboard.ClearedStages() == 1);
+    CHECK(std::fabs(scoreboard.DurationSeconds() - 10.0) < kEps);
+    CHECK(scoreboard.TeamScore() == 750);
+
+    scoreboard.Reset();
+    CHECK(scoreboard.Rankings().empty());
+    CHECK(scoreboard.TeamScore() == 0);
+}
+
+void TestReplayAfterTerminalStage() {
+    using odyssey::client::ui::CanReplay;
+    using odyssey::client::ui::ExpeditionComplete;
+    CHECK(CanReplay(1, 5, 0.0));
+    CHECK(!CanReplay(1, 1, 99.0));
+    CHECK(!CanReplay(1, 2, 99.0));
+    CHECK(!CanReplay(2, 2, 99.0));
+    CHECK(!CanReplay(3, 2, 1.0));
+    CHECK(ExpeditionComplete(3, 2, 1.5));
+    CHECK(CanReplay(3, 2, 1.5));
+    CHECK(!ExpeditionComplete(3, 3, 99.0));
+}
+
+void TestWindowTitleIdentifiesScoreboardBuild() {
+    CHECK(std::string_view(odyssey::client::ui::kWindowTitle).find("积分榜") != std::string_view::npos);
+}
 
 void TestRewardCardSelection() {
     using odyssey::client::ui::CardBounds;
@@ -84,12 +143,31 @@ void TestChineseEquipmentLabels() {
     CHECK(table.at(2002).name == "疾风遗物");
     CHECK(table.at(2002).description == "移动速度 ×1.1");
     CHECK(table.at(3001).slot == "药剂");
+    CHECK(table.at(3001).description.find("按 Q 使用") != std::string::npos);
+}
+
+void TestShortTextDoesNotSplitChineseUtf8() {
+    const std::string description = "装备后按 Q 使用，恢复 60 点生命值";
+    CHECK(odyssey::client::ui::ShortText(description, 38) == description);
 }
 
 void TestNormalizeIdle() {
     const auto v = NormalizeInput(InputSample{});
     CHECK(v.x == 0.0f);
     CHECK(v.z == 0.0f);
+}
+
+void TestOneShotActionSurvivesUntilInputTick() {
+    OneShotAction action;
+    CHECK(!action.Pending());
+    action.Press();
+    CHECK(action.Pending());
+    action.Press();  // keyboard repeat must still result in one consumable action
+    CHECK(action.Consume());
+    CHECK(!action.Consume());
+    action.Press();
+    action.Reset();
+    CHECK(!action.Consume());
 }
 
 void TestNormalizeAxes() {
@@ -238,6 +316,21 @@ void TestCombatViewMonstersFullSet() {
 
     view.Clear();
     CHECK(view.MonsterCount() == 0);
+}
+
+void TestCombatViewPickupsUseFullSetSemantics() {
+    CombatView view;
+    view.ApplyPickups({PickupEntity{700, 1, 4.0f, 5.0f, 0, 30.0f},
+                       PickupEntity{701, 2, 16.0f, 15.0f, 1001, 0.0f}});
+    CHECK(view.PickupCount() == 2);
+    CHECK(view.Pickups().at(700).value == 30.0f);
+    CHECK(view.Pickups().at(701).equipment_id == 1001);
+
+    view.ApplyPickups({PickupEntity{701, 2, 16.0f, 15.0f, 1001, 0.0f}});
+    CHECK(view.PickupCount() == 1);
+    CHECK(view.Pickups().find(700) == view.Pickups().end());
+    view.Clear();
+    CHECK(view.PickupCount() == 0);
 }
 
 void TestCombatViewProjectilesAndStage() {
@@ -563,8 +656,13 @@ void TestSnapshotInterpolation() {
 }  // namespace
 
 int main() {
+    TestAuthoritativeMatchScoreboard();
+    TestReplayAfterTerminalStage();
+    TestWindowTitleIdentifiesScoreboardBuild();
     TestRewardCardSelection();
     TestChineseEquipmentLabels();
+    TestShortTextDoesNotSplitChineseUtf8();
+    TestOneShotActionSurvivesUntilInputTick();
     TestNormalizeIdle();
     TestNormalizeAxes();
     TestNormalizeDiagonalNotFaster();
@@ -573,6 +671,7 @@ int main() {
     TestGameViewClosedEmpties();
     TestGameViewDefensiveSort();
     TestCombatViewMonstersFullSet();
+    TestCombatViewPickupsUseFullSetSemantics();
     TestCombatViewProjectilesAndStage();
     TestGameViewCombatFields();
     TestCombatViewFeedback();

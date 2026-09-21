@@ -9,7 +9,8 @@ if ($LASTEXITCODE -ne 0 -or $actualProtoc -ne "libprotoc $($versions.protoc)") {
 }
 $plugin = Join-Path $env:GOBIN $(if ($IsWindows) { 'protoc-gen-go.exe' } else { 'protoc-gen-go' })
 $pluginVersion = if (Test-Path -LiteralPath $plugin) { & $plugin --version } else { '' }
-if ($pluginVersion -ne "protoc-gen-go $($versions.protocGenGo)") {
+$expectedPluginVersions = @("protoc-gen-go $($versions.protocGenGo)", "protoc-gen-go.exe $($versions.protocGenGo)")
+if ($pluginVersion -notin $expectedPluginVersions) {
     & go install "google.golang.org/protobuf/cmd/protoc-gen-go@$($versions.protocGenGo)"
     if ($LASTEXITCODE -ne 0) { throw 'Installing protoc-gen-go failed.' }
 }

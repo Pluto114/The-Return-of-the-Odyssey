@@ -24,17 +24,31 @@ func vec2f(v entity.Vec2) *protocol.Vec2 {
 // with modifiers) drives attack/defense/move-speed; Health drives hp/max_hp.
 func PlayerSnapshot(p entity.Player) *protocol.PlayerSnapshot {
 	return &protocol.PlayerSnapshot{
-		PlayerId: uint64(p.ID),
-		Position: vec2f(p.Position),
-		Velocity: vec2f(p.Velocity),
-		Aim:      vec2f(p.Aim),
-		Hp:       float32(p.Health),
-		MaxHp:    float32(p.CurrentStats.MaxHealth),
-		Attack:   float32(p.CurrentStats.Attack),
-		Defense:  float32(p.CurrentStats.Defense),
+		PlayerId:  uint64(p.ID),
+		Position:  vec2f(p.Position),
+		Velocity:  vec2f(p.Velocity),
+		Aim:       vec2f(p.Aim),
+		Hp:        float32(p.Health),
+		MaxHp:     float32(p.CurrentStats.MaxHealth),
+		Attack:    float32(p.CurrentStats.Attack),
+		Defense:   float32(p.CurrentStats.Defense),
 		MoveSpeed: float32(p.CurrentStats.MoveSpeed),
-		Alive:    p.Alive,
+		Alive:     p.Alive,
+		WeaponId:  p.Equipment.WeaponID,
+		RelicId:   p.Equipment.RelicID,
+		PotionId:  p.Equipment.PotionID,
 	}
+}
+
+func PickupSnapshot(p game.PickupView) *protocol.PickupSnapshot {
+	kind := protocol.PickupKind_PICKUP_KIND_UNSPECIFIED
+	if p.Kind == game.HealthPickup {
+		kind = protocol.PickupKind_PICKUP_KIND_HEALTH
+	} else if p.Kind == game.WeaponPickup {
+		kind = protocol.PickupKind_PICKUP_KIND_WEAPON
+	}
+	return &protocol.PickupSnapshot{PickupId: uint64(p.ID), Kind: kind,
+		Position: vec2f(p.Position), EquipmentId: uint32(p.EquipmentID), Value: float32(p.Value)}
 }
 
 // MonsterSnapshot converts a domain MonsterView into its wire row. Only render
@@ -79,9 +93,13 @@ func WorldSnapshot(s game.Snapshot, selfID entity.ID) *protocol.WorldSnapshot {
 		Stage:      StageState(s.Stage),
 		Monsters:   make([]*protocol.MonsterSnapshot, 0, len(s.Monsters)),
 		Players:    make([]*protocol.PlayerSnapshot, 0, len(s.Players)),
+		Pickups:    make([]*protocol.PickupSnapshot, 0, len(s.Pickups)),
 	}
 	for _, m := range s.Monsters {
 		out.Monsters = append(out.Monsters, MonsterSnapshot(m))
+	}
+	for _, pickup := range s.Pickups {
+		out.Pickups = append(out.Pickups, PickupSnapshot(pickup))
 	}
 	for _, p := range s.Players {
 		row := PlayerSnapshot(p)

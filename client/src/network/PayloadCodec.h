@@ -86,6 +86,7 @@ struct PlayerInputData {
     float aim_x = 0.0f;           // aim heading, world x (finite; required when shoot)
     float aim_z = 0.0f;           // aim heading, world z
     bool shoot = false;
+    bool use_potion = false;      // one-shot request; server validates/consumes Potion
     std::uint64_t client_tick_ms = 0;
 };
 
@@ -100,6 +101,7 @@ inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) 
     aim->set_x(data.aim_x);
     aim->set_y(data.aim_z);
     proto.set_shoot(data.shoot);
+    proto.set_use_potion(data.use_potion);
     std::vector<std::uint8_t> out(proto.ByteSizeLong());
     proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
     return out;
@@ -121,6 +123,18 @@ struct SnapshotPlayerView {
     float attack = 0.0f;
     float defense = 0.0f;
     float move_speed = 0.0f;
+    std::uint32_t weapon_id = 0;
+    std::uint32_t relic_id = 0;
+    std::uint32_t potion_id = 0;
+};
+
+struct SnapshotPickupView {
+    std::uint64_t id = 0;
+    std::uint32_t kind = 0;  // 1 health / 2 weapon
+    float pos_x = 0.0f;
+    float pos_z = 0.0f;
+    std::uint32_t equipment_id = 0;
+    float value = 0.0f;
 };
 
 struct SnapshotMonsterView {
@@ -148,6 +162,7 @@ struct WorldSnapshotView {
     SnapshotPlayerView self;
     std::vector<SnapshotPlayerView> others;    // ascending by id
     std::vector<SnapshotMonsterView> monsters; // full set: missing => removed
+    std::vector<SnapshotPickupView> pickups;   // full set: missing => collected
     StageStateView stage;
 };
 
@@ -168,6 +183,9 @@ inline SnapshotPlayerView MapPlayer(const odyssey::protocol::v1::PlayerSnapshot&
     out.attack = p.attack();
     out.defense = p.defense();
     out.move_speed = p.move_speed();
+    out.weapon_id = p.weapon_id();
+    out.relic_id = p.relic_id();
+    out.potion_id = p.potion_id();
     return out;
 }
 
@@ -206,6 +224,21 @@ inline bool DecodeWorldSnapshot(const std::vector<std::uint8_t>& payload,
         view.max_hp = m.max_hp();
         view.state = m.state();
         out.monsters.push_back(view);
+    }
+    out.pickups.clear();
+    out.pickups.reserve(static_cast<std::size_t>(proto.pickups_size()));
+    for (int i = 0; i < proto.pickups_size(); ++i) {
+        const auto& p = proto.pickups(i);
+        SnapshotPickupView pickup;
+        pickup.id = p.pickup_id();
+        pickup.kind = static_cast<std::uint32_t>(p.kind());
+        if (p.has_position()) {
+            pickup.pos_x = p.position().x();
+            pickup.pos_z = p.position().y();
+        }
+        pickup.equipment_id = p.equipment_id();
+        pickup.value = p.value();
+        out.pickups.push_back(pickup);
     }
     if (proto.has_stage()) {
         out.stage.index = proto.stage().index();

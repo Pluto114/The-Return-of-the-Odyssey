@@ -81,12 +81,14 @@ type Snapshot struct {
 	ServerTick uint64
 	Players    []entity.Player
 	Monsters   []MonsterView
+	Pickups    []PickupView
 	Stage      stage.View
 }
 
 func (s Snapshot) Clone() Snapshot {
 	s.Players = slices.Clone(s.Players)
 	s.Monsters = slices.Clone(s.Monsters)
+	s.Pickups = slices.Clone(s.Pickups)
 	return s
 }
 
@@ -111,6 +113,7 @@ type World struct {
 	departedPlayers  map[entity.ID]PlayerResult
 	monsters         map[entity.ID]*monsterState
 	projectiles      map[entity.ID]entity.Projectile
+	pickups          map[entity.ID]PickupView
 	nextEntity       entity.ID
 	stage            stage.View
 	events           []Event
@@ -127,11 +130,15 @@ type World struct {
 	runEndedAtTick   uint64
 }
 
-func NewWorld(config Config) (*World, error) {
+func NewWorld(config Config, catalogs ...equipment.Catalog) (*World, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &World{config: config, players: make(map[entity.ID]*playerState), departedPlayers: make(map[entity.ID]PlayerResult), monsters: make(map[entity.ID]*monsterState), projectiles: make(map[entity.ID]entity.Projectile)}, nil
+	world := &World{config: config, players: make(map[entity.ID]*playerState), departedPlayers: make(map[entity.ID]PlayerResult), monsters: make(map[entity.ID]*monsterState), projectiles: make(map[entity.ID]entity.Projectile), pickups: make(map[entity.ID]PickupView)}
+	if len(catalogs) > 0 {
+		world.rewardCatalog = catalogs[0]
+	}
+	return world, nil
 }
 
 func (w *World) AddPlayer(id entity.ID) error {
@@ -168,6 +175,7 @@ func (w *World) Clear() {
 	clear(w.departedPlayers)
 	clear(w.monsters)
 	clear(w.projectiles)
+	clear(w.pickups)
 	w.events = nil
 	w.eventOverflow = false
 	w.rewardRound = nil
@@ -238,6 +246,7 @@ func (w *World) Step(now time.Time) {
 		p.player.Position = w.moveWithCover(previous, entity.Vec2{X: p.player.Position.X - previous.X, Y: p.player.Position.Y - previous.Y}, 0.32)
 		p.player.Velocity = entity.Vec2{X: (p.player.Position.X - previous.X) / StepSeconds, Y: (p.player.Position.Y - previous.Y) / StepSeconds}
 	}
+	w.collectPickups()
 	w.tick++
 	w.stepCombat()
 	w.stepReward()
@@ -253,6 +262,9 @@ func (w *World) Snapshot() Snapshot {
 	}
 	for _, p := range w.players {
 		s.Players = append(s.Players, p.player)
+	}
+	for _, id := range orderedIDs(w.pickups) {
+		s.Pickups = append(s.Pickups, w.pickups[id])
 	}
 	slices.SortFunc(s.Players, func(a, b entity.Player) int {
 		if a.ID < b.ID {

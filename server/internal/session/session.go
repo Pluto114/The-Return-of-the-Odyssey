@@ -95,7 +95,7 @@ var legalityMatrix = map[State]map[protocol.MessageType]bool{
 		protocol.MessageType_MSG_MATCH_CANCEL:  true,
 	},
 	StateInRoom: {
-		protocol.MessageType_MSG_MATCH_REQUEST:      true, // rematch only after the room has failed
+		protocol.MessageType_MSG_MATCH_REQUEST:      true, // replay only after defeat or final clear
 		protocol.MessageType_MSG_PLAYER_INPUT:       true,
 		protocol.MessageType_MSG_NEXT_STAGE_REQUEST: true,
 	},

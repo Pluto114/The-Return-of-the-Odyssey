@@ -166,6 +166,7 @@ void TestPlayerInputWire() {
     data.aim_x = 0.0f;
     data.aim_z = 1.0f;
     data.shoot = true;
+    data.use_potion = true;
     data.client_tick_ms = 12345;
     const auto bytes = EncodePlayerInput(data);
 
@@ -184,6 +185,7 @@ void TestPlayerInputWire() {
         CHECK(parsed.aim().y() == data.aim_z);
     }
     CHECK(parsed.shoot());
+    CHECK(parsed.use_potion());
     // Zero-intent (release) encodes fine with seq and no direction magnitude.
     odyssey::client::network::payload::PlayerInputData idle;
     idle.input_seq = 78;
@@ -191,6 +193,7 @@ void TestPlayerInputWire() {
     odyssey::protocol::v1::PlayerInput idle_parsed;
     CHECK(idle_parsed.ParseFromArray(idle_bytes.data(), static_cast<int>(idle_bytes.size())));
     CHECK(idle_parsed.input_seq() == 78);
+    CHECK(!idle_parsed.use_potion());
     if (idle_parsed.has_move()) {
         CHECK(idle_parsed.move().x() == 0.0f);
         CHECK(idle_parsed.move().y() == 0.0f);
@@ -213,6 +216,9 @@ void TestWorldSnapshotDecode() {
     self->set_defense(4.0f);
     self->set_move_speed(5.0f);
     self->set_alive(true);
+    self->set_weapon_id(1001);
+    self->set_relic_id(2002);
+    self->set_potion_id(3001);
 
     auto* other1 = proto.add_players();
     other1->set_player_id(1);
@@ -230,6 +236,12 @@ void TestWorldSnapshotDecode() {
     monster->set_hp(30.0f);
     monster->set_max_hp(50.0f);
     monster->set_state(1);
+    auto* pickup = proto.add_pickups();
+    pickup->set_pickup_id(990);
+    pickup->set_kind(odyssey::protocol::v1::PICKUP_KIND_WEAPON);
+    pickup->mutable_position()->set_x(4.0f);
+    pickup->mutable_position()->set_y(16.0f);
+    pickup->set_equipment_id(1001);
     proto.mutable_stage()->set_index(2);
     proto.mutable_stage()->set_seed(4242);
     proto.mutable_stage()->set_state(1);
@@ -252,6 +264,17 @@ void TestWorldSnapshotDecode() {
         CHECK(view.self.defense == 4.0f);
         CHECK(view.self.move_speed == 5.0f);
         CHECK(view.self.alive);
+        CHECK(view.self.weapon_id == 1001);
+        CHECK(view.self.relic_id == 2002);
+        CHECK(view.self.potion_id == 3001);
+    }
+    CHECK(view.pickups.size() == 1);
+    if (view.pickups.size() == 1) {
+        CHECK(view.pickups[0].id == 990);
+        CHECK(view.pickups[0].kind == 2);
+        CHECK(view.pickups[0].pos_x == 4.0f);
+        CHECK(view.pickups[0].pos_z == 16.0f);
+        CHECK(view.pickups[0].equipment_id == 1001);
     }
     CHECK(view.others.size() == 2);
     if (view.others.size() == 2) {

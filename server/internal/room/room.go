@@ -179,7 +179,7 @@ type Room struct {
 
 // Start immediately starts one owner goroutine. Call Close or cancel the parent
 // context on teardown. A never-joined room also expires after EmptyTimeout.
-func Start(ctx context.Context, id ID, config Config) (*Room, error) {
+func Start(ctx context.Context, id ID, config Config, catalogs ...equipment.Catalog) (*Room, error) {
 	if id == 0 {
 		return nil, fmt.Errorf("invalid room ID")
 	}
@@ -189,7 +189,7 @@ func Start(ctx context.Context, id ID, config Config) (*Room, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	w, err := game.NewWorld(config.World)
+	w, err := game.NewWorld(config.World, catalogs...)
 	if err != nil {
 		return nil, err
 	}

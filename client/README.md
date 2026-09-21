@@ -20,7 +20,7 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 产物：`build/client-windows/client/odyssey_client.exe`（另有 `odyssey_window_probe.exe` 纯窗口诊断程序）。
 
-本机若仍开着旧的 `build/client-windows` 客户端，不要将旧窗口当作已更新的新版本，也不要覆盖正在使用的 exe；请先关闭它们再使用下方独立中文联调目录。
+本机若仍开着旧客户端，不要将旧窗口当作已更新的新版本，也不要覆盖正在使用的 exe；本次积分榜与地图道具联调已构建至 `build/client-scoreboard/client/odyssey_client.exe`，请从此目录打开两份客户端。该版本包含团队评分、“再玩一把”，以及每关同步刷新的回血与武器道具。地图道具由服务端生成，更新代码后必须先停止旧 gameserver，再重新启动服务端；新版客户端若未收到道具，会在地图左上角直接提示。
 
 中文联调推荐用单独目录构建：`cmake --preset client-windows -B build/client-zh`，然后 `cmake --build build/client-zh --target odyssey_client`。双击 `build/client-zh/client/odyssey_client.exe` 可识别“奥德赛归途 · 中文测试版”的窗口标题。客户端从 Windows 已安装的黑体加载显示所需的中文字形，不复制或分发系统字体；中文装备名称从 `client/assets/equipment.zh-CN.json` 按权威装备 ID 生成并放在 exe 同目录。
 
@@ -31,7 +31,7 @@ ctest --test-dir build\client-windows -C Debug --output-on-failure
 ```
 
 四个无头套件：`odyssey_core_tests`（帧编解码/组帧/队列）、`odyssey_net_tests`（网络线程/断连/背压）、
-`odyssey_logic_tests`（输入、视图、战斗、奖励、恢复、预测/插值）、`odyssey_protocol_tests`（协议载荷往返）。
+`odyssey_logic_tests`（输入、视图、战斗、奖励、恢复、预测/插值、本局积分榜）、`odyssey_protocol_tests`（协议载荷往返）。
 
 ## 运行（本地联调）
 
@@ -47,7 +47,7 @@ build\client-zh\client\odyssey_client.exe
 
 当前功能分支正式入口已支持匹配、战斗、按玩家发放奖励、双人 Ready 和 Director 下一关，自动化 TCP 回归已走通第 1 关到第 2 关。两个真实客户端的三关流程、恢复和最终结算仍需联调，剩余需求见 [A / D 收尾清单](../docs/plans/WEEK2-AD-FINALIZATION.md)。
 
-首关现有 8 只怪物，怪物会在两名存活玩家间分配追击目标。战场四处掩体会阻挡移动和子弹，怪物会绕行；客户端保留短暂弹道轨迹，因此近距离命中也能看到射击反馈。
+首关现有 8 只怪物，怪物会在两名存活玩家间分配追击目标。每关开始时地图会刷新一个回血包和一个武器箱，靠近后自动拾取；回血包在满血时不会被浪费，所有地图道具由两名玩家共享。战场四处掩体会阻挡移动和子弹，怪物会绕行；客户端保留短暂弹道轨迹，因此近距离命中也能看到射击反馈。
 
 ## 操作
 
@@ -58,10 +58,11 @@ build\client-zh\client\odyssey_client.exe
 | `WASD` | 移动意图（30Hz 发送，只发意图不发坐标） |
 | 鼠标 | 瞄准方向（相对自身权威位置归一化） |
 | `SPACE` | 射击（按住持续开火，冷却由服务器决定） |
+| `Q` | 在战斗中使用已装备的治疗药剂；药剂消耗一次，生命值由服务器确认后更新 |
 | 点击奖励卡片，或主键盘/小键盘 `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | Reward 状态下“准备下一关”（Ready 屏障归服务器） |
 | `R` | 连接失败或断开后重新尝试连接，不能在团灭后重开本局 |
-| 点击“重新开局”或按 `N` | 团灭后为当前两名在线队友创建新房间，重置战斗与血量；无需重启服务器 |
+| 团灭后点“重新开局”、第三关胜利后点“再玩一把”，或按 `N` | 为当前两名在线队友创建新房间，从第一关重新开始；无需重启服务器 |
 | `F3` | 显示或隐藏开发诊断面板；普通玩家无需打开 |
 | `ESC` / 关闭按钮 | 停止网络线程并退出 |
 
@@ -73,7 +74,7 @@ Windows 玩家版默认以普通窗口程序启动，不再显示开发控制台
 
 - **Network Thread** 只做 Socket / 组帧 / 解码，向有界队列投递 `NetEvent`；**绝不**修改客户端世界或渲染状态。
 - **Main Thread** 每帧 Drain 队列、应用快照、绘制；所有权威状态来自服务器。
-- 客户端不发送坐标、命中或伤害结果；当前发送输入序号、时间、移动、瞄准与射击。协议已有 `use_potion`，但客户端键位/编码尚待补齐。
+- 客户端不发送坐标、命中或伤害结果；当前发送输入序号、时间、移动、瞄准、射击和单次药剂使用请求，最终效果仍由服务器决定。
 
 ## 已实现（第二周 D4–D9 客户端侧）
 

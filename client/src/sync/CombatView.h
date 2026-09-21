@@ -30,6 +30,15 @@ struct MonsterEntity {
     std::uint32_t state = 0;  // 0 idle / 1 chase / 2 attack / 3 dead
 };
 
+struct PickupEntity {
+    std::uint64_t id = 0;
+    std::uint32_t kind = 0;  // 1 health / 2 weapon
+    float x = 0.0f;
+    float z = 0.0f;
+    std::uint32_t equipment_id = 0;
+    float value = 0.0f;
+};
+
 struct ProjectileVisual {
     std::uint64_t id = 0;
     std::uint64_t owner_id = 0;
@@ -90,6 +99,16 @@ public:
 
     std::size_t MonsterCount() const { return monsters_.size(); }
     const std::map<std::uint64_t, MonsterEntity>& Monsters() const { return monsters_; }
+
+    void ApplyPickups(const std::vector<PickupEntity>& pickups) {
+        pickups_.clear();
+        for (const auto& pickup : pickups) {
+            pickups_[pickup.id] = pickup;
+        }
+    }
+
+    std::size_t PickupCount() const { return pickups_.size(); }
+    const std::map<std::uint64_t, PickupEntity>& Pickups() const { return pickups_; }
 
     // Spawn/destroy events are authoritative. A destroy can arrive in the same
     // network drain as its spawn; finish that short flight visually before
@@ -190,6 +209,7 @@ public:
 
     void Clear() {
         monsters_.clear();
+        pickups_.clear();
         projectiles_.clear();
         impacts_.clear();
         hit_flash_.clear();
@@ -201,6 +221,7 @@ private:
     static constexpr float kHitFlashSeconds = 0.35f;
 
     std::map<std::uint64_t, MonsterEntity> monsters_;
+    std::map<std::uint64_t, PickupEntity> pickups_;
     std::map<std::uint64_t, ProjectileVisual> projectiles_;
     std::vector<ProjectileImpact> impacts_;
     std::map<std::uint64_t, float> hit_flash_;

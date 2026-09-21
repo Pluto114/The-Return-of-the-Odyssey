@@ -462,16 +462,21 @@ func (a *gameApplication) firstStageSeed(roomID room.ID) int64 {
 	return int64(roomID)
 }
 
-// MatchRequest in a failed room is a team rematch. Only the server chooses the
+// MatchRequest in a terminal room is a team replay. Only the server chooses the
 // fresh room, seed and team; a client cannot reset a live encounter or choose
 // its own teammates. A single request moves both connected participants.
 func (a *gameApplication) handleRematchRequest(sess *session.Session, sequence uint32) error {
 	a.mu.Lock()
 	oldID := room.ID(sess.RoomID())
 	old := a.rooms[oldID]
-	if old == nil || old.rematching || old.room.LatestSnapshot().Stage.State != stage.Failed {
+	if old == nil || old.rematching {
 		a.mu.Unlock()
-		return nil // duplicate or a match request outside the failed phase
+		return nil // duplicate or an expired room
+	}
+	phase := old.room.LatestSnapshot().Stage.State
+	if phase != stage.Failed && !(phase == stage.StageClear && old.completed) {
+		a.mu.Unlock()
+		return nil // replay is forbidden during a live or unfinished stage
 	}
 	players := make([]*participant, 0, 2)
 	for conn, member := range a.connections {
@@ -651,7 +656,7 @@ func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
 		return 0, nil, err
 	}
 	roomID := room.ID(a.nextRoomID.Add(1))
-	rm, err := room.Start(a.ctx, roomID, a.roomConfig)
+	rm, err := room.Start(a.ctx, roomID, a.roomConfig, a.gameplay.Catalog())
 	if err != nil {
 		return 0, nil, err
 	}

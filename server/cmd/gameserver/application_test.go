@@ -91,7 +91,17 @@ func TestApplicationRecordsAuthoritativeCombatMetrics(t *testing.T) {
 func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	app, err := newGameApplication(ctx, logger, metrics.New())
+	cfg := config.Default()
+	catalogPath, err := filepath.Abs(filepath.Join("..", "..", "..", "data", "equipment", "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.EquipmentCatalogPath = catalogPath
+	gameplay, err := bootstrap.LoadGameplay(cfg, room.DefaultConfig().World)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := newConfiguredGameApplication(ctx, logger, metrics.New(), gameplay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +172,20 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 			var snapshot pb.WorldSnapshot
 			appRead(t, peers[i], pb.MessageType_MSG_WORLD_SNAPSHOT, &snapshot)
 			if snapshot.Self != nil && len(snapshot.Players) == 1 &&
+				len(snapshot.Pickups) == 2 &&
 				snapshot.Self.PlayerId == peers[i].id &&
 				(i != 0 || (snapshot.LastProcessedInput == 1 && snapshot.Self.Position.X > 10)) {
+				kinds := map[pb.PickupKind]bool{}
+				for _, pickup := range snapshot.Pickups {
+					kinds[pickup.Kind] = true
+				}
+				if !kinds[pb.PickupKind_PICKUP_KIND_HEALTH] || !kinds[pb.PickupKind_PICKUP_KIND_WEAPON] {
+					t.Fatalf("peer %d pickup kinds = %v, want health + weapon", i, kinds)
+				}
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("peer %d did not receive authoritative two-player movement", i)
+				t.Fatalf("peer %d did not receive movement plus two stage pickups", i)
 			}
 		}
 	}
@@ -403,6 +421,15 @@ func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
 }
 
 func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testing.T) {
+	testApplicationReplay(t, false)
+}
+
+func TestApplicationVictoryReplayMovesBothPlayersAndRestoresShooting(t *testing.T) {
+	testApplicationReplay(t, true)
+}
+
+func testApplicationReplay(t *testing.T, victory bool) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	app, err := newGameApplication(ctx, logger, metrics.New())
@@ -468,10 +495,14 @@ func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testin
 		old.events.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
 		old.close.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
 	}
-	// A trusted, lethal encounter makes the *real* room enter Failed quickly;
-	// the network request then exercises exactly the button's wire code path.
+	// A trusted encounter makes the real room terminal. The victory case marks
+	// completion exactly as beginRewardStage does after the final stage clear.
 	spawn := stage.Spawn{Position: app.roomConfig.World.Spawn, Radius: 0.4,
 		AttackRange: 1, Stats: entity.CombatStats{MaxHealth: 100, Attack: 1000, AttackCooldownTicks: 1}}
+	if victory {
+		spawn.Position = entity.Vec2{X: 13, Y: 10}
+		spawn.Stats = entity.CombatStats{MaxHealth: 1, AttackCooldownTicks: 30}
+	}
 	receipt, err := old.room.StartStage(stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{spawn}})
 	if err != nil {
 		t.Fatal(err)
@@ -479,15 +510,39 @@ func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testin
 	if err := <-receipt; err != nil {
 		t.Fatal(err)
 	}
+	if victory {
+		// A living room and an ordinary cleared stage must reject replay.
+		appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
+		appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 3,
+			&pb.PlayerInput{InputSeq: 1, Aim: &pb.Vec2{X: 1}, Shoot: true})
+	}
+	want := stage.Failed
+	if victory {
+		want = stage.StageClear
+	}
 	deadline := time.Now().Add(2 * time.Second)
-	for old.room.LatestSnapshot().Stage.State != stage.Failed && time.Now().Before(deadline) {
+	for old.room.LatestSnapshot().Stage.State != want && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if old.room.LatestSnapshot().Stage.State != stage.Failed {
-		t.Fatal("old match did not fail")
+	if old.room.LatestSnapshot().Stage.State != want {
+		t.Fatalf("old match did not reach %v", want)
 	}
-	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
-	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{}) // repeated click is idempotent
+	if victory {
+		appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 4, &pb.MatchRequest{})
+		// A Pong on the same connection orders the preceding MatchRequest
+		// before we simulate the final-stage completion callback.
+		appSend(t, peers[0], pb.MessageType_MSG_PING, 5, &pb.Ping{})
+		var pong pb.Pong
+		appRead(t, peers[0], pb.MessageType_MSG_PONG, &pong)
+		app.mu.Lock()
+		if old.rematching || len(app.rooms) != 1 {
+			t.Error("non-final cleared room admitted replay")
+		}
+		old.completed = true
+		app.mu.Unlock()
+	}
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 5, &pb.MatchRequest{})
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 6, &pb.MatchRequest{}) // repeated click is idempotent
 	var newID uint64
 	for i := range peers {
 		var found pb.MatchFound
@@ -522,8 +577,8 @@ func TestApplicationOneClickRematchMovesBothPlayersAndRestoresShooting(t *testin
 			}
 		}
 	}
-	appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 4,
-		&pb.PlayerInput{InputSeq: 1, Aim: &pb.Vec2{X: 1}, Shoot: true})
+	appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 7,
+		&pb.PlayerInput{InputSeq: 2, Aim: &pb.Vec2{X: 1}, Shoot: true})
 	for i := range peers {
 		var spawned pb.ProjectileSpawnEvent
 		appRead(t, peers[i], pb.MessageType_MSG_PROJECTILE_SPAWN, &spawned)
