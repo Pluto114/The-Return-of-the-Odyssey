@@ -9,22 +9,21 @@ import (
 	"testing"
 )
 
-// goldPing is the golden frame from docs/protocol/frame.md sample 1:
-// Ping(client_time_ms=1, nonce=2).
+// goldPing 是 docs/protocol/frame.md 样例 1 的标准帧：Ping(client_time_ms=1, nonce=2)。
 var goldPing = []byte{
-	0x4E, 0x52, // Magic
-	0x01, // Version
-	0x00, // Flags
-	0x00, 0x01, // MessageType = MSG_PING (1)
-	0x00, 0x00, // Reserved
-	0x00, 0x00, 0x00, 0x04, // BodyLength = 4
-	0x00, 0x00, 0x00, 0x01, // Sequence = 1
-	0x08, 0x01, // field 1 varint = 1
-	0x10, 0x02, // field 2 varint = 2
+	0x4E, 0x52, // 魔数
+	0x01,       // 版本
+	0x00,       // 标志位
+	0x00, 0x01, // 消息类型为 MSG_PING（1）
+	0x00, 0x00, // 保留字段
+	0x00, 0x00, 0x00, 0x04, // 消息体长度为 4
+	0x00, 0x00, 0x00, 0x01, // 序号为 1
+	0x08, 0x01, // 字段 1 的 varint 值为 1
+	0x10, 0x02, // 字段 2 的 varint 值为 2
 }
 
 func TestGoldenSample(t *testing.T) {
-	// Decode the golden frame and verify every header field.
+	// 解码标准帧并校验每个帧头字段。
 	r := bufio.NewReader(bytes.NewReader(goldPing))
 	h, body, err := ReadFrame(r)
 	if err != nil {
@@ -49,7 +48,7 @@ func TestGoldenSample(t *testing.T) {
 		t.Errorf("body = % X, want 08 01 10 02", body)
 	}
 
-	// Re-encode and confirm byte-for-byte identity with the golden sample.
+	// 重新编码并确认与标准样例逐字节一致。
 	got, err := EncodeFrame(h, body)
 	if err != nil {
 		t.Fatalf("EncodeFrame = %v", err)
@@ -63,10 +62,10 @@ func TestRoundTrip(t *testing.T) {
 	h := Header{
 		Magic:       Magic,
 		Version:     VersionV1,
-		MessageType: 300, // PlayerInput
+		MessageType: 300, // 玩家输入
 		Sequence:    7,
 	}
-	body := []byte{0x0A, 0x02, 0x3D, 0x00} // arbitrary payload
+	body := []byte{0x0A, 0x02, 0x3D, 0x00} // 任意消息体
 
 	encoded, err := EncodeFrame(h, body)
 	if err != nil {
@@ -89,8 +88,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPartialRead feeds the frame one byte at a time to prove ReadFrame
-// correctly accumulates across short reads (T02).
+// TestPartialRead 每次只提供一个字节，验证 ReadFrame 能正确累积短读。
 func TestPartialRead(t *testing.T) {
 	encoded, err := EncodeFrame(Header{Magic: Magic, Version: VersionV1, MessageType: 2, Sequence: 9}, []byte{0x01, 0x02, 0x03})
 	if err != nil {
@@ -110,8 +108,7 @@ func TestPartialRead(t *testing.T) {
 	}
 }
 
-// TestStickyPackets feeds 100 concatenated frames and verifies each is decoded
-// exactly once, in order (T02).
+// TestStickyPackets 提供 100 个拼接帧，验证每帧都按序且只解码一次。
 func TestStickyPackets(t *testing.T) {
 	const n = 100
 	var buf bytes.Buffer
@@ -136,7 +133,7 @@ func TestStickyPackets(t *testing.T) {
 		}
 	}
 
-	// EOF should be clean now (no extra frame).
+	// 此时应干净 EOF，不能多出一帧。
 	if _, _, err := ReadFrame(r); err != io.EOF {
 		t.Errorf("after %d frames, want io.EOF, got %v", n, err)
 	}
@@ -183,8 +180,7 @@ func TestFrameTooLarge(t *testing.T) {
 		t.Errorf("EncodeFrame err = %v, want ErrFrameTooLarge", err)
 	}
 
-	// Inbound: declare an oversized BodyLength and confirm ReadFrame rejects
-	// it WITHOUT trying to read that many bytes (input is short).
+	// 入站帧声明超大 BodyLength，确认 ReadFrame 在尝试读取对应字节前就拒绝。
 	var buf bytes.Buffer
 	hb := make([]byte, HeaderLen)
 	binary.BigEndian.PutUint16(hb[0:2], Magic)
@@ -200,8 +196,7 @@ func TestFrameTooLarge(t *testing.T) {
 }
 
 func TestHalfPacketEOF(t *testing.T) {
-	// A header followed by only half a body must end in an error (io.EOF),
-	// never a panic or a partial frame (T02).
+	// 帧头后只有半个消息体必须返回 io.EOF，不能 panic 或返回半帧。
 	r := bufio.NewReader(bytes.NewReader(goldPing[:HeaderLen+2]))
 	_, _, err := ReadFrame(r)
 	if err == nil {
@@ -209,8 +204,7 @@ func TestHalfPacketEOF(t *testing.T) {
 	}
 }
 
-// TestBufferGrowth exercises repeated reads on a persistent reader to ensure
-// the reader does not hold stale state across frames of differing sizes.
+// TestBufferGrowth 在同一 Reader 上重复读取不同大小帧，确认不会保留旧状态。
 func TestBufferGrowth(t *testing.T) {
 	var buf bytes.Buffer
 	sizes := []int{0, 1, 4, 64, 1024, 65536}
@@ -236,7 +230,7 @@ func TestBufferGrowth(t *testing.T) {
 	}
 }
 
-// oneByteReader drips bytes one at a time to force partial-read paths.
+// oneByteReader 每次只放出一个字节，强制覆盖半包读取路径。
 type oneByteReader struct {
 	data []byte
 	pos  int

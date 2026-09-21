@@ -2,10 +2,8 @@ package main
 
 import "sync"
 
-// deferredEventSink keeps the first authoritative StageStarted (and any
-// following reliable events) ordered behind MatchFound during initial matching
-// and team rematching.
-// Send is called by the room's sole dispatcher; Release may run concurrently.
+// deferredEventSink 在首次匹配和重赛时，把首个权威 StageStarted 及后续可靠事件排在
+// MatchFound 之后。Send 由房间唯一分发器调用，Release 可并发执行。
 type deferredEventSink struct {
 	mu         sync.Mutex
 	downstream closingSink
@@ -26,7 +24,7 @@ func (s *deferredEventSink) Send(frame []byte) bool {
 		return s.downstream.Send(frame)
 	}
 	if len(s.pending) == maxDeferredEvents {
-		// Reliable events cannot be silently dropped while the new room starts.
+		// 新房间启动期间不能静默丢弃可靠事件。
 		go s.downstream.connection.Close()
 		return false
 	}
@@ -39,7 +37,7 @@ func (s *deferredEventSink) Release() {
 	defer s.mu.Unlock()
 	for _, frame := range s.pending {
 		if !s.downstream.Send(frame) {
-			break // closingSink closes a saturated/closed connection
+			break // closingSink 负责关闭饱和或已失效连接
 		}
 	}
 	s.pending = nil

@@ -10,8 +10,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
 
-// startRoom starts a room under synctest's fake clock and waits for its owner
-// goroutine to come up.
+// startRoom 在 synctest 假时钟下启动房间，并等待所属 goroutine 就绪。
 func startRoom(t *testing.T, id room.ID) *room.Room {
 	t.Helper()
 	r, err := room.Start(context.Background(), id, room.DefaultConfig())
@@ -22,8 +21,7 @@ func startRoom(t *testing.T, id room.ID) *room.Room {
 	return r
 }
 
-// newMatchingSession builds a logged-in session in the Matching state with the
-// given IDs, ready to join a room.
+// newMatchingSession 使用给定 ID 构造已登录且处于 Matching 的 Session，准备加入房间。
 func newMatchingSession(sessionID, playerID uint64) *session.Session {
 	s := session.New()
 	s.AssignIdentity(sessionID, playerID)
@@ -47,8 +45,7 @@ func TestJoinTransitionsToInRoomOnNilReceipt(t *testing.T) {
 		if got := s.RoomID(); got != 1 {
 			t.Fatalf("RoomID = %d, want 1", got)
 		}
-		// The receipt is sent while the room applies the control. Stats is
-		// published at the end of that tick, so wait for the owner to finish.
+		// 房间应用控制时发送回执，Stats 在 Tick 末发布，因此等待房间完成本帧。
 		synctest.Wait()
 		if r.Stats().Players != 1 {
 			t.Fatalf("room players = %d, want 1", r.Stats().Players)
@@ -59,7 +56,7 @@ func TestJoinTransitionsToInRoomOnNilReceipt(t *testing.T) {
 func TestJoinDoesNotTransitionWhenAdmissionFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := startRoom(t, 1)
-		// Close the room so Join admission returns room.ErrClosed.
+		// 关闭房间，使 Join 入队返回 room.ErrClosed。
 		r.Close()
 
 		s := newMatchingSession(11, 101)
@@ -107,7 +104,7 @@ func TestLeaveIsIdempotent(t *testing.T) {
 		if err := Join(s, r, 1); err != nil {
 			t.Fatalf("Join() error = %v", err)
 		}
-		// Second leave on an already-left session must not error.
+		// 已离开 Session 再次离开不能报错。
 		if err := Leave(s, r); err != nil {
 			t.Fatalf("first Leave() error = %v", err)
 		}
@@ -125,13 +122,12 @@ func TestJoinDuplicateSessionIsRejectedByRoom(t *testing.T) {
 		r := startRoom(t, 1)
 		defer r.Close()
 
-		// First session binds session 11 -> player 101.
+		// 第一个 Session 建立 session 11 -> player 101 绑定。
 		s1 := newMatchingSession(11, 101)
 		if err := Join(s1, r, 1); err != nil {
 			t.Fatalf("Join(s1) error = %v", err)
 		}
-		// A second session with the same sessionID but a different playerID
-		// must be rejected by the room (session already bound).
+		// 第二个 Session 使用相同 sessionID 但不同 playerID，必须因已绑定而被拒绝。
 		s2 := newMatchingSession(11, 202)
 		if err := Join(s2, r, 1); !errors.Is(err, room.ErrSessionBound) {
 			t.Fatalf("Join(s2) error = %v, want room.ErrSessionBound", err)

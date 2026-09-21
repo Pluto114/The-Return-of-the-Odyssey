@@ -15,11 +15,11 @@ func TestInitialStateIsConnected(t *testing.T) {
 
 func TestLoginOnlyInConnected(t *testing.T) {
 	s := New()
-	// LoginRequest legal in CONNECTED.
+	// LoginRequest 在 CONNECTED 合法。
 	if ok, _ := s.Accept(protocol.MessageType_MSG_LOGIN_REQUEST); !ok {
 		t.Fatal("LoginRequest should be accepted in connected state")
 	}
-	// PlayerInput illegal in CONNECTED (T04).
+	// PlayerInput 在 CONNECTED 非法。
 	if ok, reason := s.Accept(protocol.MessageType_MSG_PLAYER_INPUT); ok {
 		t.Fatal("PlayerInput should be rejected in connected state")
 	} else if reason != protocol.ReasonCode_REASON_INVALID_STATE {
@@ -28,7 +28,7 @@ func TestLoginOnlyInConnected(t *testing.T) {
 }
 
 func TestInputRejectedBeforeInRoom(t *testing.T) {
-	// Lobby: login ok, but input still illegal.
+	// Lobby：已登录，但输入仍非法。
 	s := New()
 	s.AssignIdentity(1, 100)
 	if !s.Transition(StateLobby) {
@@ -38,7 +38,7 @@ func TestInputRejectedBeforeInRoom(t *testing.T) {
 		t.Fatal("PlayerInput should be rejected in lobby")
 	}
 
-	// Matching: still illegal.
+	// Matching：仍然非法。
 	if !s.Transition(StateMatching) {
 		t.Fatal("transition lobby->matching failed")
 	}
@@ -46,7 +46,7 @@ func TestInputRejectedBeforeInRoom(t *testing.T) {
 		t.Fatal("PlayerInput should be rejected in matching")
 	}
 
-	// InRoom: legal now.
+	// InRoom：此时合法。
 	if !s.Transition(StateInRoom) {
 		t.Fatal("transition matching->in_room failed")
 	}
@@ -84,7 +84,7 @@ func TestRewardAcceptsInFlightPlayerInputForSafeApplicationDrop(t *testing.T) {
 func TestPingAlwaysAcceptedUntilDisconnect(t *testing.T) {
 	s := New()
 	for _, st := range []State{StateConnected, StateLobby, StateMatching, StateInRoom, StateReward} {
-		// drive state forward via allowed transitions
+		// 通过允许的迁移向前推进状态
 		switch st {
 		case StateLobby:
 			s.Transition(StateLobby)
@@ -129,7 +129,7 @@ func TestClosedIsTerminal(t *testing.T) {
 	if !s.Transition(StateClosed) {
 		t.Fatal("lobby->closed failed")
 	}
-	// No transition out of closed.
+	// Closed 之后不允许任何迁移。
 	if s.Transition(StateInRoom) {
 		t.Fatal("closed->in_room should be impossible")
 	}

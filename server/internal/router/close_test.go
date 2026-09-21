@@ -25,8 +25,8 @@ func TestCloseReasonCode(t *testing.T) {
 		{"requested", protocol.ReasonCode_REASON_ROOM_CLOSED},
 		{"idle", protocol.ReasonCode_REASON_ROOM_IDLE},
 		{"event_backpressure", protocol.ReasonCode_REASON_EVENT_BACKPRESSURE},
-		{"", protocol.ReasonCode_REASON_ROOM_CLOSED},          // unknown -> generic close
-		{"bogus", protocol.ReasonCode_REASON_ROOM_CLOSED},     // unknown -> generic close
+		{"", protocol.ReasonCode_REASON_ROOM_CLOSED},      // 未知原因映射为通用关闭
+		{"bogus", protocol.ReasonCode_REASON_ROOM_CLOSED}, // 未知原因映射为通用关闭
 	}
 	for _, c := range cases {
 		if got := CloseReasonCode(c.reason); got != c.want {
@@ -89,11 +89,11 @@ func TestCloseWatcherNotifiesOnClose(t *testing.T) {
 			close(done)
 		}()
 
-		// Close the room; it shuts down with reason "requested".
+		// 关闭房间，应以 requested 原因停机。
 		r.Close()
 		<-done
 
-		// The subscriber received a Disconnect frame.
+		// 订阅者应收到 Disconnect 帧。
 		if len(sink.frames) != 1 {
 			t.Fatalf("frames = %d, want 1", len(sink.frames))
 		}
@@ -112,7 +112,7 @@ func TestCloseWatcherNotifiesOnClose(t *testing.T) {
 			t.Errorf("Reason = %v, want REASON_ROOM_CLOSED (requested)", d.Reason)
 		}
 
-		// The callback fired with the room ID and reason.
+		// 回调应携带 roomID 与原因触发。
 		mu.Lock()
 		if !callbackHit {
 			t.Error("onClose callback not fired")
@@ -147,9 +147,8 @@ func TestCloseWatcherNoSinkStillFiresCallback(t *testing.T) {
 	})
 }
 
-// TestCloseWatcherSaturationLogsCorrelation verifies D5 observability: when a
-// player's reliable queue rejects the terminal Disconnect frame, the watcher
-// logs the owning room and the affected player instead of silently dropping it.
+// TestCloseWatcherSaturationLogsCorrelation 验证：玩家可靠队列拒绝最终 Disconnect 时，
+// 观察器记录所属房间和受影响玩家，而不是静默丢弃。
 func TestCloseWatcherSaturationLogsCorrelation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r, err := room.Start(context.Background(), 9, room.DefaultConfig())
@@ -161,8 +160,8 @@ func TestCloseWatcherSaturationLogsCorrelation(t *testing.T) {
 		var buf bytes.Buffer
 		w := NewCloseWatcher()
 		w.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
-		w.Subscribe(101, &eventRecordingSink{}) // healthy
-		w.Subscribe(102, &rejectingSink{})      // saturated -> Send=false
+		w.Subscribe(101, &eventRecordingSink{}) // 健康连接
+		w.Subscribe(102, &rejectingSink{})      // 饱和并返回 false
 
 		done := make(chan struct{})
 		go func() { w.Run(r); close(done) }()

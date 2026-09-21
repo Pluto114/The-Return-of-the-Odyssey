@@ -1,5 +1,4 @@
-// core-demo runs deterministic, headless B-module combat. It does not start a
-// network server or represent a real client/Bot integration or load test.
+// core-demo 运行确定性的无界面战斗，不启动网络服务，也不代表真实客户端、机器人集成或压测。
 package main
 
 import (
@@ -15,8 +14,7 @@ import (
 
 func run() error {
 	config := game.DefaultConfig()
-	// The fixed-position offline shooter exercises combat math and stage
-	// completion; arena cover is exercised by the game arena tests.
+	// 固定位置的离线射击用于验证战斗计算与关卡完成；地图掩体由 arena 测试覆盖。
 	config.CoverEnabled = false
 	w, err := game.NewWorld(config)
 	if err != nil {

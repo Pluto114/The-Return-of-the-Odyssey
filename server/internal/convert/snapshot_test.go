@@ -36,18 +36,18 @@ func TestWorldSnapshotSeparatesSelfFromOthers(t *testing.T) {
 	if out.LastProcessedInput != 7 {
 		t.Errorf("LastProcessedInput = %d, want 7 (self's ack)", out.LastProcessedInput)
 	}
-	// Self must be player 1.
+	// Self 必须是玩家 1。
 	if out.Self == nil || out.Self.PlayerId != 1 {
 		t.Fatalf("Self = %v, want player 1", out.Self)
 	}
 	if out.Self.Hp != 80 || out.Self.Alive != true {
 		t.Errorf("Self hp/alive = %v/%v, want 80/true", out.Self.Hp, out.Self.Alive)
 	}
-	// Others must contain only player 2.
+	// 其他玩家只能包含玩家 2。
 	if len(out.Players) != 1 || out.Players[0].PlayerId != 2 {
 		t.Fatalf("Players = %v, want only player 2", out.Players)
 	}
-	// Monsters and stage.
+	// 校验怪物与关卡。
 	if len(out.Monsters) != 1 || out.Monsters[0].State != uint32(entity.MonsterChase) {
 		t.Fatalf("Monsters = %v, want 1 chasing monster", out.Monsters)
 	}
@@ -61,7 +61,7 @@ func TestWorldSnapshotAbsentSelf(t *testing.T) {
 		ServerTick: 1,
 		Players:    []entity.Player{{ID: 2, CurrentStats: stats(1, 1, 1, 1)}},
 	}
-	out := WorldSnapshot(s, 99) // self not present
+	out := WorldSnapshot(s, 99) // 接收者不存在
 	if out.Self != nil {
 		t.Errorf("Self = %v, want nil when absent", out.Self)
 	}
@@ -98,7 +98,7 @@ func TestPlayerSnapshotFieldMapping(t *testing.T) {
 	if out.Hp != 150 || out.MaxHp != 200 {
 		t.Errorf("Hp/MaxHp = %v/%v, want 150/200", out.Hp, out.MaxHp)
 	}
-	// CurrentStats (resolved), not BaseStats, drive the combat row.
+	// 战斗记录必须使用已结算的 CurrentStats，而不是 BaseStats。
 	if out.Attack != 35 || out.Defense != 12 || out.MoveSpeed != 6.5 {
 		t.Errorf("stats = %v/%v/%v, want CurrentStats 35/12/6.5", out.Attack, out.Defense, out.MoveSpeed)
 	}

@@ -29,9 +29,8 @@ var (
 	matchIDPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 )
 
-// ResultEnvelope adds D's stable cross-retry identity and Room correlation to
-// B's detached GameResult. MatchID must be generated before Room teardown and
-// reused unchanged for every delivery retry.
+// ResultEnvelope 为独立 GameResult 增加跨重试稳定身份与 Room 关联。MatchID 必须在 Room
+// 清理前生成，并在每次投递重试中保持不变。
 type ResultEnvelope struct {
 	MatchID   string          `json:"match_id"`
 	RoomID    uint64          `json:"room_id"`

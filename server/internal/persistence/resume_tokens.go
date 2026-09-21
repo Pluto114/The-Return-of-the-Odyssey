@@ -32,8 +32,7 @@ var (
 
 const ResumeRouteVersion = 1
 
-// ResumeRoute is the minimum durable binding needed to find the live Session
-// and Room after a reconnect. It never contains a World snapshot.
+// ResumeRoute 是重连后定位在线 Session 与 Room 所需的最小持久绑定，不包含 World 快照。
 type ResumeRoute struct {
 	Version    uint8  `json:"version"`
 	SessionID  uint64 `json:"session_id"`
@@ -49,16 +48,14 @@ func (r ResumeRoute) Validate() error {
 	return nil
 }
 
-// ResumeTokenStore persists one-time resume tokens in Redis. Tokens and
-// session keys are opaque; the session module owns their format and meaning.
+// ResumeTokenStore 在 Redis 中保存一次性恢复令牌；令牌和会话键均为不透明值。
 type ResumeTokenStore struct {
 	client *redis.Client
 	ttl    time.Duration
 }
 
-// NewResumeTokenStore creates a Redis-backed token store. The TTL is applied
-// by Redis when Issue succeeds, so abandoned tokens expire without cleanup by
-// the gameserver process.
+// NewResumeTokenStore 创建 Redis 令牌存储。Issue 成功时由 Redis 设置 TTL，废弃令牌无需
+// 服务端进程主动清理也会自动过期。
 func NewResumeTokenStore(client *redis.Client, ttl time.Duration) (*ResumeTokenStore, error) {
 	if client == nil {
 		return nil, ErrInvalidRedisClient
@@ -70,8 +67,7 @@ func NewResumeTokenStore(client *redis.Client, ttl time.Duration) (*ResumeTokenS
 	return &ResumeTokenStore{client: client, ttl: ttl}, nil
 }
 
-// Issue associates a new token with a session key until the configured TTL.
-// Existing tokens are never overwritten.
+// Issue 在 TTL 内把新令牌关联到会话键，已存在令牌不会被覆盖。
 func (s *ResumeTokenStore) Issue(ctx context.Context, token, sessionKey string) error {
 	if !validOpaqueValue(token, maxResumeTokenBytes) {
 		return ErrInvalidResumeToken
@@ -90,8 +86,7 @@ func (s *ResumeTokenStore) Issue(ctx context.Context, token, sessionKey string) 
 	return nil
 }
 
-// Consume atomically returns and deletes a token's session key. Concurrent or
-// repeated consumers therefore cannot resume the same token twice.
+// Consume 原子地返回并删除令牌对应的会话键，并发或重复请求无法用同一令牌恢复两次。
 func (s *ResumeTokenStore) Consume(ctx context.Context, token string) (string, error) {
 	if !validOpaqueValue(token, maxResumeTokenBytes) {
 		return "", ErrInvalidResumeToken
@@ -107,8 +102,7 @@ func (s *ResumeTokenStore) Consume(ctx context.Context, token string) (string, e
 	return sessionKey, nil
 }
 
-// IssueRoute stores a validated, versioned Session/Player/Room binding using
-// the same SETNX+TTL semantics as Issue.
+// IssueRoute 使用与 Issue 相同的 SETNX+TTL 语义，保存已校验、带版本的绑定关系。
 func (s *ResumeTokenStore) IssueRoute(ctx context.Context, token string, route ResumeRoute) error {
 	if err := route.Validate(); err != nil {
 		return err
@@ -120,8 +114,7 @@ func (s *ResumeTokenStore) IssueRoute(ctx context.Context, token string, route R
 	return s.Issue(ctx, token, string(payload))
 }
 
-// ConsumeRoute atomically consumes a token before decoding its route. A
-// corrupt backend value cannot be replayed after it is detected.
+// ConsumeRoute 在解码路由前先原子消费令牌；发现损坏值后也无法再次重放。
 func (s *ResumeTokenStore) ConsumeRoute(ctx context.Context, token string) (ResumeRoute, error) {
 	payload, err := s.Consume(ctx, token)
 	if err != nil {
@@ -137,8 +130,7 @@ func (s *ResumeTokenStore) ConsumeRoute(ctx context.Context, token string) (Resu
 	return route, nil
 }
 
-// Revoke removes a token during permanent leave or logout. It is idempotent;
-// absence is already the desired state.
+// Revoke 在永久离开或注销时移除令牌，操作幂等；令牌不存在本身就是目标状态。
 func (s *ResumeTokenStore) Revoke(ctx context.Context, token string) error {
 	if !validOpaqueValue(token, maxResumeTokenBytes) {
 		return ErrInvalidResumeToken

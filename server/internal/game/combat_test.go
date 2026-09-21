@@ -152,7 +152,7 @@ func TestShootingReleaseTimeoutAndInvalidAim(t *testing.T) {
 func TestFastProjectileHitsNearestOnly(t *testing.T) {
 	c := game.DefaultConfig()
 	c.Combat.ProjectileSpeed = 300
-	// Deliberately allocate the farther target first: IDs must not override distance.
+	// 故意先分配较远目标，ID 顺序不能覆盖距离优先级。
 	w := encounter(t, c, target(17, 10, 100), target(13, 10, 100))
 	stepInput(t, w, game.Input{Seq: 1, Aim: entity.Vec2{X: 1}, Shoot: true})
 	m := w.Snapshot().Monsters
@@ -169,8 +169,7 @@ func TestMovingTargetUsesRelativeSweep(t *testing.T) {
 	m.AttackRange = 0
 	w := encounter(t, c, m)
 	stepInput(t, w, game.Input{Seq: 1, Aim: entity.Vec2{X: 1}, Shoot: true})
-	// Monster reaches the bullet's starting point after the bullet has left.
-	// Testing only the monster's final position would falsely report a hit.
+	// 子弹离开后怪物才到达其起点；若只检测怪物最终位置会误报命中。
 	if w.Snapshot().Monsters[0].Health != 100 {
 		t.Fatal("false hit on a moving target")
 	}

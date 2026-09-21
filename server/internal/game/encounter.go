@@ -44,8 +44,7 @@ func NewFirstStagePlan(config Config, seed int64) (stage.Plan, error) {
 		step = 5
 	}
 
-	// Prefer positions away from the shared player spawn. The fallback keeps
-	// the builder valid for unusually small or custom arenas.
+	// 优先选择远离公共玩家出生点的位置；后备方案保证极小或自定义地图仍可生成。
 	minimumDistance := math.Min(width, height) * 0.20
 	ordered := make([]entity.Vec2, 0, len(candidates))
 	deferred := make([]entity.Vec2, 0, len(candidates))

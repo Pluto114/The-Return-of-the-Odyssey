@@ -22,9 +22,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// This test-only assembly reuses A's TCP codec, login handlers, Session,
-// convert and dispatchers with B's Room. Fixed room assignment replaces D's
-// missing matchmaker; it is not a production matcher or a C++ client test.
+// 该测试装配复用 TCP 编解码、登录 handler、Session、convert、分发器和 Room。
+// 固定房间分配代替匹配器；它既不是生产匹配器，也不是 C++ 客户端测试。
 func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r, err := room.Start(ctx, 99, room.DefaultConfig())
@@ -61,7 +60,7 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 			if err := router.Join(sess, r, 99); err != nil {
 				return err
 			}
-			// Queue MatchFound before subscribing the connection to room output.
+			// 先把 MatchFound 入队，再让连接订阅房间输出。
 			if err := sendMessage(c, h, pb.MessageType_MSG_MATCH_FOUND, &pb.MatchFound{RoomId: 99}); err != nil {
 				return err
 			}

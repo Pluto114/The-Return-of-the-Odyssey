@@ -1,4 +1,4 @@
-// Package lobby owns matchmaking state and policy.
+// Package lobby 管理匹配队列状态与策略。
 package lobby
 
 import (
@@ -13,17 +13,15 @@ var (
 	ErrPlayerAlreadyQueued    = errors.New("player is already queued")
 )
 
-// PlayerID is the stable player identity supplied by the session module.
-// Lobby treats it as opaque and does not normalize it.
+// PlayerID 是 Session 模块提供的稳定身份；Lobby 把它视为不透明值且不做归一化。
 type PlayerID string
 
-// Match is a complete FIFO group ready for the room module to accept.
-// Players is owned by the caller and may be modified after Enqueue returns.
+// Match 是可交给 Room 接收的完整 FIFO 小队；Enqueue 返回后 Players 由调用方拥有。
 type Match struct {
 	Players []PlayerID
 }
 
-// Found reports whether Enqueue formed a complete match.
+// Found 表示 Enqueue 是否成功组成完整对局。
 func (m Match) Found() bool {
 	return len(m.Players) != 0
 }
@@ -39,8 +37,7 @@ type Matchmaker struct {
 	queued          map[PlayerID]*list.Element
 }
 
-// NewMatchmaker creates an empty matcher. A match size of zero or less is
-// rejected because it cannot produce a meaningful group.
+// NewMatchmaker 创建空匹配器；人数小于 1 无法形成有效小队，会被拒绝。
 func NewMatchmaker(playersPerMatch int) (*Matchmaker, error) {
 	if playersPerMatch <= 0 {
 		return nil, ErrInvalidPlayersPerMatch
@@ -53,8 +50,7 @@ func NewMatchmaker(playersPerMatch int) (*Matchmaker, error) {
 	}, nil
 }
 
-// Enqueue adds a player once. It returns an empty Match while the queue is
-// incomplete, or removes and returns the oldest complete group.
+// Enqueue 只加入玩家一次；人数不足时返回空 Match，足够时移除并返回最早的一组。
 func (m *Matchmaker) Enqueue(player PlayerID) (Match, error) {
 	if player == "" {
 		return Match{}, ErrInvalidPlayerID
@@ -86,8 +82,7 @@ func (m *Matchmaker) Enqueue(player PlayerID) (Match, error) {
 	return Match{Players: players}, nil
 }
 
-// Cancel removes a waiting player. It returns false after the player has
-// already matched or when the player was never queued.
+// Cancel 移除等待玩家；玩家已匹配或从未排队时返回 false。
 func (m *Matchmaker) Cancel(player PlayerID) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -102,7 +97,7 @@ func (m *Matchmaker) Cancel(player PlayerID) bool {
 	return true
 }
 
-// Waiting returns the number of players currently queued.
+// Waiting 返回当前排队人数。
 func (m *Matchmaker) Waiting() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

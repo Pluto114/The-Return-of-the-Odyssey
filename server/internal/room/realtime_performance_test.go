@@ -16,8 +16,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
-// This real-time gate is opt-in because it intentionally occupies ten seconds
-// and measures the host scheduler. The D9 benchmark script enables it.
+// 该实时门禁默认关闭，因为会占用十秒并测量宿主调度器；基准脚本会显式启用。
 func TestRealtimeTickCadenceUnder50RoomCombat(t *testing.T) {
 	if os.Getenv("ODYSSEY_D9_REALTIME") != "1" {
 		t.Skip("set ODYSSEY_D9_REALTIME=1 to run the D9 scheduler gate")

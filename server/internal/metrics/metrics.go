@@ -1,4 +1,4 @@
-// Package metrics owns metric names, labels, and Prometheus exposition.
+// Package metrics 统一管理指标名称、标签和 Prometheus 输出。
 package metrics
 
 import (
@@ -23,8 +23,7 @@ var (
 	ErrInvalidQueueSnapshot   = errors.New("queue metric snapshot values must not be negative")
 )
 
-// ReconnectResult is a bounded label value. Keeping this set closed prevents
-// client-controlled values from creating unbounded Prometheus series.
+// ReconnectResult 是有限集合标签，防止客户端输入制造无限数量的 Prometheus 时间序列。
 type ReconnectResult string
 
 const (
@@ -34,21 +33,20 @@ const (
 	ReconnectBackendError ReconnectResult = "backend_error"
 )
 
-// Snapshot contains current server state sampled by the integration layer.
+// Snapshot 保存集成层采样到的当前服务端状态。
 type Snapshot struct {
 	OnlinePlayers     int
 	ActiveRooms       int
 	MatchQueuePlayers int
 }
 
-// CombatSnapshot contains current combat entity counts supplied by the Room
-// metrics adapter. Values must come from authoritative Room state.
+// CombatSnapshot 保存 Room 指标适配器提供的当前战斗实体数量，数值必须来自权威房间状态。
 type CombatSnapshot struct {
 	ActiveMonsters    int
 	ActiveProjectiles int
 }
 
-// StageResult is a bounded label value for terminal stage outcomes.
+// StageResult 是表示关卡终局结果的有限集合标签。
 type StageResult string
 
 const (
@@ -56,8 +54,8 @@ const (
 	StageResultDefeated StageResult = "defeated"
 )
 
-// RewardResult is deliberately closed: equipment IDs, player IDs and error
-// text belong in logs/Admin queries, never in Prometheus labels.
+// RewardResult 刻意限制为固定集合；装备 ID、玩家 ID 和错误文本只能写日志或管理查询，
+// 不能进入 Prometheus 标签。
 type RewardResult string
 
 const (
@@ -67,9 +65,8 @@ const (
 	RewardInvalid   RewardResult = "invalid"
 )
 
-// DirectorSample contains the inputs and output of one successfully applied
-// authoritative Director decision. Room/stage/seed correlation is retained by
-// the Admin event log instead of becoming a high-cardinality metric label.
+// DirectorSample 保存一次已成功应用的权威导演决策输入与输出。room/stage/seed 等关联信息
+// 写入管理事件日志，不作为高基数指标标签。
 type DirectorSample struct {
 	Duration           time.Duration
 	ClearTimeSeconds   float64
@@ -84,16 +81,14 @@ type DirectorSample struct {
 	MonsterCount       int
 }
 
-// QueueSnapshot is the current aggregate queue depth across live rooms and
-// connections. Cumulative rejection/drop totals are observed separately.
+// QueueSnapshot 是所有在线房间和连接的当前聚合队列深度；累计拒绝/丢弃数另行观测。
 type QueueSnapshot struct {
 	RoomControlDepth     int
 	RoomInputDepth       int
 	NetworkReliableDepth int
 }
 
-// QueueDelta contains monotonic deltas derived by the integration layer from
-// authoritative Room and network counters.
+// QueueDelta 保存集成层根据 Room 与网络权威计数器计算出的单调增量。
 type QueueDelta struct {
 	RoomRejections          uint64
 	RejectedInputs          uint64
@@ -114,8 +109,7 @@ type ResultWriterSnapshot struct {
 	DeadLetterFailures uint64
 }
 
-// Metrics centralizes the project's collector definitions and registry. Its
-// methods are safe for concurrent use through the Prometheus collectors.
+// Metrics 集中保存项目的采集器定义与注册表；底层 Prometheus 采集器保证方法并发安全。
 type Metrics struct {
 	registry *prometheus.Registry
 
@@ -156,9 +150,7 @@ type Metrics struct {
 	resultWrites                *prometheus.CounterVec
 }
 
-// New creates an isolated registry containing Go/process collectors and the
-// Odyssey application metrics. Isolation avoids duplicate registration in
-// tests and when multiple gameserver instances share one process.
+// New 创建包含 Go/进程采集器和游戏指标的独立注册表，避免测试或同进程多实例重复注册。
 func New() *Metrics {
 	registry := prometheus.NewRegistry()
 	result := &Metrics{
@@ -341,21 +333,20 @@ func newCounter(name, help string) prometheus.Counter {
 	return prometheus.NewCounter(prometheus.CounterOpts{Namespace: "odyssey", Name: name, Help: help})
 }
 
-// ObserveTickWork records one room tick's active work duration.
+// ObserveTickWork 记录一次房间 Tick 的实际工作耗时。
 func (m *Metrics) ObserveTickWork(duration time.Duration) {
 	if duration >= 0 {
 		m.tickWorkDuration.Observe(duration.Seconds())
 	}
 }
 
-// Handler exposes this module's isolated registry in Prometheus text format.
+// Handler 以 Prometheus 文本格式暴露本模块的独立注册表。
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }
 
-// SetSnapshot validates the entire state sample before updating its gauges.
-// Prometheus gauges are individually thread-safe; callers should treat values
-// from one call as one logical sample even though a scrape may overlap it.
+// SetSnapshot 先校验完整状态样本，再更新仪表。每个 Prometheus Gauge 都并发安全；
+// 即使抓取与更新重叠，调用方仍应把同一次调用中的值视为一个逻辑样本。
 func (m *Metrics) SetSnapshot(snapshot Snapshot) error {
 	if snapshot.OnlinePlayers < 0 || snapshot.ActiveRooms < 0 || snapshot.MatchQueuePlayers < 0 {
 		return ErrInvalidSnapshot
@@ -367,7 +358,7 @@ func (m *Metrics) SetSnapshot(snapshot Snapshot) error {
 	return nil
 }
 
-// SetCombatSnapshot publishes current authoritative combat entity counts.
+// SetCombatSnapshot 发布当前权威战斗实体数量。
 func (m *Metrics) SetCombatSnapshot(snapshot CombatSnapshot) error {
 	if snapshot.ActiveMonsters < 0 || snapshot.ActiveProjectiles < 0 {
 		return ErrInvalidCombatSnapshot
@@ -377,7 +368,7 @@ func (m *Metrics) SetCombatSnapshot(snapshot CombatSnapshot) error {
 	return nil
 }
 
-// ObserveDamage records damage after the authoritative World applies it.
+// ObserveDamage 记录权威 World 已经实际结算的伤害。
 func (m *Metrics) ObserveDamage(amount float64) error {
 	if amount <= 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
 		return ErrInvalidDamageAmount
@@ -386,7 +377,7 @@ func (m *Metrics) ObserveDamage(amount float64) error {
 	return nil
 }
 
-// ObserveStageResult records one authoritative terminal stage outcome.
+// ObserveStageResult 记录一次权威关卡终局结果。
 func (m *Metrics) ObserveStageResult(result StageResult) error {
 	if !validStageResult(result) {
 		return ErrInvalidStageResult
@@ -395,8 +386,7 @@ func (m *Metrics) ObserveStageResult(result StageResult) error {
 	return nil
 }
 
-// ObserveReward records one authoritative offer, applied choice/default, or
-// rejected choice. Invalid client values never become labels.
+// ObserveReward 记录权威奖励选项、已应用选择/默认项或拒绝；非法客户端值不会成为标签。
 func (m *Metrics) ObserveReward(result RewardResult) error {
 	if !validRewardResult(result) {
 		return ErrInvalidRewardResult
@@ -405,8 +395,7 @@ func (m *Metrics) ObserveReward(result RewardResult) error {
 	return nil
 }
 
-// ObserveDirector records a fully validated, successfully applied decision.
-// All fields are validated before any collector is mutated.
+// ObserveDirector 记录一条已完整校验并成功应用的导演决策；修改采集器前会校验全部字段。
 func (m *Metrics) ObserveDirector(sample DirectorSample) error {
 	if !validDirectorSample(sample) {
 		return ErrInvalidDirectorSample
@@ -425,8 +414,7 @@ func (m *Metrics) ObserveDirector(sample DirectorSample) error {
 	return nil
 }
 
-// SetQueueSnapshot publishes aggregate live depths. Values are intentionally
-// unlabeled so adding rooms or players cannot create Prometheus series.
+// SetQueueSnapshot 发布聚合实时队列深度；数值刻意不带标签，新增房间/玩家不会创建新序列。
 func (m *Metrics) SetQueueSnapshot(snapshot QueueSnapshot) error {
 	if snapshot.RoomControlDepth < 0 || snapshot.RoomInputDepth < 0 || snapshot.NetworkReliableDepth < 0 {
 		return ErrInvalidQueueSnapshot
@@ -437,8 +425,7 @@ func (m *Metrics) SetQueueSnapshot(snapshot QueueSnapshot) error {
 	return nil
 }
 
-// SetRoomQueueSnapshot updates only Room-owned depths, allowing the network
-// sampler to run independently without one sampler resetting the other.
+// SetRoomQueueSnapshot 只更新 Room 拥有的深度，让网络采样器可独立运行而不互相覆盖。
 func (m *Metrics) SetRoomQueueSnapshot(controlDepth, inputDepth int) error {
 	if controlDepth < 0 || inputDepth < 0 {
 		return ErrInvalidQueueSnapshot
@@ -448,7 +435,7 @@ func (m *Metrics) SetRoomQueueSnapshot(controlDepth, inputDepth int) error {
 	return nil
 }
 
-// SetNetworkQueueDepth updates only the aggregate reliable network depth.
+// SetNetworkQueueDepth 只更新网络可靠队列的聚合深度。
 func (m *Metrics) SetNetworkQueueDepth(depth int) error {
 	if depth < 0 {
 		return ErrInvalidQueueSnapshot
@@ -457,8 +444,7 @@ func (m *Metrics) SetNetworkQueueDepth(depth int) error {
 	return nil
 }
 
-// ObserveQueueDelta adds monotonic deltas calculated from source-owned
-// counters. Sampling cumulative values directly would double-count them.
+// ObserveQueueDelta 累加从源计数器计算的单调增量，避免直接重复采样累计值造成重复计数。
 func (m *Metrics) ObserveQueueDelta(delta QueueDelta) {
 	m.roomQueueRejections.Add(float64(delta.RoomRejections))
 	m.rejectedInputs.Add(float64(delta.RejectedInputs))
@@ -468,7 +454,7 @@ func (m *Metrics) ObserveQueueDelta(delta QueueDelta) {
 	m.networkSnapshotReplaced.Add(float64(delta.NetworkSnapshotReplaced))
 }
 
-// ObserveMatch records one completed matchmaking wait.
+// ObserveMatch 记录一次完成的匹配等待。
 func (m *Metrics) ObserveMatch(duration time.Duration) error {
 	if duration < 0 {
 		return ErrInvalidMatchDuration
@@ -478,7 +464,7 @@ func (m *Metrics) ObserveMatch(duration time.Duration) error {
 	return nil
 }
 
-// ObserveReconnect records one reconnect attempt using a bounded result label.
+// ObserveReconnect 使用有限结果标签记录一次重连尝试。
 func (m *Metrics) ObserveReconnect(result ReconnectResult) error {
 	if !validReconnectResult(result) {
 		return ErrInvalidReconnectResult

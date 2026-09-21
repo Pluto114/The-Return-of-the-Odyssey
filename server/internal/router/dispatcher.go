@@ -13,9 +13,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
-// SnapshotSink is the latest-wins delivery target for a single player. The
-// network layer's *network.Connection satisfies it (SendSnapshot). The
-// dispatcher never blocks on a sink: a slow sink drops stale snapshots.
+// SnapshotSink 是单玩家 latest-wins 发送目标，*network.Connection 通过 SendSnapshot
+// 实现它；分发器不会被 sink 阻塞，慢连接只会丢弃旧快照。
 type SnapshotSink interface {
 	SendSnapshot(frame []byte) bool
 }
@@ -31,13 +30,13 @@ type SnapshotDispatcher struct {
 	sinks map[entity.ID]SnapshotSink
 }
 
-// NewSnapshotDispatcher returns a dispatcher with no subscribers.
+// NewSnapshotDispatcher 创建没有订阅者的快照分发器。
 func NewSnapshotDispatcher() *SnapshotDispatcher {
 	return &SnapshotDispatcher{sinks: make(map[entity.ID]SnapshotSink)}
 }
 
-// Subscribe registers (or replaces) the sink for a player. playerID must match
-// the entity.ID the room assigned at Join. Passing nil unregisters.
+// Subscribe 注册或替换玩家 sink；playerID 必须与 Room.Join 分配的 entity.ID 一致，
+// 传 nil 表示取消注册。
 func (d *SnapshotDispatcher) Subscribe(playerID entity.ID, sink SnapshotSink) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -48,32 +47,29 @@ func (d *SnapshotDispatcher) Subscribe(playerID entity.ID, sink SnapshotSink) {
 	d.sinks[playerID] = sink
 }
 
-// Unsubscribe removes a player's sink (called on leave/disconnect).
+// Unsubscribe 在离开或断线时移除玩家 sink。
 func (d *SnapshotDispatcher) Unsubscribe(playerID entity.ID) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.sinks, playerID)
 }
 
-// Subscribers returns the current player count (for metrics/health).
+// Subscribers 返回当前订阅玩家数，供指标和健康检查使用。
 func (d *SnapshotDispatcher) Subscribers() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return len(d.sinks)
 }
 
-// Run drains rm.Snapshots() until the channel closes (room closed). It blocks;
-// run it in its own goroutine. Each snapshot is fanned out to every subscribed
-// player; a player absent from the snapshot (already left) is skipped.
+// Run 持续消费 rm.Snapshots() 到房间关闭，必须单独运行。每份快照分发给所有订阅玩家；
+// 已离开且不在快照中的玩家会被跳过。
 func (d *SnapshotDispatcher) Run(rm *room.Room) {
 	for snap := range rm.Snapshots() {
 		d.Dispatch(snap)
 	}
 }
 
-// Dispatch fans a single snapshot out to its subscribers. It is separated from
-// Run for testability and for the room-close path (a final Closed snapshot can
-// be dispatched explicitly before the channel closes).
+// Dispatch 分发单份快照；与 Run 分离便于测试，也允许关闭 channel 前显式发送最终快照。
 func (d *SnapshotDispatcher) Dispatch(snap room.Snapshot) {
 	// 整次遍历持有读锁，保证某个 sink 不会在“查到后、调用前”被并发替换。
 	// SendSnapshot 是无阻塞操作，所以读锁持有时间有明确上界。
@@ -88,9 +84,8 @@ func (d *SnapshotDispatcher) Dispatch(snap room.Snapshot) {
 	}
 }
 
-// deliver encodes a personalized WorldSnapshot for one player and hands the
-// wire frame to its sink. Marshal/encode errors are dropped (a malformed local
-// snapshot is a server bug, not a recoverable network condition).
+// deliver 为单个玩家编码个性化 WorldSnapshot 并交给 sink。序列化/编码失败表示服务端
+// 本地快照错误，不属于可恢复网络故障。
 func (d *SnapshotDispatcher) deliver(sink SnapshotSink, s game.Snapshot, selfID entity.ID) {
 	ws := convert.WorldSnapshot(s, selfID)
 	body, err := proto.Marshal(ws)

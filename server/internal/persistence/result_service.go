@@ -12,8 +12,7 @@ type ResultServiceOptions struct {
 	DeadLetterPath string
 }
 
-// ResultService owns the MySQL pool, asynchronous writer, and recoverable
-// dead-letter file so startup and shutdown cannot close them out of order.
+// ResultService 统一拥有 MySQL 连接池、异步 writer 和可恢复死信文件，保证启停顺序正确。
 type ResultService struct {
 	store   *ResultStore
 	writer  *ResultWriter
@@ -55,9 +54,8 @@ func (s *ResultService) Shutdown(ctx context.Context) error {
 	if s.writer != nil {
 		result = s.writer.Shutdown(ctx)
 	}
-	// Shutdown waits for the worker and its bounded dead-letter cleanup even
-	// when returning a deadline or persistence error. Its dependencies can now
-	// be closed without racing outstanding writes.
+	// 即使要返回超时或持久化错误，Shutdown 仍等待 worker 与有界死信清理结束，
+	// 之后关闭依赖才不会和未完成写入竞争。
 	if s.store != nil {
 		result = errors.Join(result, s.store.Close())
 	}

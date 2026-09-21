@@ -64,8 +64,7 @@ type Snapshot struct {
 
 func (s Snapshot) clone() Snapshot { s.Snapshot = s.Snapshot.Clone(); return s }
 
-// TickSample measures command consumption, simulation and snapshot publication;
-// waiting for the next tick and delivery of this sample are excluded.
+// TickSample 统计命令消费、模拟与快照发布耗时；不包含等待下个 Tick 和发送样本的时间。
 type TickSample struct {
 	RoomID       ID
 	ServerTick   uint64
@@ -217,10 +216,8 @@ func Start(ctx context.Context, id ID, config Config, catalogs ...equipment.Cata
 	return r, nil
 }
 
-// Join enqueues a trusted Session -> Player binding. The returned receipt yields
-// exactly one result and closes. Only a nil RECEIPT result means the player has
-// joined; a nil admission error merely means the command was queued.
-// Repeating the same binding is idempotent. IDs are assigned by the server.
+// Join 把可信的 Session -> Player 绑定加入队列。回执只返回一次后关闭；只有回执值为 nil
+// 才表示玩家已加入，入队时无错误仅表示命令已排队。重复提交相同绑定是幂等的，ID 由服务端分配。
 func (r *Room) Join(sessionID SessionID, playerID entity.ID) (<-chan error, error) {
 	if sessionID == 0 {
 		return nil, ErrInvalidSession
@@ -231,9 +228,8 @@ func (r *Room) Join(sessionID SessionID, playerID entity.ID) (<-chan error, erro
 	return r.submit(control{join: true, sessionID: sessionID, playerID: playerID})
 }
 
-// Leave is idempotent and uses the lifecycle queue, independently of input load.
-// If admission returns ErrQueueFull, session cleanup must retry until accepted
-// or Done closes; it must not silently discard the disconnect command.
+// Leave 使用独立于输入负载的生命周期队列且操作幂等。若返回 ErrQueueFull，会话清理必须
+// 重试到命令被接收或 Done 关闭，不能静默丢弃断线命令。
 func (r *Room) Leave(sessionID SessionID) (<-chan error, error) {
 	if sessionID == 0 {
 		return nil, ErrInvalidSession
@@ -241,8 +237,7 @@ func (r *Room) Leave(sessionID SessionID) (<-chan error, error) {
 	return r.submit(control{sessionID: sessionID})
 }
 
-// StartStage is a trusted server orchestration command, never a direct client
-// request. The plan is copied before enqueue, and success is reported by receipt.
+// StartStage 是可信的服务端编排命令，客户端不能直接调用。Plan 入队前会复制，结果通过回执返回。
 func (r *Room) StartStage(plan stage.Plan) (<-chan error, error) {
 	if err := game.ValidateStage(plan, r.config.World); err != nil {
 		return nil, err
@@ -251,14 +246,12 @@ func (r *Room) StartStage(plan stage.Plan) (<-chan error, error) {
 	return r.submit(control{stagePlan: &plan})
 }
 
-// StartReward moves a cleared stage into its server-owned reward round. The
-// catalog must have been loaded and validated outside the Room tick.
+// StartReward 把已通关阶段切入服务端控制的奖励轮；目录必须在 Room Tick 外加载并校验。
 func (r *Room) StartReward(catalog equipment.Catalog, seed int64, durationTicks uint64) (<-chan error, error) {
 	return r.submit(control{rewardStart: &rewardStart{catalog: catalog, seed: seed, durationTicks: durationTicks}})
 }
 
-// ChooseReward resolves player identity from the trusted Session binding. A
-// client can submit only an equipment ID; World validates its private offer.
+// ChooseReward 从可信 Session 绑定解析玩家身份；客户端只能提交装备 ID，World 会校验私人选项。
 func (r *Room) ChooseReward(sessionID SessionID, equipmentID equipment.ID) (<-chan error, error) {
 	if sessionID == 0 {
 		return nil, ErrInvalidSession
@@ -269,8 +262,7 @@ func (r *Room) ChooseReward(sessionID SessionID, equipmentID equipment.ID) (<-ch
 	return r.submit(control{sessionID: sessionID, rewardChoice: equipmentID})
 }
 
-// CompletedStage reads the immutable plan and frozen metrics through the Room
-// owner. Director orchestration can use the result without accessing World.
+// CompletedStage 通过 Room 唯一写者读取不可变 Plan 与冻结指标，导演无需直接访问 World。
 func (r *Room) CompletedStage() (<-chan StageResultReceipt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -287,9 +279,8 @@ func (r *Room) CompletedStage() (<-chan StageResultReceipt, error) {
 	}
 }
 
-// ResumeState reconstructs a full authoritative snapshot and this player's
-// private reward state on the owner goroutine. Token validation and connection
-// replacement happen before this call in A/D; the SessionID itself is retained.
+// ResumeState 在房间 goroutine 中重建完整权威快照和该玩家的私人奖励状态。调用前已完成
+// 令牌校验与连接替换，原 SessionID 保持不变。
 func (r *Room) ResumeState(sessionID SessionID) (<-chan ResumeStateReceipt, error) {
 	if sessionID == 0 {
 		return nil, ErrInvalidSession
@@ -309,8 +300,7 @@ func (r *Room) ResumeState(sessionID SessionID) (<-chan ResumeStateReceipt, erro
 	}
 }
 
-// GameResult returns a detached terminal value for asynchronous persistence.
-// The World validates the trusted outcome against its current stage state.
+// GameResult 返回可异步持久化的独立终局值；World 会按当前阶段校验可信结果。
 func (r *Room) GameResult(outcome game.GameOutcome) (<-chan GameResultReceipt, error) {
 	if !outcome.Valid() {
 		return nil, game.ErrInvalidGameOutcome
@@ -377,21 +367,18 @@ func (r *Room) Input(sessionID SessionID, input game.Input) error {
 	}
 }
 
-// Snapshots has one consumer (A's replication dispatcher). Each value is an
-// owned copy. A slow consumer loses old snapshots, never stalls simulation.
+// Snapshots 只有一个复制分发器消费者；每个值都是独立副本，慢消费者只丢旧快照而不阻塞模拟。
 func (r *Room) Snapshots() <-chan Snapshot { return r.updates }
 func (r *Room) LatestSnapshot() Snapshot   { return r.latest.Load().clone() }
 
-// TickSamples has one consumer (D's metrics adapter). It is lossy and bounded;
-// consumers must report DroppedTickSamples when interpreting percentiles.
+// TickSamples 只有一个指标适配器消费者，队列有界且允许丢失；解释分位数时需同时报告丢弃量。
 func (r *Room) TickSamples() <-chan TickSample { return r.samples }
 
-// Events is for one reliable-event dispatcher. Saturation closes the room and
-// records event_backpressure; combat events are never silently replaced.
+// Events 供唯一的可靠事件分发器消费；饱和会关闭房间并记录 event_backpressure，
+// 战斗事件绝不被静默替换。
 func (r *Room) Events() <-chan game.EventBatch { return r.events }
 
-// RewardUpdates has one consumer and carries targeted reliable updates. A
-// must deliver each row only to its PlayerID rather than broadcasting it.
+// RewardUpdates 只有一个消费者，承载定向可靠更新；每条记录只能发给对应 PlayerID，不能广播。
 func (r *Room) RewardUpdates() <-chan game.RewardUpdateBatch { return r.rewards }
 func (r *Room) Done() <-chan struct{}                        { return r.done }
 
@@ -402,7 +389,7 @@ func (r *Room) Stats() Stats {
 	return s
 }
 
-// Close is idempotent and waits for owner cleanup, including pending receipts.
+// Close 幂等，并等待房间 goroutine 完成清理及所有待处理回执。
 func (r *Room) Close() { r.cancel(); <-r.done }
 
 func (r *Room) run() {
@@ -425,8 +412,7 @@ func (r *Room) run() {
 				r.stats.CloseReason = "requested"
 				return
 			}
-			// Use actual server time for expiry if scheduling was delayed. The
-			// ticker may drop missed ticks; movement never catches up unboundedly.
+			// 调度延迟时使用真实服务端时间判断过期。Ticker 可丢失错过的节拍，移动不会无界补帧。
 			now := time.Now()
 			r.tick(now)
 			if r.stats.CloseReason != "" {
@@ -602,7 +588,7 @@ func (r *Room) finish() {
 	r.mu.Lock()
 	r.closed = true
 	r.mu.Unlock()
-	// Admission is now closed, so no command can be stranded after this drain.
+	// 此时已禁止新命令入队，因此排空后不会再有命令被遗留。
 	for {
 		select {
 		case c := <-r.controls:

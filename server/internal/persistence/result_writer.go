@@ -20,14 +20,13 @@ var (
 	ErrResultDeadLetter    = errors.New("result writer could not save accepted results to dead-letter storage")
 )
 
-// ResultSink implementations must return when ctx is cancelled.
+// ResultSink 实现必须在 ctx 取消后返回。
 type ResultSink interface {
 	Persist(context.Context, ResultEnvelope) (PersistDisposition, error)
 }
 
-// FailureSink implementations must observe ctx wherever their I/O supports
-// cancellation. Shutdown waits for StoreFailure to return; filesystem writes
-// and Sync cannot be forcibly interrupted by a context deadline.
+// FailureSink 应在底层 I/O 支持时响应 ctx 取消。Shutdown 会等待 StoreFailure 返回；
+// 文件写入与 Sync 无法被 context 截止时间强制中断。
 type FailureSink interface {
 	StoreFailure(context.Context, ResultFailure) error
 }
@@ -78,11 +77,10 @@ type ResultWriter struct {
 
 	mu     sync.RWMutex
 	closed bool
-	// The forced drain uses one total budget, independent of the cancelled
-	// worker and caller contexts. Protected by mu and set before cancel.
+	// 强制排空使用一个独立于 worker/调用方 context 的总预算；由 mu 保护并在取消前设置。
 	cleanupContext context.Context
 	cleanupCancel  context.CancelFunc
-	// Written only by run; read only after done is closed.
+	// 只由 run 写入，并且只在 done 关闭后读取。
 	firstDeadLetterError error
 
 	inFlight           atomic.Int64
@@ -111,8 +109,7 @@ func NewResultWriter(sink ResultSink, options ResultWriterOptions) (*ResultWrite
 	return writer, nil
 }
 
-// Submit validates, clones and admits without blocking. It is safe for A's
-// lifecycle goroutine and cannot transfer mutable slices to the writer.
+// Submit 无阻塞地校验、复制并入队；不会把可变 slice 所有权转移给 writer。
 func (w *ResultWriter) Submit(envelope ResultEnvelope) error {
 	if err := envelope.Validate(); err != nil {
 		w.rejected.Add(1)
@@ -142,13 +139,10 @@ func (w *ResultWriter) Stats() ResultWriterStats {
 	}
 }
 
-// Shutdown stops admission and drains accepted envelopes. When ctx expires,
-// database attempts and retry waits stop. Accepted envelopes still awaiting
-// persistence are sent to dead-letter storage with one independent total
-// context budget of AttemptTimeout. Shutdown waits for cleanup before returning.
-// This is not a hard wall-clock limit: an uncancellable sink I/O operation must
-// finish first. Any unsaved envelope is counted and returned as
-// ErrResultDeadLetter, including when the cleanup deadline is exhausted.
+// Shutdown 停止接收新结果并排空已接收队列。ctx 到期后停止数据库尝试和重试等待；
+// 尚未持久化的结果使用独立的 AttemptTimeout 总预算写入死信存储。Shutdown 会等待清理，
+// 但无法取消的 sink I/O 必须自然结束，因此并非绝对墙钟上限。任何未保存结果都会计数，
+// 并以 ErrResultDeadLetter 返回。
 func (w *ResultWriter) Shutdown(ctx context.Context) error {
 	w.mu.Lock()
 	if !w.closed {
@@ -181,8 +175,7 @@ func (w *ResultWriter) run() {
 			w.cleanupCancel()
 		}
 	}()
-	// Shutdown closes the queue before cancellation. Keep draining it even
-	// after cancellation so no admitted envelope silently disappears.
+	// Shutdown 先关闭队列再取消；即使已取消仍继续排空，保证已接收结果不静默消失。
 	for envelope := range w.queue {
 		w.inFlight.Add(1)
 		attempts, err := w.persist(envelope)
@@ -227,8 +220,7 @@ func (w *ResultWriter) persist(envelope ResultEnvelope) (int, error) {
 func (w *ResultWriter) storeFailure(envelope ResultEnvelope, attempts int, cause error) {
 	w.failed.Add(1)
 	failure := ResultFailure{FailedAt: time.Now().UTC(), Attempts: attempts, Kind: resultFailureKind(cause), Envelope: envelope.Clone()}
-	// Ordinary failures also have a deadline. If shutdown interrupts this
-	// attempt, retry its envelope using the independent forced-drain budget.
+	// 普通失败也有截止时间；若停机打断本次尝试，改用独立强制排空预算重试该结果。
 	err := w.ctx.Err()
 	if err == nil {
 		failureContext, cancel := context.WithTimeout(w.ctx, w.options.AttemptTimeout)
@@ -283,8 +275,7 @@ func resultFailureKind(err error) string {
 	}
 }
 
-// FileFailureSink appends recoverable JSON Lines outside the Room Tick. Each
-// accepted failure is synced before success is reported to the writer.
+// FileFailureSink 在 Room Tick 外追加可恢复的 JSON Lines；每条失败记录 Sync 后才报告成功。
 type FileFailureSink struct {
 	mu   sync.Mutex
 	file *os.File

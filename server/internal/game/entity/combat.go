@@ -2,8 +2,7 @@ package entity
 
 import "math"
 
-// CombatStats keeps baseline and effective attributes separate. Equipment and
-// modifiers can later derive CurrentStats without modifying BaseStats.
+// CombatStats 分离基础与有效属性，装备和修正可计算 CurrentStats 而不修改 BaseStats。
 type CombatStats struct {
 	Attack, Defense, MaxHealth, MoveSpeed float64
 	AttackCooldownTicks                   uint32

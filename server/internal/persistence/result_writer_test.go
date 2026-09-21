@@ -231,8 +231,7 @@ func TestResultWriterShutdownDuringRetrySavesInFlightResult(t *testing.T) {
 	if err := writer.Submit(validResultEnvelope()); err != nil {
 		t.Fatal(err)
 	}
-	// The counter is published immediately before the retry wait, so the
-	// shutdown tests that path without depending on an arbitrary sleep.
+	// 计数在重试等待前立即发布，因此停机测试无需依赖任意 sleep 即可覆盖该路径。
 	deadline := time.Now().Add(time.Second)
 	for writer.Stats().Retries == 0 {
 		if time.Now().After(deadline) {

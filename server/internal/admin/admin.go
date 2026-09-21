@@ -1,6 +1,5 @@
-// Package admin exposes a read-only operational HTTP/WebSocket API. It owns
-// transport and JSON shape only; authoritative values are supplied by the
-// gameserver integration layer through Provider.
+// Package admin 暴露只读运维 HTTP/WebSocket API，只负责传输与 JSON 结构；
+// 权威数值由 gameserver 集成层通过 Provider 提供。
 package admin
 
 import (
@@ -78,8 +77,7 @@ type NetworkStatus struct {
 	SnapshotReplacements   uint64 `json:"snapshot_replacements"`
 }
 
-// Snapshot is intentionally operational and read-only. It contains no resume
-// tokens, credentials, player names or raw client-controlled values.
+// Snapshot 专用于只读运维，不包含恢复令牌、凭据、玩家名或客户端控制的原始值。
 type Snapshot struct {
 	GeneratedAt             time.Time          `json:"generated_at"`
 	Environment             string             `json:"environment"`
@@ -103,9 +101,8 @@ type ProviderFunc func() Snapshot
 
 func (f ProviderFunc) Snapshot() Snapshot { return f() }
 
-// Server owns the read-only handlers and any hijacked WebSocket connections.
-// Close must be called during shutdown because net/http does not close
-// hijacked connections for Server.Shutdown.
+// Server 管理只读 handler 和被接管的 WebSocket；停机时必须调用 Close，因为
+// net/http 的 Server.Shutdown 不会关闭已接管连接。
 type Server struct {
 	provider Provider
 	interval time.Duration
@@ -270,9 +267,7 @@ func headerContainsToken(header http.Header, name, target string) bool {
 	return false
 }
 
-// Browser clients are restricted to loopback origins. Empty Origin remains
-// valid for command-line diagnostics; the service itself also binds loopback
-// by configuration policy.
+// 浏览器客户端只允许回环来源；空 Origin 仍可用于命令行诊断，服务本身也按配置绑定回环地址。
 func allowedOrigin(origin string) bool {
 	if origin == "" {
 		return true

@@ -13,12 +13,12 @@ import (
 func TestServerEchoPingPong(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	// Handler: on Ping, reply with a Pong frame echoing back nonce.
+	// Handler 收到 Ping 后回复 Pong 并回显 nonce。
 	handler := func(c *Connection, h Header, payload []byte) error {
-		if h.MessageType != 1 { // MSG_PING
+		if h.MessageType != 1 { // 消息类型为 MSG_PING
 			return nil
 		}
-		// Build a Pong frame (MessageType=2) echoing the payload bytes.
+		// 构造消息类型为 2 的 Pong，并回显消息体字节。
 		pong, err := EncodeFrame(Header{Magic: Magic, Version: VersionV1, MessageType: 2, Sequence: h.Sequence}, payload)
 		if err != nil {
 			return err
@@ -36,20 +36,20 @@ func TestServerEchoPingPong(t *testing.T) {
 	defer cancel()
 	go srv.Serve(ctx, ln)
 
-	// Client connects and sends a Ping frame.
+	// 客户端连接并发送 Ping 帧。
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
 
-	pingBody := []byte{0x08, 0x01, 0x10, 0x02} // Ping(client_time_ms=1, nonce=2)
+	pingBody := []byte{0x08, 0x01, 0x10, 0x02} // Ping 参数为 client_time_ms=1、nonce=2
 	pingFrame, _ := EncodeFrame(Header{Magic: Magic, Version: VersionV1, MessageType: 1, Sequence: 1}, pingBody)
 	if _, err := conn.Write(pingFrame); err != nil {
 		t.Fatal(err)
 	}
 
-	// Read the Pong reply.
+	// 读取 Pong 回复。
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	r := bufio.NewReader(conn)
 	h, body, err := ReadFrame(r)
@@ -75,13 +75,13 @@ func TestConnectionCloseOnClientDisconnect(t *testing.T) {
 	go srv.Serve(ctx, ln)
 
 	conn, _ := net.Dial("tcp", ln.Addr().String())
-	// Wait for accept + track.
+	// 等待连接被接收并加入在线集合。
 	time.Sleep(50 * time.Millisecond)
 	if srv.ActiveConns() != 1 {
 		t.Fatalf("ActiveConns = %d, want 1", srv.ActiveConns())
 	}
 
-	// Close the client; the server should eventually untrack it.
+	// 关闭客户端，服务端最终应将其移出在线集合。
 	conn.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

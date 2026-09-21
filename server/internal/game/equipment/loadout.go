@@ -15,14 +15,14 @@ var (
 	ErrInvalidHealth  = errors.New("invalid player health")
 )
 
-// Loadout has one replaceable item per logical slot. Zero means empty.
+// Loadout 的每个逻辑槽位最多有一件可替换物品，0 表示空槽。
 type Loadout struct {
 	WeaponID ID
 	RelicID  ID
 	PotionID ID
 }
 
-// MagazineCapacity is derived from static equipment data, never client input.
+// MagazineCapacity 只从静态装备数据推导，绝不采用客户端输入。
 func (c Catalog) MagazineCapacity(loadout Loadout, base uint32) uint32 {
 	capacity := uint64(base)
 	for _, id := range []ID{loadout.WeaponID, loadout.RelicID} {
@@ -50,8 +50,7 @@ func (l Loadout) Equip(definition Definition) (Loadout, error) {
 	return l, nil
 }
 
-// Resolve always rebuilds effective stats from BaseStats. Slot order is
-// Weapon then Relic, and each definition's modifiers run in file order.
+// Resolve 始终从 BaseStats 重建有效属性；槽位顺序为武器、遗物，每件装备的修正按文件顺序执行。
 func Resolve(base entity.CombatStats, loadout Loadout, catalog Catalog, tickRate uint32) (entity.CombatStats, error) {
 	if !base.Valid() || tickRate == 0 {
 		return entity.CombatStats{}, ErrInvalidStats
@@ -107,9 +106,7 @@ func Resolve(base entity.CombatStats, loadout Loadout, catalog Catalog, tickRate
 	return resolved, nil
 }
 
-// Apply replaces the selected slot and validates the entire resulting
-// loadout before returning it. Max-health increases do not heal; decreases
-// clamp current health to the new maximum.
+// Apply 替换目标槽位并校验完整新配装。最大生命提高不会回血，降低时当前生命会限制到新上限。
 func Apply(base entity.CombatStats, currentHealth float64, loadout Loadout, selected ID, catalog Catalog, tickRate uint32) (Loadout, entity.CombatStats, float64, error) {
 	definition, err := catalog.Require(selected)
 	if err != nil {
@@ -129,8 +126,7 @@ func Apply(base entity.CombatStats, currentHealth float64, loadout Loadout, sele
 	return next, stats, math.Min(currentHealth, stats.MaxHealth), nil
 }
 
-// UsePotion consumes the equipped potion exactly once and caps healing at the
-// current effective maximum. A full-health use is valid and still consumes it.
+// UsePotion 恰好消耗一次已装备药剂，治疗不超过当前有效上限；满血使用仍合法且会消耗。
 func UsePotion(loadout Loadout, health, maxHealth float64, catalog Catalog) (Loadout, float64, ID, error) {
 	if loadout.PotionID == 0 {
 		return loadout, health, 0, ErrNoPotion

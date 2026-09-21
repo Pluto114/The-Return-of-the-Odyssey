@@ -7,7 +7,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 )
 
-// DamageRequest is produced by collision/AI; neither subsystem mutates HP.
+// DamageRequest 由碰撞或 AI 产生；这两个子系统都不直接修改生命值。
 type DamageRequest struct {
 	SourceID, TargetID entity.ID
 	Attack             float64
@@ -25,14 +25,13 @@ func ResolveDamage(attack, defense, health float64) (DamageResolved, error) {
 			return DamageResolved{}, errors.New("invalid combat value")
 		}
 	}
-	// Equivalent to Attack * 100 / (100 + Defense), without Attack*100 overflow.
+	// 等价于 Attack * 100 / (100 + Defense)，但可避免 Attack*100 溢出。
 	amount := math.Min(health, attack/(1+defense/100))
 	return DamageResolved{Amount: amount, RemainingHealth: health - amount, Killed: health > 0 && amount >= health}, nil
 }
 
-// SegmentCircle returns the first contact fraction [0,1] of a swept projectile
-// against a circular target, including initial overlap and tangent contacts.
-// Callers supply finite, bounded world geometry.
+// SegmentCircle 返回扫掠投射物与圆形目标首次接触的 [0,1] 比例，包含初始重叠与相切；
+// 调用方需提供有限且有界的世界几何数据。
 func SegmentCircle(from, to, center entity.Vec2, radius float64) (float64, bool) {
 	dx, dy := to.X-from.X, to.Y-from.Y
 	fx, fy := from.X-center.X, from.Y-center.Y

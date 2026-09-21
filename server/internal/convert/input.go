@@ -1,14 +1,11 @@
-// Package convert owns the DTO <-> Domain boundary for Role A. It is the only
-// place that knows both the generated protocol types and B's game domain types.
-// It contains no business logic: it maps fields and never mutates state.
+// Package convert 负责 DTO 与领域对象之间的转换，是唯一同时了解生成协议类型与 game
+// 领域类型的位置。这里没有业务逻辑，只映射字段且不修改状态。
 //
-// Direction rules (ARCHITECTURE.md §10):
-//   - Inbound:  protocol DTO  -> game domain (this file).
-//   - Outbound: game domain  -> protocol DTO (snapshot.go, events.go).
+// 转换方向：
+//   - 入站：protocol DTO -> game 领域对象（本文件）；
+//   - 出站：game 领域对象 -> protocol DTO（snapshot.go、events.go）。
 //
-// This package must never import network (frame/connection) or session; those
-// layers sit above it and route through convert without being aware of the
-// mapping details.
+// 本包不能依赖 network 或 session；它们位于上层，只通过 convert 路由而无需了解映射细节。
 package convert
 
 import (
@@ -19,20 +16,15 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 )
 
-// ErrNilInput is returned when the caller passes a nil PlayerInput pointer.
-// The room layer never produces a nil intent, but the network boundary must
-// defend against a malformed frame that unmarshals to nil.
+// ErrNilInput 表示调用方传入 nil PlayerInput。Room 不会产生 nil 意图，但网络边界必须
+// 防御畸形帧解码出的空值。
 var ErrNilInput = errors.New("convert: nil PlayerInput")
 
-// Input converts the wire intent (protocol.PlayerInput) into B's domain intent
-// (game.Input). It maps fields and widens float32 wire coordinates to float64
-// domain coordinates, but does NOT validate shape: game.Input.Validate is the
-// single source of truth for that and the room applies it on admission.
+// Input 把线路 protocol.PlayerInput 转成 game.Input，并把 float32 坐标扩展为 float64。
+// 本函数不校验业务形状，game.Input.Validate 才是唯一规则来源，Room 在入队时调用它。
 //
-// Nil sub-messages are treated as their zero values:
-//   - a nil move means "stop moving" (zero vector),
-//   - a nil aim means "no aim" (zero vector); note that Shoot with a zero aim
-//     is rejected later by game.Input.Validate, matching B's contract.
+// nil 子消息按零值处理：nil move 表示停止移动，nil aim 表示无瞄准；若 Shoot 同时为
+// 零瞄准，之后会被 game.Input.Validate 拒绝。
 func Input(in *protocol.PlayerInput) (game.Input, error) {
 	if in == nil {
 		return game.Input{}, ErrNilInput
@@ -51,12 +43,8 @@ func Input(in *protocol.PlayerInput) (game.Input, error) {
 	return out, nil
 }
 
-// vec2 widens a wire Vec2 (float32) to the domain entity.Vec2 (float64). The
-// conversion itself is exact (every float32 is representable as float64), but
-// the wire value already carries float32 precision (e.g. 0.6f becomes
-// 0.6000000238418579), which is a protocol property, not a conversion artifact.
-// No rounding or clamping is applied here; the domain layer validates finiteness
-// and range.
+// vec2 把线路 Vec2 的 float32 扩展为领域 entity.Vec2 的 float64。扩展本身精确，但线路值
+// 已只有 float32 精度。本层不做四舍五入或截断，由领域层校验有限性和范围。
 func vec2(v *protocol.Vec2) entity.Vec2 {
 	return entity.Vec2{X: float64(v.X), Y: float64(v.Y)}
 }

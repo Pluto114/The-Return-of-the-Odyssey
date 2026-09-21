@@ -248,7 +248,7 @@ func TestApplicationFullResultQueueDoesNotKeepAbandonedRoomAlive(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		app.submitGameResultAfterCapture(roomID, game.GameAbandoned, func() {
-			// Simulate both final Leave receipts only after the result is detached.
+			// 结果独立后才模拟两名玩家的最终 Leave 回执。
 			for id := uint64(1); id <= 2; id++ {
 				receipt, leaveErr := active.room.Leave(room.SessionID(id))
 				if leaveErr == nil {
@@ -263,7 +263,7 @@ func TestApplicationFullResultQueueDoesNotKeepAbandonedRoomAlive(t *testing.T) {
 	}()
 	select {
 	case <-active.room.Done():
-		// The room reclaims itself even while every writer attempt returns full.
+		// 即使每次 writer 尝试都返回队列满，房间仍能回收自身。
 	case <-time.After(2 * time.Second):
 		t.Fatal("full result queue kept the abandoned room alive")
 	}

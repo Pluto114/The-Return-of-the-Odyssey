@@ -15,8 +15,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/network"
 )
 
-// eventRecordingSink captures every reliable event frame delivered to a
-// player, preserving order (events must not be lossy).
+// eventRecordingSink 捕获发给玩家的每个可靠事件帧并保持顺序，事件不能丢失。
 type eventRecordingSink struct {
 	mu     sync.Mutex
 	frames [][]byte
@@ -25,15 +24,14 @@ type eventRecordingSink struct {
 func (s *eventRecordingSink) Send(frame []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Copy: the caller may reuse the slice.
+	// 调用方可能复用 slice，因此这里复制。
 	cp := make([]byte, len(frame))
 	copy(cp, frame)
 	s.frames = append(s.frames, cp)
 	return true
 }
 
-// rejectingSink always reports a saturated reliable queue (Send=false),
-// simulating a slow connection whose outbound queue is full.
+// rejectingSink 始终报告可靠队列饱和（Send=false），模拟发送队列已满的慢连接。
 type rejectingSink struct {
 	mu    sync.Mutex
 	calls int
@@ -46,7 +44,7 @@ func (s *rejectingSink) Send(frame []byte) bool {
 	return false
 }
 
-// decodeEvent reads a single frame and returns its MessageType + the raw body.
+// decodeEvent 读取单帧并返回 MessageType 与原始消息体。
 func decodeEvent(t *testing.T, frame []byte) (uint16, []byte) {
 	t.Helper()
 	hdr, body, err := network.ReadFrame(bufio.NewReader(bytes.NewReader(frame)))
@@ -72,7 +70,7 @@ func TestEventDispatcherBroadcastsToAll(t *testing.T) {
 		t.Fatalf("frames = %d/%d, want 2/2 (events are broadcast)", len(s1.frames), len(s2.frames))
 	}
 
-	// Both sinks receive identical MessageTypes in order.
+	// 两个 sink 按序收到完全相同的 MessageType。
 	mt1, _ := decodeEvent(t, s1.frames[0])
 	mt2, _ := decodeEvent(t, s1.frames[1])
 	if mt1 != uint16(protocol.MessageType_MSG_DAMAGE_EVENT) {
@@ -118,8 +116,7 @@ func TestEventDispatcherSkipsUnknownKind(t *testing.T) {
 	s := &eventRecordingSink{}
 	d.Subscribe(1, s)
 
-	// Unknown kind first, then a valid event: the valid one must still arrive
-	// (dispatcher must not wedge the stream on a bad kind).
+	// 先放未知类型再放合法事件；合法事件仍必须到达，错误类型不能堵住流。
 	d.Dispatch(game.EventBatch{Events: []game.Event{
 		{Kind: game.EventKind(255)},
 		{Kind: game.TeamDefeated, ServerTick: 9},
@@ -154,11 +151,8 @@ func TestEventDispatcherUnsubscribeStopsDelivery(t *testing.T) {
 	}
 }
 
-// TestEventDispatcherSaturationDoesNotAffectOthers verifies the T10 contract:
-// when one subscriber's reliable queue is saturated (Send=false), the event is
-// rejected for that sink but still delivered to every other subscriber — a slow
-// connection must not cause silent loss for healthy peers, and the dispatcher
-// must still fan the event out to them.
+// TestEventDispatcherSaturationDoesNotAffectOthers 验证：一个订阅者可靠队列饱和时，
+// 该 sink 拒绝事件，但其他订阅者仍正常收到；慢连接不能导致健康连接静默丢事件。
 func TestEventDispatcherSaturationDoesNotAffectOthers(t *testing.T) {
 	d := NewEventDispatcher()
 	healthy := &eventRecordingSink{}
@@ -170,7 +164,7 @@ func TestEventDispatcherSaturationDoesNotAffectOthers(t *testing.T) {
 		{Kind: game.TeamDefeated, StageIndex: 1, ServerTick: 7},
 	}})
 
-	// The healthy sink receives the event exactly once.
+	// 健康 sink 恰好收到一次事件。
 	if len(healthy.frames) != 1 {
 		t.Fatalf("healthy frames = %d, want 1 (saturation of a peer must not drop delivery)", len(healthy.frames))
 	}
@@ -179,8 +173,7 @@ func TestEventDispatcherSaturationDoesNotAffectOthers(t *testing.T) {
 		t.Errorf("healthy type = %d, want MSG_TEAM_DEFEATED_EVENT", mt)
 	}
 
-	// The saturated sink was still offered the frame (its Send was invoked and
-	// returned false), which is the surface that drives its disconnect.
+	// 饱和 sink 仍被调用 Send 并返回 false，从而触发其断线路径。
 	slow.mu.Lock()
 	calls := slow.calls
 	slow.mu.Unlock()
@@ -189,9 +182,8 @@ func TestEventDispatcherSaturationDoesNotAffectOthers(t *testing.T) {
 	}
 }
 
-// TestEventDispatcherBadEventLogsCorrelation verifies D5 observability: a bad
-// (unknown-kind) event is dropped without wedging the stream, but is logged
-// with room/stage/tick/entity correlation so it is traceable.
+// TestEventDispatcherBadEventLogsCorrelation 验证未知事件被丢弃但不堵流，并记录
+// room/stage/tick/entity 关联字段以便追踪。
 func TestEventDispatcherBadEventLogsCorrelation(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -213,9 +205,8 @@ func TestEventDispatcherBadEventLogsCorrelation(t *testing.T) {
 	}
 }
 
-// TestEventDispatcherSaturationLogsCorrelation verifies that a saturated sink
-// is logged with the owning room and the affected player, so a slow connection
-// can be traced (D5: slow connection affects only itself).
+// TestEventDispatcherSaturationLogsCorrelation 验证饱和 sink 日志包含所属房间和受影响玩家，
+// 便于追踪且确认慢连接只影响自身。
 func TestEventDispatcherSaturationLogsCorrelation(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))

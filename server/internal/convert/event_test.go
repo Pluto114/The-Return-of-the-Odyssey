@@ -105,7 +105,7 @@ func TestEventEntityDied(t *testing.T) {
 }
 
 func TestEventStageLifecycle(t *testing.T) {
-	// StageCleared and TeamDefeated carry stageIndex.
+	// StageCleared 与 TeamDefeated 都携带 stageIndex。
 	for _, tc := range []struct {
 		kind     game.EventKind
 		mt       protocol.MessageType

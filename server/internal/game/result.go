@@ -40,8 +40,7 @@ func (o GameOutcome) String() string {
 	}
 }
 
-// StageSummary is the persistence-sized history of one cleared stage. The
-// full current Plan remains available through CompletedStage for Director use.
+// StageSummary 是适合持久化的单关通关历史；导演仍可通过 CompletedStage 获取完整当前 Plan。
 type StageSummary struct {
 	Index           uint32
 	Seed            int64
@@ -58,8 +57,7 @@ type PlayerResult struct {
 	Equipment entity.EquipmentState
 }
 
-// GameResult is a detached, protocol-independent value for D's asynchronous
-// persistence. Generating it never changes World or performs I/O.
+// GameResult 是与协议无关、脱离 World 的异步持久化值；生成过程不修改 World，也不做 I/O。
 type GameResult struct {
 	Outcome         GameOutcome
 	StartedAtTick   uint64
@@ -82,10 +80,8 @@ func (r GameResult) DurationTicks() uint64 {
 	return r.EndedAtTick - r.StartedAtTick
 }
 
-// GameResult validates the caller's trusted terminal reason against World.
-// Victory is legal after a clear (including Reward/PreparingNextStage), defeat
-// only after the authoritative Failed transition, and abandonment only while
-// a run is otherwise still active.
+// GameResult 按 World 状态校验调用方提供的可信终局原因：通关后才可胜利，权威状态进入
+// Failed 后才可失败，只有对局仍在进行时才可记为放弃。
 func (w *World) GameResult(outcome GameOutcome) (GameResult, error) {
 	if !outcome.Valid() {
 		return GameResult{}, ErrInvalidGameOutcome

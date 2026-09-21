@@ -198,8 +198,7 @@ func (p RuleBasedPlanner) positions(count int, seed int64) []entity.Vec2 {
 			}
 		}
 		if !accepted {
-			// The X fraction is unique, so this deterministic fallback cannot
-			// duplicate another fallback even in a very narrow arena.
+			// X 比例唯一，因此即使地图很窄，确定性后备点也不会彼此重复。
 			fraction := float64(i+1) / float64(count+1)
 			position = entity.Vec2{X: p.config.Min.X + marginX + fraction*usableWidth, Y: p.config.Min.Y + marginY + math.Mod(fraction*0.6180339887498949, 1)*usableHeight}
 		}

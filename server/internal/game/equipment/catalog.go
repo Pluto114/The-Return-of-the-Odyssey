@@ -1,5 +1,4 @@
-// Package equipment defines immutable, protocol-independent equipment data and
-// deterministic stat resolution. Callers load catalogs outside the Room tick.
+// Package equipment 定义不可变、与协议无关的装备数据及确定性属性结算；目录在 Room Tick 外加载。
 package equipment
 
 import (
@@ -56,8 +55,7 @@ type catalogFile struct {
 	Items   []Definition `json:"items"`
 }
 
-// Catalog owns detached definitions and exposes copies so live game state
-// cannot be changed by a config slice retained by the loader or a caller.
+// Catalog 拥有独立定义并对外返回副本，加载器或调用方保留的配置 slice 无法修改实时游戏状态。
 type Catalog struct {
 	version uint32
 	items   map[ID]Definition

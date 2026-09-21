@@ -10,10 +10,8 @@ import (
 	"time"
 )
 
-// TestSendSnapshotLatestWins verifies that a slow consumer only ever sees the
-// newest snapshot: an unread snapshot is replaced by a newer one rather than
-// queued. The reliable queue is empty here, so the writer immediately drains
-// the snapshot slot and the final frame on the wire must be the last snapshot.
+// TestSendSnapshotLatestWins 验证慢消费者最终只看到最新快照：未读旧帧会被替换而非排队。
+// 此处可靠队列为空，线路上的最终帧必须是最后发布的快照。
 func TestSendSnapshotLatestWins(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	var got *Connection
@@ -33,7 +31,7 @@ func TestSendSnapshotLatestWins(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Drive the handler once so we can capture the server-side *Connection.
+	// 驱动一次 handler 以取得服务端 Connection。
 	ping, _ := EncodeFrame(Header{Magic: Magic, Version: VersionV1, MessageType: 1}, []byte{0x00})
 	if _, err := conn.Write(ping); err != nil {
 		t.Fatal(err)
@@ -44,8 +42,7 @@ func TestSendSnapshotLatestWins(t *testing.T) {
 		t.Fatal("handler never ran")
 	}
 
-	// Publish a burst of snapshots faster than the writer drains. Each frame
-	// carries a distinct MessageType so we can identify which one survives.
+	// 以高于 Writer 排空速度发布一批快照，每帧使用不同 MessageType 识别最终保留项。
 	for i := 0; i < 20; i++ {
 		f, err := EncodeFrame(Header{Magic: Magic, Version: VersionV1, MessageType: uint16(300 + i)}, []byte{byte(i)})
 		if err != nil {
@@ -56,8 +53,7 @@ func TestSendSnapshotLatestWins(t *testing.T) {
 		}
 	}
 
-	// The last snapshot (MessageType 319) must be the one the peer reads. Give
-	// the writer a moment to flush.
+	// 对端必须读到最后的 MessageType 319，给 Writer 少量时间刷新。
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	r := bufio.NewReader(conn)
 	var last uint16
@@ -68,8 +64,7 @@ func TestSendSnapshotLatestWins(t *testing.T) {
 		}
 		last = h.MessageType
 	}
-	// The peer sees the ping echo (nothing) then a snapshot; the final frame
-	// must be the newest snapshot, never an older one.
+	// 对端经过 ping 回显后看到快照；最终帧必须最新，不能是旧帧。
 	if last != 319 {
 		t.Fatalf("last snapshot MessageType = %d, want 319 (newest wins)", last)
 	}

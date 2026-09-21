@@ -20,8 +20,7 @@ const (
 	stagePickupHeal = 30.0
 )
 
-// PickupView is full-set snapshot state. EquipmentID is set only for weapons;
-// Value is set only for immediate-health pickups.
+// PickupView 是完整集合快照状态；EquipmentID 只用于武器，Value 只用于即时生命拾取物。
 type PickupView struct {
 	ID          entity.ID
 	Kind        PickupKind

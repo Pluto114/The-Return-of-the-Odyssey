@@ -1,4 +1,4 @@
-// Package migrations embeds and applies the gameserver's ordered SQL schema.
+// Package migrations 嵌入并按顺序应用游戏服务端 SQL 数据库结构。
 package migrations
 
 import (

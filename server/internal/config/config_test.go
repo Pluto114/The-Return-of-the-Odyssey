@@ -43,7 +43,7 @@ func TestLoadDotEnvFile(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", cfg.LogLevel)
 	}
-	// Untouched keys keep defaults.
+	// 未修改配置项保持默认值。
 	if cfg.SnapshotHz != 10 {
 		t.Errorf("SnapshotHz = %d, want default 10", cfg.SnapshotHz)
 	}
@@ -67,7 +67,7 @@ func TestEnvVarsOverrideFile(t *testing.T) {
 
 func TestValidateRejectsBadSnapshotHz(t *testing.T) {
 	c := Default()
-	c.SnapshotHz = 999 // > TickHz
+	c.SnapshotHz = 999 // 大于 TickHz
 	if err := c.Validate(); err == nil {
 		t.Fatal("expected error for SnapshotHz > TickHz")
 	}

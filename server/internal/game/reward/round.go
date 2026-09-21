@@ -1,5 +1,4 @@
-// Package reward owns deterministic per-player reward offers and selection
-// state. It contains no protocol or network types and does not mutate World.
+// Package reward 管理确定性的玩家独立奖励选项与选择状态，不含协议/网络类型，也不修改 World。
 package reward
 
 import (
@@ -46,8 +45,7 @@ func (s Selection) PlayerID() entity.ID       { return s.playerID }
 func (s Selection) EquipmentID() equipment.ID { return s.equipmentID }
 func (s Selection) Defaulted() bool           { return s.defaulted }
 
-// Round is mutated only by its Room owner. Offers returns detached views for
-// dispatchers and tests.
+// Round 只由所属 Room 修改；Offers 返回供分发器和测试使用的独立视图。
 type Round struct {
 	stageIndex uint32
 	seed       int64
@@ -103,9 +101,7 @@ func (r *Round) Offers() []Offer {
 	return offers
 }
 
-// Offer returns one detached offer, including its current selection state.
-// Resume paths use it to reconstruct only the reconnecting player's private
-// reward state without exposing another player's options.
+// Offer 返回一份含当前选择状态的独立奖励；重连时只重建该玩家的私人奖励，不暴露他人选项。
 func (r *Round) Offer(playerID entity.ID) (Offer, bool) {
 	if r == nil {
 		return Offer{}, false
@@ -117,8 +113,7 @@ func (r *Round) Offer(playerID entity.ID) (Offer, bool) {
 	return offer.Clone(), true
 }
 
-// ValidateChoice is read-only. The Room first applies the equipment to a
-// temporary value and calls Commit only after that succeeds.
+// ValidateChoice 只读；Room 先把装备应用到临时值，成功后才调用 Commit。
 func (r *Round) ValidateChoice(playerID entity.ID, equipmentID equipment.ID, serverTick uint64) (Selection, error) {
 	if r == nil {
 		return Selection{}, ErrInvalidRound
@@ -139,9 +134,8 @@ func (r *Round) ValidateChoice(playerID entity.ID, equipmentID equipment.ID, ser
 	return Selection{owner: r, playerID: playerID, equipmentID: equipmentID}, nil
 }
 
-// DueDefaults returns the first offered item for every still-pending player
-// after the deadline. It does not commit, so failed equipment application
-// cannot corrupt the round.
+// DueDefaults 在截止时间后为每名未选择玩家返回第一件选项，但不直接提交，
+// 因此装备应用失败不会破坏奖励轮状态。
 func (r *Round) DueDefaults(serverTick uint64) []Selection {
 	if r == nil || serverTick <= r.deadline {
 		return nil
@@ -186,8 +180,7 @@ func (r *Round) Complete() bool {
 	return true
 }
 
-// RemovePlayer drops a pending or completed offer when the Room permanently
-// removes that player. Resume flows should keep the player in World instead.
+// RemovePlayer 在 Room 永久移除玩家时删除其奖励；重连流程应保留 World 中的玩家。
 func (r *Round) RemovePlayer(playerID entity.ID) bool {
 	if r == nil {
 		return false

@@ -1,11 +1,7 @@
-// Package network implements the wire-level TCP framing and connection
-// lifecycle for the Odyssey game server. This package is owned by Role A
-// (Realtime Network & Protocol).
+// Package network 实现奥德赛服务端的 TCP 帧格式与连接生命周期。
 //
-// The 16-byte header layout is frozen in ARCHITECTURE.md §8 and
-// docs/protocol/frame.md. Do NOT change field order, width, or byte order
-// without bumping the protocol Version and updating the cross-language
-// golden samples in docs/protocol/frame.md.
+// 16 字节帧头格式在 ARCHITECTURE.md §8 与 docs/protocol/frame.md 中定义。
+// 修改字段顺序、宽度或字节序时，必须提升协议版本并同步更新跨语言标准样例。
 package network
 
 import (
@@ -16,35 +12,32 @@ import (
 	"io"
 )
 
-// Wire-level constants. Keep in sync with docs/protocol/frame.md.
+// 以下是线路协议常量，必须与 docs/protocol/frame.md 保持一致。
 const (
-	// HeaderLen is the fixed 16-byte header size.
+	// HeaderLen 是固定的 16 字节帧头长度。
 	HeaderLen = 16
 
-	// Magic is the fixed 2-byte big-endian magic that filters out traffic
-	// from unrelated services.
+	// Magic 是 2 字节大端魔数，用于快速过滤发给其他服务的错误流量。
 	Magic uint16 = 0x4E52
 
-	// VersionV1 is the only supported protocol version at launch.
+	// VersionV1 是当前线路帧格式版本。
 	VersionV1 byte = 1
 
-	// MaxBodyLen is the maximum accepted protobuf payload size in bytes.
-	// PHASE1 draft suggests 64 KiB; this value is finalized at the D1
-	// alignment meeting. The receiver MUST validate BodyLength before
-	// allocating the body buffer.
-	MaxBodyLen uint32 = 64 * 1024 // 64 KiB
+	// MaxBodyLen 是允许的 protobuf 消息体最大字节数。接收方必须先校验长度再分配内存，
+	// 防止恶意长度字段造成超大内存申请。
+	MaxBodyLen uint32 = 64 * 1024 // 64 千二进制字节
 )
 
-// Sentinel errors returned by ReadFrame. Callers can use errors.Is to branch.
+// ReadFrame 返回的哨兵错误，调用方可通过 errors.Is 分类处理。
 var (
-	ErrInvalidMagic     = errors.New("network: invalid magic")
-	ErrInvalidVersion   = errors.New("network: invalid version")
-	ErrFrameTooLarge    = errors.New("network: frame too large")
-	ErrMessageTypeZero  = errors.New("network: message type unspecified")
+	ErrInvalidMagic    = errors.New("network: invalid magic")
+	ErrInvalidVersion  = errors.New("network: invalid version")
+	ErrFrameTooLarge   = errors.New("network: frame too large")
+	ErrMessageTypeZero = errors.New("network: message type unspecified")
 )
 
-// Header is the decoded 16-byte frame header. All multi-byte fields are
-// network byte order (big endian) on the wire and native order in memory.
+// Header 是解码后的 16 字节帧头；多字节字段在线路上使用网络字节序（大端），
+// 进入内存结构后使用本机整数表示。
 type Header struct {
 	Magic       uint16
 	Version     byte
@@ -55,10 +48,8 @@ type Header struct {
 	Sequence    uint32
 }
 
-// Validate checks the fixed invariants a server must enforce on every
-// inbound frame. It does NOT touch BodyLength (that is checked against
-// MaxBodyLen separately by ReadFrame so the caller can report a distinct
-// reason code).
+// Validate 检查每个入站帧都必须满足的固定条件。BodyLength 由 ReadFrame 单独与
+// MaxBodyLen 比较，以便上层区分“帧头非法”和“消息过大”。
 func (h Header) Validate() error {
 	if h.Magic != Magic {
 		return fmt.Errorf("%w: got 0x%04X want 0x%04X", ErrInvalidMagic, h.Magic, Magic)
@@ -72,21 +63,16 @@ func (h Header) Validate() error {
 	return nil
 }
 
-// ReadFrame reads exactly one frame from r, handling the TCP sticky-packet /
-// partial-read cases. It blocks until a full header + body are available.
+// ReadFrame 从 r 精确读取一个完整帧，能处理 TCP 粘包与半包；在帧头和消息体完整前会阻塞。
 //
-// On success it returns the decoded header and a body slice that is owned by
-// the caller. On error the connection should be closed; no partial frame is
-// ever returned.
+// 成功时返回解码帧头及由调用方持有的消息体；失败时不返回半帧，连接应被关闭。
 func ReadFrame(r *bufio.Reader) (Header, []byte, error) {
 	var h Header
 
-	// Read the full 16-byte header up front. bufio.Reader guarantees the
-	// returned slice is filled, but io.ReadFull makes the contract explicit
-	// and safe against short reads.
+	// 先完整读取 16 字节帧头。io.ReadFull 明确保证不会把短读误当成完整帧头。
 	hb := make([]byte, HeaderLen)
 	if _, err := io.ReadFull(r, hb); err != nil {
-		return h, nil, err // io.EOF on clean close, or a transport error
+		return h, nil, err // 正常关闭时为 io.EOF，否则为传输错误
 	}
 
 	h.Magic = binary.BigEndian.Uint16(hb[0:2])
@@ -97,9 +83,7 @@ func ReadFrame(r *bufio.Reader) (Header, []byte, error) {
 	h.BodyLength = binary.BigEndian.Uint32(hb[8:12])
 	h.Sequence = binary.BigEndian.Uint32(hb[12:16])
 
-	// Validate cheap invariants BEFORE any body allocation. This is the
-	// T03 requirement: an illegal frame must not first allocate an
-	// oversized buffer.
+	// 在分配消息体前先完成低成本校验，非法帧不能先触发超大缓冲区申请。
 	if h.Magic != Magic {
 		return h, nil, fmt.Errorf("%w: got 0x%04X", ErrInvalidMagic, h.Magic)
 	}
@@ -113,8 +97,7 @@ func ReadFrame(r *bufio.Reader) (Header, []byte, error) {
 		return h, nil, ErrMessageTypeZero
 	}
 
-	// BodyLength == 0 is legal (empty Ping). io.ReadFull handles the n==0
-	// case by returning immediately.
+	// BodyLength == 0 合法，例如空 Ping；io.ReadFull 会立即处理零长度读取。
 	body := make([]byte, h.BodyLength)
 	if _, err := io.ReadFull(r, body); err != nil {
 		return h, nil, err
@@ -123,19 +106,15 @@ func ReadFrame(r *bufio.Reader) (Header, []byte, error) {
 	return h, body, nil
 }
 
-// WriteFrame serializes h and body into a 16-byte header followed by the
-// payload, writing it all to w. It writes header and body in one pass so a
-// slow/flaky reader cannot observe a header without its body.
+// WriteFrame 把 h 与 body 序列化成“16 字节帧头 + 消息体”并写入 w。
 //
-// The caller is responsible for external synchronization; a connection's
-// writer goroutine is the only writer to its socket.
+// 调用方负责外部同步；每条连接只允许 Writer goroutine 写 socket。
 func WriteFrame(w io.Writer, h Header, body []byte) error {
 	if len(body) > int(MaxBodyLen) {
 		return fmt.Errorf("%w: %d bytes exceeds %d", ErrFrameTooLarge, len(body), MaxBodyLen)
 	}
 
-	// Header is always written from canonical field values; ignore whatever
-	// stale BodyLength the caller may have passed so the wire stays honest.
+	// 始终按实际 body 重算 BodyLength，忽略调用方可能传入的旧值，保证线路内容可信。
 	h.BodyLength = uint32(len(body))
 
 	buf := make([]byte, HeaderLen+len(body))
@@ -158,9 +137,7 @@ func WriteFrame(w io.Writer, h Header, body []byte) error {
 	return nil
 }
 
-// EncodeFrame is a convenience wrapper that returns the serialized bytes of a
-// frame. It is used by tests and by the golden-sample verifier; production
-// code should prefer WriteFrame to avoid an extra allocation.
+// EncodeFrame 是返回完整帧字节的便捷封装，供测试和发送队列使用。
 func EncodeFrame(h Header, body []byte) ([]byte, error) {
 	var buf bytesBuffer
 	if err := WriteFrame(&buf, h, body); err != nil {
@@ -169,7 +146,7 @@ func EncodeFrame(h Header, body []byte) ([]byte, error) {
 	return buf.b, nil
 }
 
-// bytesBuffer is a minimal io.Writer over a byte slice for EncodeFrame.
+// bytesBuffer 是 EncodeFrame 使用的最小字节切片写入器。
 type bytesBuffer struct {
 	b []byte
 }

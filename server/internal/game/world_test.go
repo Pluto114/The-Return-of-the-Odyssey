@@ -29,8 +29,7 @@ func near(t *testing.T, got, want float64) {
 	}
 }
 
-// T05/T06: packet rate does not set simulation speed; diagonal and extreme
-// finite vectors must not move faster than axial input.
+// 发包频率不决定模拟速度；对角与极端有限向量不能比单轴输入移动更快。
 func TestFixedTickMovement(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -133,7 +132,7 @@ func TestReleaseAndInputExpiry(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				// A duplicate must not renew the timeout.
+				// 重复输入不能刷新超时。
 				if err := w.ApplyInput(1, game.Input{Seq: 1}, now.Add(199*time.Millisecond)); !errors.Is(err, game.ErrStaleInput) {
 					t.Fatal(err)
 				}

@@ -107,21 +107,21 @@ func TestMonsterRetargetsOnlyOnTenHertzDecisionTick(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w.Step(time.Unix(100, 0)) // tick 1: select player 1
+	w.Step(time.Unix(100, 0)) // 第 1 Tick：选择玩家 1
 	w.TakeEvents()
-	w.Step(time.Unix(100, 0)) // tick 2: retain the selected target
+	w.Step(time.Unix(100, 0)) // 第 2 Tick：保持已选目标
 	w.TakeEvents()
 	w.RemovePlayer(1)
 
 	before := w.Snapshot().Monsters[0].Position
-	w.Step(time.Unix(100, 0)) // tick 3: target is gone, but no decision yet
+	w.Step(time.Unix(100, 0)) // 第 3 Tick：目标消失，但尚未重新决策
 	w.TakeEvents()
 	idle := w.Snapshot().Monsters[0]
 	if idle.State != entity.MonsterIdle || idle.Position != before {
 		t.Fatalf("monster changed target between AI decision ticks: %+v", idle)
 	}
 
-	w.Step(time.Unix(100, 0)) // tick 4: next 10 Hz decision
+	w.Step(time.Unix(100, 0)) // 第 4 Tick：执行下一次 10Hz 决策
 	w.TakeEvents()
 	retargeted := w.Snapshot().Monsters[0]
 	if retargeted.State != entity.MonsterChase || retargeted.Position == idle.Position {

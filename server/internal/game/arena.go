@@ -14,9 +14,8 @@ func (w *World) coverBlocks() []coverBlock {
 
 type normalizedBlock struct{ minX, minY, maxX, maxY float64 }
 
-// buildCoverBlocks mirrors client/src/sync/Arena.h. Each six-stage cycle uses
-// a different authored topology; the stage seed rotates and mirrors it, giving
-// later cycles fresh routes without sending redundant geometry on the wire.
+// buildCoverBlocks 与 client/src/sync/Arena.h 保持一致。每六关使用一组手工拓扑，seed 再做
+// 旋转和镜像，使后续循环产生新路线，同时无需在线路上重复发送几何数据。
 func buildCoverBlocks(config Config, stageIndex uint32, stageSeed int64) []coverBlock {
 	if !config.CoverEnabled || stageIndex == 0 {
 		return nil
@@ -35,24 +34,24 @@ func buildCoverBlocks(config Config, stageIndex uint32, stageSeed int64) []cover
 
 	var authored []normalizedBlock
 	switch (stageIndex - 1) % 6 {
-	case 0: // Crosswind gates.
+	case 0: // 交错风门。
 		authored = []normalizedBlock{{.23, .15, .28, .42}, {.23, .58, .28, .85},
 			{.72, .15, .77, .44}, {.72, .60, .77, .85}, {.39, .27, .61, .32}, {.39, .68, .61, .73}}
-	case 1: // Broken ring with four breaches.
+	case 1: // 带四个缺口的破碎环。
 		authored = []normalizedBlock{{.27, .27, .44, .31}, {.56, .27, .73, .31},
 			{.27, .69, .44, .73}, {.56, .69, .73, .73}, {.27, .34, .31, .46},
 			{.27, .54, .31, .66}, {.69, .34, .73, .46}, {.69, .54, .73, .66}}
-	case 2: // Twin corridors and crossover baffles.
+	case 2: // 双走廊与交叉挡板。
 		authored = []normalizedBlock{{.10, .30, .42, .35}, {.58, .30, .90, .35},
 			{.18, .65, .46, .70}, {.54, .65, .82, .70}, {.18, .43, .23, .57}, {.77, .43, .82, .57}}
-	case 3: // Spiral relay.
+	case 3: // 螺旋中继站。
 		authored = []normalizedBlock{{.22, .21, .70, .26}, {.70, .21, .75, .59},
 			{.39, .59, .75, .64}, {.34, .40, .39, .64}, {.34, .35, .58, .40}, {.58, .35, .63, .50}}
-	case 4: // Four L-shaped corner bastions.
+	case 4: // 四座 L 形角堡。
 		authored = []normalizedBlock{{.14, .20, .35, .25}, {.14, .20, .19, .40},
 			{.65, .20, .86, .25}, {.81, .20, .86, .40}, {.14, .75, .35, .80},
 			{.14, .60, .19, .80}, {.65, .75, .86, .80}, {.81, .60, .86, .80}}
-	case 5: // Staggered L-shaped gauntlet.
+	case 5: // 错列 L 形长廊。
 		authored = []normalizedBlock{{.10, .19, .34, .24}, {.29, .19, .34, .39},
 			{.38, .38, .62, .43}, {.38, .38, .43, .58}, {.66, .61, .90, .66}, {.66, .61, .71, .81}}
 	}
@@ -77,7 +76,7 @@ func pointInBlock(point entity.Vec2, block coverBlock, radius float64) bool {
 		point.Y > block.min.Y-radius && point.Y < block.max.Y+radius
 }
 
-// Move one axis at a time so players and monsters slide along cover edges.
+// 逐轴移动，使玩家与怪物碰到掩体后能沿边缘滑动。
 func (w *World) moveWithCover(from, delta entity.Vec2, radius float64) entity.Vec2 {
 	result := from
 	for axis := range 2 {
@@ -131,7 +130,7 @@ func (w *World) clearSpawnFromCover(position entity.Vec2, radius float64) entity
 	return position
 }
 
-// Returns the first point of contact along the segment against expanded cover.
+// 返回线段与扩张后掩体的第一个接触点。
 func segmentBlock(from, to entity.Vec2, block coverBlock, radius float64) (float64, bool) {
 	enter, leave := 0.0, 1.0
 	for _, axis := range [][4]float64{{from.X, to.X - from.X, block.min.X - radius, block.max.X + radius},
@@ -168,9 +167,8 @@ func (w *World) routeAroundCover(from, goal entity.Vec2, radius float64) entity.
 	if _, blocked := w.firstCoverHit(from, goal, radius); !blocked {
 		return goal
 	}
-	// Build a compact visibility graph from padded obstacle corners. A single
-	// greedy corner works for one crate but gets trapped by L walls and spirals;
-	// the graph chooses a complete shortest route through compound cover.
+	// 用带安全边距的障碍角点构建紧凑可见图。单个贪心拐点面对箱子有效，却会困在 L 形墙
+	// 或螺旋中；可见图能为复合掩体求出完整最短路线。
 	points := []entity.Vec2{from, goal}
 	for _, block := range w.coverBlocks() {
 		padding := radius + 0.2

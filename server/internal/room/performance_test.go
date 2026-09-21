@@ -84,7 +84,7 @@ func TestRoomInputRateDoesNotIncreaseMovementOrFireRate(t *testing.T) {
 			if err := baseline.Input(11, game.Input{Seq: baselineSeq, Direction: entity.Vec2{X: 1}, Aim: entity.Vec2{X: 1}, Shoot: true}); err != nil {
 				t.Fatal(err)
 			}
-			for range 10 { // 10 packets per 30Hz tick models a 300Hz sender.
+			for range 10 { // 每个 30Hz Tick 发送 10 包，模拟 300Hz 发送者。
 				burstSeq++
 				if err := burst.Input(22, game.Input{Seq: burstSeq, Direction: entity.Vec2{X: 1}, Aim: entity.Vec2{X: 1}, Shoot: true}); err != nil {
 					t.Fatal(err)
@@ -92,8 +92,7 @@ func TestRoomInputRateDoesNotIncreaseMovementOrFireRate(t *testing.T) {
 			}
 			advance(1)
 		}
-		// Observe through the next complete 10Hz snapshot. Both rooms keep the
-		// same last intent for these ticks, so the comparison remains symmetric.
+		// 观察到下一个完整 10Hz 快照；这几帧两房间保持相同最终意图，比较仍对称。
 		advance(game.SnapshotEvery)
 
 		baselineSnapshot, burstSnapshot := baseline.LatestSnapshot(), burst.LatestSnapshot()

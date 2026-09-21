@@ -1,12 +1,11 @@
-// Package entity defines protocol-independent game state. A room owns its live
-// entities; anything published to another goroutine must be copied.
+// Package entity 定义与协议无关的游戏状态。Room 拥有实时实体；发布给其他 goroutine 前必须复制。
 package entity
 
 import "math"
 
 type ID uint64
 
-// Vec2 uses server X/Y coordinates (client X/Z).
+// Vec2 使用服务端 X/Y 坐标，对应客户端 X/Z。
 type Vec2 struct {
 	X, Y float64
 }
@@ -15,8 +14,7 @@ func (v Vec2) Finite() bool {
 	return !math.IsNaN(v.X) && !math.IsNaN(v.Y) && !math.IsInf(v.X, 0) && !math.IsInf(v.Y, 0)
 }
 
-// Player is a domain value, not a network DTO. Zero acknowledgement means that
-// no input has been simulated yet. Input sequences start at 1 and do not wrap.
+// Player 是领域值而非网络 DTO。确认序号为 0 表示尚未模拟任何输入；输入序号从 1 开始且不回绕。
 type Player struct {
 	ID                      ID
 	Position                Vec2
@@ -33,8 +31,7 @@ type Player struct {
 	ReloadDurationTicks     uint32
 }
 
-// EquipmentState carries stable static-data IDs in authoritative snapshots.
-// Zero means that the corresponding logical slot is empty.
+// EquipmentState 在权威快照中保存稳定静态数据 ID；0 表示对应逻辑槽为空。
 type EquipmentState struct {
 	WeaponID uint32
 	RelicID  uint32

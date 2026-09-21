@@ -67,7 +67,7 @@ func TestPerformanceCountsDeadTeammateAndResolvedDamage(t *testing.T) {
 		}
 	}
 	monster := target(10, 10, 20)
-	monster.Stats.Attack = 1000 // resolved damage is capped to the player's 100 HP
+	monster.Stats.Attack = 1000 // 结算伤害限制为玩家的 100 点生命
 	if err := w.StartStage(stage.Plan{Index: 1, DifficultyScore: 1, Monsters: []stage.Spawn{monster}}); err != nil {
 		t.Fatal(err)
 	}

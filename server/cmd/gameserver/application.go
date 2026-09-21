@@ -46,7 +46,7 @@ type activeRoom struct {
 	snapshots  *router.SnapshotDispatcher
 	events     *router.EventDispatcher
 	close      *router.CloseWatcher
-	rematching bool // guarded by gameApplication.mu; coalesces repeated clicks
+	rematching bool // 由 gameApplication.mu 保护，用于合并重复点击
 
 	// 下面是“关卡编排状态”，由 gameApplication.mu 统一保护，不属于 World 的战斗状态。
 	// rewardStage 让重复 StageCleared 事件保持幂等；rewarded/ready 用于确认每个在线玩家
@@ -65,8 +65,8 @@ type activeRoom struct {
 	stats       room.Stats
 }
 
-// resumeTokenRepository is D's storage boundary for A4. The application owns
-// Session/connection validation; the repository owns atomic token semantics.
+// resumeTokenRepository 是断线恢复令牌的存储边界。application 负责 Session 与连接校验，
+// repository 负责令牌的一次性原子消费语义。
 type resumeTokenRepository interface {
 	IssueRoute(context.Context, string, persistence.ResumeRoute) error
 	ConsumeRoute(context.Context, string) (persistence.ResumeRoute, error)
@@ -104,8 +104,7 @@ type gameApplication struct {
 	resultWriter   interface {
 		Submit(persistence.ResultEnvelope) error
 	}
-	// Allows deterministic failure of the authoritative opening-stage receipt
-	// in network regressions; production uses the room's real control queue.
+	// 允许网络回归测试确定性地模拟首关回执失败；生产环境使用 Room 的真实控制队列。
 	openingStageStarter func(*room.Room, stage.Plan) error
 }
 
@@ -113,9 +112,8 @@ func newGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Met
 	return buildGameApplication(ctx, logger, m, bootstrap.Gameplay{})
 }
 
-// newConfiguredGameApplication is the production constructor. The legacy
-// constructor remains for focused A-side tests that do not enter reward or
-// Director phases; production cannot start with an unvalidated zero value.
+// newConfiguredGameApplication 是生产构造函数；旧构造函数仅供不进入奖励/导演阶段的
+// 聚焦测试使用。生产环境不能用未经校验的零值玩法配置启动。
 func newConfiguredGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.Metrics, gameplay bootstrap.Gameplay) (*gameApplication, error) {
 	if !gameplay.Valid() {
 		return nil, errors.New("gameserver: invalid gameplay configuration")
@@ -199,7 +197,7 @@ func (a *gameApplication) handleMatchRequest(c *network.Connection, h network.He
 		return a.handleRematchRequest(sess, h.Sequence)
 	}
 	if sess.State() == session.StateMatching {
-		return nil // protocol contract: duplicate request while queued is a no-op
+		return nil // 协议约定：已在队列时重复请求不执行任何操作
 	}
 	if !sess.Transition(session.StateMatching) {
 		return fmt.Errorf("match transition failed")
@@ -236,8 +234,7 @@ func (a *gameApplication) handleMatchRequest(c *network.Connection, h network.He
 	a.publishMetricsLocked()
 	a.mu.Unlock()
 
-	// Room Join waits for a tick receipt, so it must never block a connection's
-	// reader goroutine. MatchFound is sent only after every Join succeeds.
+	// Room.Join 要等待 Tick 回执，不能阻塞连接 Reader；所有玩家加入成功后才发送 MatchFound。
 	go a.createMatch(players, h.Sequence)
 	return nil
 }
@@ -267,7 +264,7 @@ func (a *gameApplication) handlePlayerInput(payload []byte, sess *session.Sessio
 		return err
 	}
 	if sess.State() == session.StateReward {
-		return nil // safe discard of combat input already in flight at phase change
+		return nil // 阶段切换时可安全丢弃仍在途的战斗输入
 	}
 	input, err := convert.Input(&message)
 	if err != nil {
@@ -301,8 +298,7 @@ func (a *gameApplication) handleRewardChoice(c *network.Connection, h network.He
 		a.rejectRewardChoice(c, h, roomID, choice.EquipmentId, err)
 		return nil
 	}
-	// Room receipts arrive on its next fixed tick, so never block the socket's
-	// reader goroutine while the authoritative choice is validated and applied.
+	// Room 回执要到下一次固定 Tick 才返回，奖励校验与应用不能阻塞 socket Reader。
 	go func() {
 		if result := <-receipt; result != nil {
 			if errors.Is(result, reward.ErrChoiceAlreadyMade) || errors.Is(result, game.ErrRewardState) {
@@ -314,9 +310,8 @@ func (a *gameApplication) handleRewardChoice(c *network.Connection, h network.He
 	return nil
 }
 
-// A valid choice and a duplicate can be applied by Room in one tick. The
-// private authoritative Applied update must enter the connection's reliable
-// queue before the duplicate rejection, regardless of goroutine scheduling.
+// 合法选择与重复选择可能在同一 Tick 被处理。无论 goroutine 如何调度，私有的权威
+// Applied 更新都必须先进入可靠队列，之后才能发送重复选择拒绝。
 func (a *gameApplication) waitRewardAppliedDelivery(roomID room.ID, playerID entity.ID, c *network.Connection) {
 	deadline := time.NewTimer(time.Second)
 	ticker := time.NewTicker(time.Millisecond)
@@ -473,21 +468,20 @@ func (a *gameApplication) firstStageSeed(roomID room.ID) int64 {
 	return int64(roomID)
 }
 
-// MatchRequest in a terminal room is a team replay. Only the server chooses the
-// fresh room, seed and team; a client cannot reset a live encounter or choose
-// its own teammates. A single request moves both connected participants.
+// 终局房间中的 MatchRequest 表示全队重赛。新房间、seed 与队伍只能由服务端决定，
+// 客户端不能重置进行中的战斗或自选队友；一名玩家请求即可迁移双方在线成员。
 func (a *gameApplication) handleRematchRequest(sess *session.Session, sequence uint32) error {
 	a.mu.Lock()
 	oldID := room.ID(sess.RoomID())
 	old := a.rooms[oldID]
 	if old == nil || old.rematching {
 		a.mu.Unlock()
-		return nil // duplicate or an expired room
+		return nil // 重复请求或房间已过期
 	}
 	phase := old.room.LatestSnapshot().Stage.State
 	if phase != stage.Failed && !(phase == stage.StageClear && old.completed) {
 		a.mu.Unlock()
-		return nil // replay is forbidden during a live or unfinished stage
+		return nil // 进行中或未结束关卡禁止重赛
 	}
 	players := make([]*participant, 0, 2)
 	for conn, member := range a.connections {
@@ -495,7 +489,7 @@ func (a *gameApplication) handleRematchRequest(sess *session.Session, sequence u
 			players = append(players, &participant{conn: conn, session: member})
 		}
 	}
-	if len(players) != 2 { // the existing matchmaker requires a connected pair
+	if len(players) != 2 { // 当前匹配器要求两名玩家都在线
 		a.mu.Unlock()
 		a.logger.Warn("rematch needs two connected players", "room_id", oldID, "connected", len(players))
 		return nil
@@ -531,8 +525,7 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 		a.logger.Error("rematch plan failed", "room_id", oldID, "err", err)
 		return
 	}
-	// Join before changing any live session binding. Failure leaves all players
-	// in the old room and closes the unused new room.
+	// 先加入新房间，再改变在线 Session 绑定；失败时所有玩家仍留在旧房间，并关闭空新房。
 	for _, p := range players {
 		sessionID, playerID := p.session.Identity()
 		receipt, joinErr := newRoom.Join(room.SessionID(sessionID), entity.ID(playerID))
@@ -544,9 +537,8 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 			return
 		}
 	}
-	// StageStarted is a reliable event. Hold the new room's events until its
-	// StartStage receipt succeeds and MatchFound has entered each connection's
-	// reliable queue; otherwise the Bot can discard the start before matching.
+	// StageStarted 是可靠事件。StartStage 回执成功且 MatchFound 已进入每条连接的可靠队列
+	// 后，才释放新房间事件，否则机器人可能在确认匹配前丢弃开局事件。
 	pendingEvents := make(map[entity.ID]*deferredEventSink, len(players))
 	for _, p := range players {
 		_, playerID := p.session.Identity()
@@ -560,7 +552,7 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 	}
 	if err := startStage(newRoom, plan); err != nil {
 		a.logger.Error("rematch stage failed", "room_id", newID, "err", err)
-		return // old room and player bindings are still intact
+		return // 旧房间和玩家绑定仍保持完整
 	}
 
 	a.mu.Lock()
@@ -598,7 +590,7 @@ func (a *gameApplication) createRematch(oldID room.ID, old *activeRoom, players 
 		}
 		if err := sendMessage(p.conn, network.Header{Sequence: sequence}, pb.MessageType_MSG_MATCH_FOUND,
 			&pb.MatchFound{RoomId: uint64(newID), RoomToken: fmt.Sprintf("room-%d", newID), Teammates: teammates}); err != nil {
-			p.conn.Close() // same reliable-delivery contract as first matchmaking
+			p.conn.Close() // 与首次匹配采用相同可靠发送约定
 		}
 	}
 	for _, p := range players {
@@ -637,7 +629,7 @@ func startOpeningStage(rm *room.Room, plan stage.Plan) error {
 	return room.ErrQueueFull
 }
 
-// Leaving the former room must not clear the session's *new* binding.
+// 离开旧房间时绝不能清除 Session 已经建立的“新房间”绑定。
 func (a *gameApplication) leaveFormerRoom(rm *room.Room, sessionID room.SessionID) {
 	for {
 		receipt, err := rm.Leave(sessionID)
@@ -683,8 +675,7 @@ func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
 		delivered:   make(map[entity.ID]bool),
 		ready:       make(map[entity.ID]bool),
 	}
-	// Route dispatcher saturation warnings through the application logger so
-	// reliable-queue overflow is observable alongside other server logs (T10).
+	// 分发器的队列饱和警告统一写入 application 日志，便于观察可靠队列溢出。
 	active.events.SetLogger(a.logger)
 	active.close.SetLogger(a.logger)
 	active.close.OnClose(func(id room.ID, reason string) {
@@ -750,8 +741,7 @@ func (a *gameApplication) disconnected(c *network.Connection) {
 	a.mu.Unlock()
 	if active != nil {
 		if lastConnected {
-			// Detach the last player's result before Leave, but do not keep the
-			// room alive while a full persistence queue waits for admission.
+			// 最后一名玩家离开前先提取对局结果，但持久化队列满时不能因此阻止房间回收。
 			go a.submitGameResultAfterCapture(roomID, game.GameAbandoned,
 				func() { go a.leaveRoom(sess, active.room) })
 		} else {
@@ -848,11 +838,10 @@ func (a *gameApplication) observeEvents(roomID room.ID, rm *room.Room, dispatche
 	}
 }
 
-// beginRewardStage bridges a reliable StageCleared event into B's existing
-// reward state machine. The event observer never waits for Room receipts.
+// beginRewardStage 把可靠的 StageCleared 事件衔接到奖励状态机；事件观察循环本身不等回执。
 func (a *gameApplication) beginRewardStage(roomID room.ID, stageIndex uint32) {
 	if !a.gameplay.Valid() {
-		return // focused legacy tests intentionally construct no gameplay bundle
+		return // 聚焦旧测试会刻意不构造玩法依赖包
 	}
 	a.mu.Lock()
 	active := a.rooms[roomID]
@@ -945,8 +934,7 @@ func (a *gameApplication) transitionRoomSessions(roomID room.ID, from, to sessio
 	}
 }
 
-// observeRewards is the Room RewardUpdates channel's single consumer. Each
-// option list and result is private to the addressed player.
+// observeRewards 是 Room.RewardUpdates 的唯一消费者；选项列表和结果只发送给目标玩家。
 func (a *gameApplication) observeRewards(roomID room.ID, rm *room.Room) {
 	for batch := range rm.RewardUpdates() {
 		a.recordRewardMetrics(roomID, batch)
@@ -1168,8 +1156,7 @@ func (a *gameApplication) publishQueueMetricsLocked() {
 	_ = a.metrics.SetRoomQueueSnapshot(snapshot.RoomControlDepth, snapshot.RoomInputDepth)
 }
 
-// recordRewardMetrics is called by A's single RewardUpdates dispatcher after
-// it accepts a batch for delivery. It never consumes the Room channel itself.
+// recordRewardMetrics 在奖励分发器接收批次后调用，本函数自身不消费 Room channel。
 func (a *gameApplication) recordRewardMetrics(roomID room.ID, batch game.RewardUpdateBatch) {
 	for _, update := range batch.Updates {
 		var result metrics.RewardResult
@@ -1190,16 +1177,13 @@ func (a *gameApplication) recordRewardMetrics(roomID room.ID, batch game.RewardU
 	}
 }
 
-// recordInvalidRewardChoice records a rejection only after Room validation;
-// raw client values and error strings are kept out of metric labels.
+// recordInvalidRewardChoice 只记录经过 Room 校验后的拒绝；客户端原值和错误文本不进入标签。
 func (a *gameApplication) recordInvalidRewardChoice(roomID room.ID, cause error) {
 	_ = a.metrics.ObserveReward(metrics.RewardInvalid)
 	a.logger.Info("reward choice rejected", "room_id", roomID, "err", cause)
 }
 
-// recordDirectorDecision must be called only after the generated Plan has
-// been accepted by Room. That prevents retries or failed plans from appearing
-// as applied decisions.
+// recordDirectorDecision 只能在 Room 接受新 Plan 后调用，避免把重试或失败方案记成已应用决策。
 func (a *gameApplication) recordDirectorDecision(roomID room.ID, stageIndex uint32, input director.PerformanceMetrics, output director.Decision, duration time.Duration) error {
 	sample := metrics.DirectorSample{
 		Duration: duration, ClearTimeSeconds: input.ClearTimeSeconds, TeamHPPercent: input.TeamHPPercent,
@@ -1308,16 +1292,14 @@ func stagePhase(state stage.State) string {
 	}
 }
 
-// closingSink enforces the reliable-queue contract: saturation closes only
-// the slow connection instead of silently discarding a gameplay event.
+// closingSink 落实可靠队列约定：队列饱和时只关闭慢连接，不静默丢失玩法事件。
 type closingSink struct{ connection *network.Connection }
 
 func (s closingSink) Send(frame []byte) bool {
 	if s.connection.Send(frame) {
 		return true
 	}
-	// Dispatchers hold their subscription read lock while invoking Send.
-	// Close asynchronously so the disconnect callback can unsubscribe safely.
+	// 分发器调用 Send 时持有订阅读锁，因此异步关闭连接，让断线回调能安全取消订阅。
 	go s.connection.Close()
 	return false
 }

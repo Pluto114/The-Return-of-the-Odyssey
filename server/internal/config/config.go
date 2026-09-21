@@ -1,9 +1,6 @@
-// Package config loads the gameserver configuration from environment
-// variables and an optional .env file.
+// Package config 从环境变量和可选 .env 文件加载游戏服务端配置。
 //
-// This loader exists because server/configs/.env was previously a dead file
-// with no reader (PHASE1 §9 calls this out explicitly). It supports the
-// ODYSSEY_* keys documented in configs/.env.example.
+// 支持 configs/.env.example 中记录的 ODYSSEY_* 配置项。
 package config
 
 import (
@@ -16,10 +13,9 @@ import (
 	"strings"
 )
 
-// Config holds the runtime configuration for the gameserver. Field names map
-// 1:1 to the ODYSSEY_* environment keys in configs/.env.example.
+// Config 保存服务端运行配置，字段与 configs/.env.example 中的 ODYSSEY_* 环境变量一一对应。
 type Config struct {
-	Env                      string // development | production
+	Env                      string // 开发环境或生产环境
 	TCPAddr                  string
 	AdminAddr                string
 	MetricsAddr              string
@@ -53,21 +49,19 @@ type Config struct {
 	DirectorTargetDPS          float64
 	DirectorTargetDamageTaken  float64
 
-	// LoginTimeoutSec is how long a connected socket may wait before sending
-	// LoginRequest (default 5s). Not in .env.example yet; exposed as a knob.
+	// LoginTimeoutSec 是连接后等待 LoginRequest 的最长秒数，默认 5 秒。
 	LoginTimeoutSec int
 
 	parseErr error
 }
 
-// Default returns the built-in defaults. These match configs/.env.example so
-// the server is runnable even with no .env file present.
+// Default 返回内置默认值，与 configs/.env.example 一致；没有 .env 时服务端也能运行。
 func Default() *Config {
 	return &Config{
 		Env:                        "development",
 		TCPAddr:                    "127.0.0.1:7777",
 		AdminAddr:                  "127.0.0.1:8080",
-		MetricsAddr:                "0.0.0.0:19091", // 9091 is reserved on the integration host
+		MetricsAddr:                "0.0.0.0:19091", // 集成主机已占用 9091
 		PprofAddr:                  "127.0.0.1:6060",
 		TickHz:                     30,
 		SnapshotHz:                 10,
@@ -100,17 +94,14 @@ func Default() *Config {
 	}
 }
 
-// Load reads envPath (a .env file) if it exists, applies those values over the
-// defaults, then overlays any ODYSSEY_* variables already set in the process
-// environment (env vars win over the file). envPath may be empty to skip the
-// file entirely.
+// Load 先读取可选 envPath 覆盖默认值，再用进程中已有的 ODYSSEY_* 环境变量覆盖文件值；
+// 因此真实环境变量优先级最高。envPath 为空时跳过文件。
 func Load(envPath string) (*Config, error) {
 	cfg := Default()
 
 	if envPath != "" {
 		if err := loadDotEnv(envPath, func(k, v string) {
-			// Only apply a key if it is not already present in the process
-			// environment; real env vars take precedence.
+			// 进程环境中已存在的键不从文件覆盖，真实环境变量优先。
 			if _, exists := os.LookupEnv(k); exists {
 				return
 			}
@@ -120,7 +111,7 @@ func Load(envPath string) (*Config, error) {
 		}
 	}
 
-	// Overlay the process environment last.
+	// 最后叠加进程环境变量。
 	for _, e := range os.Environ() {
 		kv := strings.SplitN(e, "=", 2)
 		if len(kv) != 2 {
@@ -137,7 +128,7 @@ func Load(envPath string) (*Config, error) {
 	return cfg, nil
 }
 
-// Validate enforces the invariants the server relies on.
+// Validate 校验服务端运行依赖的全部不变量。
 func (c *Config) Validate() error {
 	if c.parseErr != nil {
 		return c.parseErr
@@ -220,8 +211,7 @@ func validateLoopbackListenAddr(address string) error {
 	return nil
 }
 
-// applyKey writes a single ODYSSEY_* key/value into cfg. Unknown keys are
-// ignored (forward-compatible with future config additions).
+// applyKey 把单个 ODYSSEY_* 键值写入 cfg；未知键直接忽略，以兼容未来新增配置。
 func applyKey(cfg *Config, key, val string) {
 	switch key {
 	case "ODYSSEY_ENV":
@@ -339,15 +329,13 @@ func (c *Config) recordParseError(key, val string, err error) {
 	}
 }
 
-// loadDotEnv parses a simple KEY=VALUE .env file. It supports blank lines and
-// full-line `#` comments; inline comments are NOT supported (values may
-// legitimately contain `#`, e.g. passwords). Values are not shell-unquoted in
-// v1; write them bare.
+// loadDotEnv 解析简单的 KEY=VALUE 文件，支持空行与整行 # 注释，不支持行尾注释，因为
+// 合法值（例如密码）可能包含 #。值不会按 shell 规则去引号，应直接书写。
 func loadDotEnv(path string, apply func(k, v string)) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // no .env is fine; defaults + env vars apply
+			return nil // 没有 .env 也合法，使用默认值与环境变量
 		}
 		return fmt.Errorf("config: open %s: %w", path, err)
 	}

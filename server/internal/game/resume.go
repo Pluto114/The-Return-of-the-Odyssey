@@ -6,8 +6,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/entity"
 )
 
-// PlayerResumeState is built from the live World on the Room owner goroutine.
-// The client must discard its old prediction state and use this full snapshot.
+// PlayerResumeState 由 Room goroutine 从实时 World 构建；客户端必须丢弃旧预测并采用完整快照。
 type PlayerResumeState struct {
 	Snapshot Snapshot
 	Reward   *RewardUpdate
@@ -22,9 +21,8 @@ func (s PlayerResumeState) Clone() PlayerResumeState {
 	return s
 }
 
-// ResumeState returns current authoritative state without replaying input or
-// restoring an older copy. A pending or completed private reward is rebuilt so
-// reconnecting during Reward cannot lose its options or applied transition.
+// ResumeState 返回当前权威状态，不重放输入也不恢复旧副本；同时重建待选或已完成私人奖励，
+// 避免奖励阶段重连丢失选项或应用结果。
 func (w *World) ResumeState(playerID entity.ID) (PlayerResumeState, error) {
 	if _, exists := w.players[playerID]; !exists {
 		return PlayerResumeState{}, ErrPlayerMissing

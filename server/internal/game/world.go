@@ -64,8 +64,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// Input contains intent only. Session supplies the player identity and the
-// server stamps arrival time; neither comes from a client-controlled position.
+// Input 只包含操作意图；玩家身份由 Session 提供，到达时间由服务端记录，二者都不受客户端控制。
 type Input struct {
 	Seq       uint32
 	Direction entity.Vec2
@@ -115,8 +114,7 @@ type World struct {
 	config  Config
 	tick    uint64
 	players map[entity.ID]*playerState
-	// Permanent departures leave their final combat/equipment state in the
-	// terminal result without keeping them in live snapshots or the simulation.
+	// 永久离开的玩家把最终战斗/装备状态留在终局结果中，但不再出现在实时快照和模拟里。
 	departedPlayers  map[entity.ID]PlayerResult
 	monsters         map[entity.ID]*monsterState
 	projectiles      map[entity.ID]entity.Projectile
@@ -221,7 +219,7 @@ func (w *World) ApplyInput(id entity.ID, input Input, receivedAt time.Time) erro
 		return ErrStaleInput
 	}
 	input.Direction = systems.NormalizeDirection(input.Direction)
-	// Preserve one-shot actions across several packets arriving in one tick.
+	// 同一 Tick 到达多包时保留一次性动作。
 	input.Reload = input.Reload || (p.pending && p.input.Reload)
 	input.UsePotion = input.UsePotion || (p.pending && p.input.UsePotion)
 	p.input, p.receivedAt, p.pending = input, receivedAt, true

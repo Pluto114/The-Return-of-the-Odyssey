@@ -1,5 +1,4 @@
-// Package stage defines server-owned stage plans, not wire messages. Reward,
-// Director and next-stage orchestration remain outside the stage value types.
+// Package stage 定义服务端拥有的关卡方案而非线路消息；奖励、导演和下一关编排位于类型之外。
 package stage
 
 import (

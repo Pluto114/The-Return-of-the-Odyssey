@@ -64,7 +64,7 @@ func TestInput(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Input() error = %v", err)
 		}
-		// 0.5 and 0.25 are exactly representable in both float32 and float64.
+		// 0.5 和 0.25 在 float32 与 float64 中都能精确表示。
 		if got.Direction.X != -0.5 || got.Direction.Y != 0.25 {
 			t.Errorf("Direction = %+v, want {-0.5 0.25}", got.Direction)
 		}

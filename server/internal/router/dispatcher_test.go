@@ -16,8 +16,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
-// recordingSink captures the latest snapshot frame per player so a test can
-// decode and assert the personalized content.
+// recordingSink 捕获每名玩家的最新快照帧，供测试解码并断言个性化内容。
 type recordingSink struct {
 	mu    sync.Mutex
 	frame []byte
@@ -37,7 +36,7 @@ func (s *recordingSink) snapshot(t *testing.T) *protocol.WorldSnapshot {
 	if s.frame == nil {
 		t.Fatal("no snapshot delivered")
 	}
-	// Decode the frame: read the 16-byte header + body via ReadFrame.
+	// 通过 ReadFrame 解码 16 字节帧头和消息体。
 	_, body, err := network.ReadFrame(bufio.NewReader(bytes.NewReader(s.frame)))
 	if err != nil {
 		t.Fatalf("decode frame: %v", err)
@@ -58,7 +57,7 @@ func twoPlayerSnapshot() room.Snapshot {
 				{ID: 2, LastProcessedInputSeq: 9, CurrentStats: stats(1, 1, 100, 1), Health: 60, Alive: true},
 			},
 			Monsters: []game.MonsterView{
-				{ID: 1 << 63 | 1, Health: 30, MaxHealth: 100, State: entity.MonsterIdle},
+				{ID: 1<<63 | 1, Health: 30, MaxHealth: 100, State: entity.MonsterIdle},
 			},
 			Stage: stage.View{Index: 1, State: stage.Playing, MonstersRemaining: 1},
 		},
@@ -78,7 +77,7 @@ func TestDispatcherPersonalizesSelfPerSubscriber(t *testing.T) {
 
 	d.Dispatch(twoPlayerSnapshot())
 
-	// Player 1 sees itself as self with ack 5.
+	// 玩家 1 在 Self 中看到自己，确认序号为 5。
 	ws1 := s1.snapshot(t)
 	if ws1.Self == nil || ws1.Self.PlayerId != 1 {
 		t.Fatalf("player1 self = %v, want player 1", ws1.Self)
@@ -90,7 +89,7 @@ func TestDispatcherPersonalizesSelfPerSubscriber(t *testing.T) {
 		t.Errorf("player1 others = %v, want [2]", ws1.Players)
 	}
 
-	// Player 2 sees itself as self with ack 9.
+	// 玩家 2 在 Self 中看到自己，确认序号为 9。
 	ws2 := s2.snapshot(t)
 	if ws2.Self == nil || ws2.Self.PlayerId != 2 {
 		t.Fatalf("player2 self = %v, want player 2", ws2.Self)
@@ -102,7 +101,7 @@ func TestDispatcherPersonalizesSelfPerSubscriber(t *testing.T) {
 		t.Errorf("player2 others = %v, want [1]", ws2.Players)
 	}
 
-	// Shared state is identical.
+	// 共享状态应完全一致。
 	if ws1.ServerTick != ws2.ServerTick || ws1.ServerTick != 10 {
 		t.Errorf("server_tick = %d/%d, want 10", ws1.ServerTick, ws2.ServerTick)
 	}
@@ -115,7 +114,7 @@ func TestDispatcherSkipsUnsubscribedPlayer(t *testing.T) {
 	d := NewSnapshotDispatcher()
 	s1 := &recordingSink{}
 	d.Subscribe(1, s1)
-	// Player 2 has no sink.
+	// 玩家 2 没有 sink。
 
 	d.Dispatch(twoPlayerSnapshot())
 
@@ -138,7 +137,7 @@ func TestDispatcherUnsubscribeStopsDelivery(t *testing.T) {
 
 	d.Unsubscribe(1)
 	d.Dispatch(twoPlayerSnapshot())
-	// After unsubscribe, no new frame should arrive; the old frame persists.
+	// 取消订阅后不能再收到新帧，旧帧保持不变。
 	if d.Subscribers() != 0 {
 		t.Errorf("Subscribers = %d, want 0", d.Subscribers())
 	}

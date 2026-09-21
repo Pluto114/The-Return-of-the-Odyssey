@@ -10,8 +10,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
-// This example is compiled and executed by go test; it uses the public seam
-// intended for A's session adapter and D's lobby, without a network server.
+// 该示例由 go test 编译执行，使用提供给 Session 适配器与 Lobby 的公开接口，不启动网络服务。
 func ExampleStart() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -20,7 +19,7 @@ func ExampleStart() {
 		panic(err)
 	}
 	defer r.Close()
-	joined, err := r.Join(11, 101) // Both IDs come from trusted server state.
+	joined, err := r.Join(11, 101) // 两个 ID 都来自可信服务端状态。
 	if err != nil {
 		panic(err)
 	}
@@ -37,5 +36,5 @@ func ExampleStart() {
 		}
 	}
 	panic("room closed before input acknowledgement")
-	// Output: 1 101 1
+	// 输出：1 101 1
 }

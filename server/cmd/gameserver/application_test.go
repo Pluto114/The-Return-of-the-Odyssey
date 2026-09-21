@@ -51,7 +51,7 @@ func TestApplicationRecordsAuthoritativeCombatMetrics(t *testing.T) {
 	}})
 	app.recordEventMetrics(1, game.EventBatch{Events: []game.Event{
 		{Kind: game.ProjectileSpawned, EntityID: 9},
-		{Kind: game.ProjectileSpawned, EntityID: 9}, // duplicate must not inflate the Gauge
+		{Kind: game.ProjectileSpawned, EntityID: 9}, // 重复事件不能抬高 Gauge
 		{Kind: game.DamageDealt, Amount: 12.5},
 		{Kind: game.StageCleared, StageIndex: 1},
 	}})
@@ -154,7 +154,7 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 	}
 
 	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
-	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{}) // idempotent
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{}) // 验证幂等
 	appSend(t, peers[1], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
 	var roomID uint64
 	for i := range peers {
@@ -205,8 +205,7 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 		}
 	}
 
-	// EOF must remove the disconnected player from the surviving peer's full
-	// snapshot and the final disconnect must allow the empty room to expire.
+	// EOF 必须从另一名玩家的完整快照中移除断线者，最后一次断线应允许空房间过期。
 	if err := peers[0].conn.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +282,7 @@ func TestApplicationFirstStageFailureDoesNotAnnounceMatch(t *testing.T) {
 	}
 	for i := range peers {
 		var disconnected pb.Disconnect
-		// A MatchFound before the injected failure makes appRead fail immediately.
+		// 若注入失败前错误发送 MatchFound，appRead 会立即失败。
 		appRead(t, peers[i], pb.MessageType_MSG_DISCONNECT, &disconnected)
 		if disconnected.Reason != pb.ReasonCode_REASON_ROOM_CLOSED {
 			t.Fatalf("peer %d unexpected first-stage failure reason: %+v", i, &disconnected)
@@ -402,8 +401,7 @@ func testApplicationAdvance(t *testing.T, opening uint32) {
 			t.Fatalf("peer %d invalid private reward offer: %+v", i, &offers[i])
 		}
 		if i == 0 {
-			// A 30 Hz combat packet can already be in TCP when the server enters
-			// Reward. It must be ignored rather than disconnecting the player.
+			// 服务端进入 Reward 时 TCP 中可能已有 30Hz 战斗包，应忽略而不是断开玩家。
 			appSend(t, peers[i], pb.MessageType_MSG_PLAYER_INPUT, 3,
 				&pb.PlayerInput{InputSeq: 2, Move: &pb.Vec2{X: 1}, Aim: &pb.Vec2{X: 1}})
 		}
@@ -521,8 +519,7 @@ func testApplicationReplay(t *testing.T, victory bool) {
 		old.events.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
 		old.close.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
 	}
-	// A trusted encounter makes the real room terminal. The victory case marks
-	// completion exactly as beginRewardStage does after the final stage clear.
+	// 可信战斗把真实房间推进到终局；胜利分支像最终关 beginRewardStage 一样标记完成。
 	spawn := stage.Spawn{Position: app.roomConfig.World.Spawn, Radius: 0.4,
 		AttackRange: 1, Stats: entity.CombatStats{MaxHealth: 100, Attack: 1000, AttackCooldownTicks: 1}}
 	if victory {
@@ -537,7 +534,7 @@ func testApplicationReplay(t *testing.T, victory bool) {
 		t.Fatal(err)
 	}
 	if victory {
-		// A living room and an ordinary cleared stage must reject replay.
+		// 仍存活房间和普通通关阶段必须拒绝重赛。
 		appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})
 		appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 3,
 			&pb.PlayerInput{InputSeq: 1, Aim: &pb.Vec2{X: 1}, Shoot: true})
@@ -555,8 +552,7 @@ func testApplicationReplay(t *testing.T, victory bool) {
 	}
 	if victory {
 		appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 4, &pb.MatchRequest{})
-		// A Pong on the same connection orders the preceding MatchRequest
-		// before we simulate the final-stage completion callback.
+		// 同一连接上的 Pong 用来确认前一个 MatchRequest 已按序处理，再模拟最终关完成回调。
 		appSend(t, peers[0], pb.MessageType_MSG_PING, 5, &pb.Ping{})
 		var pong pb.Pong
 		appRead(t, peers[0], pb.MessageType_MSG_PONG, &pong)
@@ -568,7 +564,7 @@ func testApplicationReplay(t *testing.T, victory bool) {
 		app.mu.Unlock()
 	}
 	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 5, &pb.MatchRequest{})
-	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 6, &pb.MatchRequest{}) // repeated click is idempotent
+	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 6, &pb.MatchRequest{}) // 重复点击保持幂等
 	var newID uint64
 	for i := range peers {
 		var found pb.MatchFound
@@ -755,7 +751,7 @@ func TestApplicationRematchStartFailureKeepsTeamInFailedRoom(t *testing.T) {
 			}
 		}
 	}
-	app.openingStageStarter = nil // the same two players can try again
+	app.openingStageStarter = nil // 同两名玩家可以再次尝试
 	appSend(t, peers[0], pb.MessageType_MSG_MATCH_REQUEST, 3, &pb.MatchRequest{})
 	for i := range peers {
 		var found pb.MatchFound

@@ -31,8 +31,7 @@ func (*blockedWriterConn) SetDeadline(time.Time) error      { return nil }
 func (*blockedWriterConn) SetReadDeadline(time.Time) error  { return nil }
 func (*blockedWriterConn) SetWriteDeadline(time.Time) error { return nil }
 
-// Reproduces the replication writer racing peer EOF: the reader has closed the
-// outbound queue while the socket writer is still draining its current frame.
+// 复现复制 Writer 与对端 EOF 的竞争：Reader 已关闭发送队列，而 socket Writer 仍在排空当前帧。
 func TestSendAfterReaderEOFWithBlockedWriter(t *testing.T) {
 	conn := &blockedWriterConn{readEnd: make(chan struct{}), writing: make(chan struct{}), release: make(chan struct{})}
 	s := NewServer(func(*Connection, Header, []byte) error { return nil }, slog.New(slog.NewTextHandler(io.Discard, nil)))

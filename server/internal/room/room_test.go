@@ -96,7 +96,7 @@ func TestSnapshotCadenceIsolationAndSlowConsumer(t *testing.T) {
 		config.TickSampleCapacity = 1
 		r := start(t, 8, config)
 		defer r.Close()
-		join(t, r, 11, 101) // tick 1
+		join(t, r, 11, 101) // 第 1 Tick
 		if err := r.Input(11, game.Input{Seq: 1, Direction: entity.Vec2{X: 1}}); err != nil {
 			t.Fatal(err)
 		}
@@ -119,7 +119,7 @@ func TestSnapshotCadenceIsolationAndSlowConsumer(t *testing.T) {
 		if r.LatestSnapshot().Players[0].ID != 101 {
 			t.Fatal("polling consumer mutated stored snapshot")
 		}
-		advance(9) // Leave snapshots and metrics unread until tick 12.
+		advance(9) // 到第 12 Tick 前不读取快照和指标。
 		if len(r.Snapshots()) != 1 || len(r.TickSamples()) != 1 {
 			t.Fatal("unbounded output queue")
 		}
@@ -264,7 +264,7 @@ func TestTwoPlayersAndRoomIsolation(t *testing.T) {
 			}
 			advance(1)
 		}
-		// Advance to the next snapshot while preserving zero input.
+		// 保持零输入并推进到下一份快照。
 		for _, session := range []room.SessionID{11, 12} {
 			if err := moving.Input(session, game.Input{Seq: 31}); err != nil {
 				t.Fatal(err)
@@ -394,8 +394,8 @@ func TestParentCancellation(t *testing.T) {
 	})
 }
 
-// Exercises actual concurrent producers, snapshot mutation by consumers, owner
-// ticks and shutdown. synctest advances virtual time; -race checks shared access.
+// 覆盖真实并发生产者、消费者修改快照、房间 Tick 与停机；synctest 推进虚拟时间，
+// -race 用于检查共享访问。
 func TestConcurrentCommandsSnapshotsAndClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := start(t, 1, room.DefaultConfig())

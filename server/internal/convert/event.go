@@ -9,13 +9,10 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game"
 )
 
-// Event converts a domain game.Event into a wire message. It returns the
-// MessageType and the concrete protobuf message so the caller can marshal and
-// frame it exactly once. The caller is responsible for the header's
-// MessageType field.
+// Event 把领域 game.Event 转成线路消息，返回 MessageType 与具体 protobuf，调用方只需
+// 序列化和封帧一次，并负责设置帧头 MessageType。
 //
-// An unknown EventKind is a programming error: it returns an error rather than
-// silently dropping, so a newly added domain kind fails loudly at the boundary.
+// 未知 EventKind 属于程序错误，本函数明确返回错误而不静默丢弃，让新增领域类型在边界立即暴露。
 func Event(e game.Event) (uint16, proto.Message, error) {
 	switch e.Kind {
 	case game.StageStarted:

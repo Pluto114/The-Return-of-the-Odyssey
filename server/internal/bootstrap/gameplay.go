@@ -1,5 +1,4 @@
-// Package bootstrap assembles validated, immutable dependencies before the
-// gameserver starts accepting connections. It performs no work on Room ticks.
+// Package bootstrap 在服务端接收连接前组装已校验的不可变依赖，不参与 Room Tick。
 package bootstrap
 
 import (
@@ -15,8 +14,7 @@ import (
 
 const EquipmentCatalogVersion uint32 = 1
 
-// Gameplay is the D-owned configuration handoff to A's application lifecycle.
-// Its fields are private so callers cannot replace validated values in place.
+// Gameplay 是交给 application 生命周期的玩法配置；字段私有，调用方不能原地替换已校验值。
 type Gameplay struct {
 	catalog             equipment.Catalog
 	rewardDurationTicks uint64
@@ -26,8 +24,7 @@ type Gameplay struct {
 	valid               bool
 }
 
-// LoadGameplay loads the equipment catalog once and validates every gameplay
-// knob against B's world and Director rules. Failure must abort server startup.
+// LoadGameplay 一次性加载装备目录，并按 World 与导演规则校验全部玩法参数；失败必须中止启动。
 func LoadGameplay(cfg *config.Config, world game.Config) (Gameplay, error) {
 	if cfg == nil {
 		return Gameplay{}, fmt.Errorf("bootstrap gameplay: nil config")

@@ -11,8 +11,7 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/game/systems"
 )
 
-// Player IDs use the low half; World allocates monsters/projectiles in the high
-// half, monotonically and without reuse, to keep event references unambiguous.
+// 玩家 ID 使用低半区；World 在高半区单调分配怪物/投射物 ID 且不复用，保证事件引用无歧义。
 const FirstWorldEntityID entity.ID = 1 << 63
 const maxPendingEvents = 4096
 
@@ -51,8 +50,7 @@ const (
 	TeamDefeated
 )
 
-// Event is a domain value for A to map into reliable messages; it contains no
-// protobuf references. Projectile state intentionally stays out of snapshots.
+// Event 是可转换为可靠消息的领域值，不引用 protobuf；投射物状态刻意不放进快照。
 type Event struct {
 	Kind                         EventKind
 	StageIndex                   uint32
@@ -89,8 +87,7 @@ func orderedIDs[V any](m map[entity.ID]V) []entity.ID {
 	return ids
 }
 
-// ValidateStage checks plan shape without accessing mutable World state, so
-// Room may use it before copying and admitting the trusted server command.
+// ValidateStage 不访问可变 World 即可校验 Plan，Room 可在复制和接收可信命令前调用。
 func ValidateStage(plan stage.Plan, config Config) error {
 	return plan.Validate(config.Min, config.Max, config.Combat.MaxMonsters)
 }
@@ -107,8 +104,7 @@ func (w *World) StartStage(plan stage.Plan) error {
 	if next && plan.Index != w.stage.Index+1 {
 		return ErrStageIndex
 	}
-	// Install the new topology before relocating players, pickups or monsters;
-	// every collision consumer sees one authoritative layout for the stage.
+	// 先安装新地图拓扑，再放置玩家、掉落物与怪物，确保所有碰撞使用同一权威布局。
 	w.covers = buildCoverBlocks(w.config, plan.Index, plan.Seed)
 	if next {
 		for _, player := range w.players {
@@ -170,8 +166,7 @@ func (w *World) emit(e Event) {
 	w.events = append(w.events, e)
 }
 
-// TakeEvents transfers ownership of one batch. Failure to consume events is
-// detectable and bounded; reliable transport must never silently drop Overflow.
+// TakeEvents 转移一个批次的所有权。未及时消费可被检测且有界；可靠传输不能静默丢弃 Overflow。
 func (w *World) TakeEvents() EventBatch {
 	b := EventBatch{Events: w.events, Overflow: w.eventOverflow}
 	w.events = nil
@@ -230,9 +225,8 @@ func (w *World) stepCombat() {
 					continue
 				}
 				d := math.Hypot(p.Position.X-m.monster.Position.X, p.Position.Y-m.monster.Position.Y)
-				// Spread equal-distance attackers across the team while still
-				// favoring a nearby player. A little target persistence avoids
-				// visible direction changes at every decision tick.
+				// 等距离攻击者尽量分摊到全队，同时仍优先附近玩家；短暂保持目标可避免每次 AI
+				// 决策 Tick 都出现明显转向。
 				score := d + float64(assigned[pid])*2
 				if pid == previousTarget {
 					score -= 0.5
@@ -277,7 +271,7 @@ func (w *World) stepCombat() {
 			}
 		}
 	}
-	// Swept collision tests the whole segment, so fast bullets cannot tunnel.
+	// 连续碰撞检测覆盖整条线段，防止高速子弹穿透目标。
 	for _, id := range orderedIDs(w.projectiles) {
 		p := w.projectiles[id]
 		if w.tick >= p.ExpiresAtTick {
@@ -285,8 +279,7 @@ func (w *World) stepCombat() {
 			continue
 		}
 		end := entity.Vec2{X: p.Position.X + p.Velocity.X*StepSeconds, Y: p.Position.Y + p.Velocity.Y*StepSeconds}
-		// Clip at the map exit before testing targets so an off-map segment
-		// cannot hit an entity after the projectile should have disappeared.
+		// 先在地图出口截断线段再检测目标，避免投射物离场后仍命中实体。
 		fraction := 1.0
 		for _, axis := range [][4]float64{{p.Position.X, end.X, w.config.Min.X, w.config.Max.X}, {p.Position.Y, end.Y, w.config.Min.Y, w.config.Max.Y}} {
 			if axis[1] < axis[2] {
@@ -334,7 +327,7 @@ func (w *World) stepCombat() {
 		}
 	}
 	w.stage.MonstersRemaining = len(w.monsters)
-	// A simultaneous final kill and team wipe is defeat; no rewards are granted.
+	// 最后一只怪死亡与团灭同时发生时按失败处理，不发奖励。
 	if w.livingPlayers() == 0 {
 		w.runEndedAtTick = w.tick
 		w.stage.State = stage.Failed

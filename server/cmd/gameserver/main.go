@@ -32,9 +32,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/session"
 )
 
-// errClosing is a sentinel returned by the handler to signal the reader to
-// unwind after a graceful rejection (the Disconnect frame has been queued and
-// will be flushed by the writer before the socket closes).
+// errClosing 是 handler 返回的哨兵错误，表示优雅拒绝帧已排队，Reader 应退出；
+// Writer 会先刷新 Disconnect，再关闭 socket。
 var errClosing = errors.New("gameserver: closing connection after rejection")
 var errSendRejected = errors.New("gameserver: reliable send queue rejected frame")
 
@@ -282,7 +281,7 @@ func handlePing(c *network.Connection, h network.Header, payload []byte) error {
 	}
 	pong := &protocol.Pong{
 		ClientTimeMs: ping.ClientTimeMs,
-		ServerTimeMs: 0, // Phase 1: no clock source wired; echo nonce is enough
+		ServerTimeMs: 0, // 当前不提供时钟源，回显 nonce 即可
 		Nonce:        ping.Nonce,
 	}
 	return sendMessage(c, h, protocol.MessageType_MSG_PONG, pong)
@@ -296,9 +295,8 @@ func handleLogin(c *network.Connection, h network.Header, payload []byte, ids *i
 		return err
 	}
 
-	// Frame encoding remains v1, while gameplay v2 marks dynamic authoritative
-	// arena geometry. Reject legacy/unspecified clients to prevent prediction
-	// jitter and apparent wall clipping from mismatched collision layouts.
+	// 帧编码仍为 v1，玩法 v2 表示动态权威地图。拒绝旧版或未声明版本的客户端，避免
+	// 碰撞布局不一致导致预测抖动和视觉穿墙。
 	if req.ProtocolVersion != gameplayProtocolVersion {
 		resp := &protocol.LoginResponse{
 			ProtocolVersion: gameplayProtocolVersion,
@@ -318,28 +316,24 @@ func handleLogin(c *network.Connection, h network.Header, payload []byte, ids *i
 		Message:         "ok",
 		SessionId:       sessionID,
 		PlayerId:        playerID,
-		ResumeToken:     nil, // Phase 1: reconnect treated as a new session
+		ResumeToken:     nil, // 当前基础登录路径把重连视为新会话
 	}
 	return sendMessage(c, h, protocol.MessageType_MSG_LOGIN_RESPONSE, resp)
 }
 
-// sendDisconnect writes a Disconnect message (ReasonCode), flushes it, and
-// returns a sentinel error so the reader unwinds and the connection tears down
-// gracefully (the writer drains the queued Disconnect frame before the socket
-// closes).
+// sendDisconnect 排入带 ReasonCode 的 Disconnect，并返回哨兵错误让 Reader 退出；
+// Writer 排空终止帧后再关闭 socket，实现优雅断开。
 func sendDisconnect(c *network.Connection, h network.Header, reason protocol.ReasonCode, msg string) error {
 	d := &protocol.Disconnect{Reason: reason, Message: msg}
 	if err := sendMessage(c, h, protocol.MessageType_MSG_DISCONNECT, d); err != nil {
 		return err
 	}
-	// Queue the terminal frame, then let the reader unwind. CloseAfterFlush
-	// closes the out channel so the writer drains the Disconnect frame and
-	// then the connection closes.
+	// 终止帧入队后让 Reader 退出；CloseAfterFlush 关闭 out，使 Writer 排空后再断开。
 	c.CloseAfterFlush()
 	return errClosing
 }
 
-// sendMessage marshals msg and queues a complete frame on the connection.
+// sendMessage 序列化消息并把完整帧加入连接可靠队列。
 func sendMessage(c *network.Connection, h network.Header, mt protocol.MessageType, m proto.Message) error {
 	body, err := proto.Marshal(m)
 	if err != nil {
@@ -349,7 +343,7 @@ func sendMessage(c *network.Connection, h network.Header, mt protocol.MessageTyp
 		Magic:       network.Magic,
 		Version:     network.VersionV1,
 		MessageType: uint16(mt),
-		Sequence:    h.Sequence, // echo frame sequence for correlation
+		Sequence:    h.Sequence, // 回显帧序号便于关联请求与响应
 	}, body)
 	if err != nil {
 		return err

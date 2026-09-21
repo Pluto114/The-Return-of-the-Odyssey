@@ -37,9 +37,8 @@ func (o ResumeServiceOptions) Validate() error {
 	return nil
 }
 
-// ResumeService owns the Redis client lifecycle and its token repository.
-// Opening it performs a bounded Ping so an enabled production dependency
-// cannot appear healthy while all Resume operations are guaranteed to fail.
+// ResumeService 管理 Redis 客户端生命周期和令牌仓库。启动时执行有超时的 Ping，
+// 防止已启用依赖表面启动成功、实际所有恢复操作都必然失败。
 type ResumeService struct {
 	client *redis.Client
 	store  *ResumeTokenStore

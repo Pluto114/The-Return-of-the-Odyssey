@@ -15,9 +15,8 @@ import (
 // 的 World；否则一个慢请求会堵住该玩家后续所有消息。返回 error 表示应关闭连接。
 type Handler func(c *Connection, h Header, payload []byte) error
 
-// DisconnectHandler is invoked once after a connection has been untracked.
-// It must return quickly; application cleanup that may block should run in a
-// separate goroutine.
+// DisconnectHandler 在连接移出在线集合后调用一次。它必须快速返回；可能阻塞的业务清理
+// 应另起 goroutine 执行。
 type DisconnectHandler func(c *Connection)
 
 // Server 负责监听 TCP，并为每个客户端创建独立 Connection。
@@ -37,9 +36,8 @@ type serverCounters struct {
 	snapshotReplaced atomic.Uint64
 }
 
-// Stats is a point-in-time, process-wide network queue sample. Queue depths
-// include live connections only; counters remain monotonic after connections
-// close so a metrics sampler cannot lose their final values.
+// Stats 是进程级网络队列的瞬时样本。队列深度只统计在线连接；累计计数在连接关闭后仍
+// 保持单调，避免指标采样器漏掉连接结束前的最终数据。
 type Stats struct {
 	ActiveConnections      int
 	ReliableQueueDepth     int
@@ -49,16 +47,14 @@ type Stats struct {
 	SnapshotReplacements   uint64
 }
 
-// OnDisconnect installs the application lifecycle callback. Configure it
-// before Serve starts.
+// OnDisconnect 设置业务层断线回调，应在 Serve 启动前配置。
 func (s *Server) OnDisconnect(handler DisconnectHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDisconnect = handler
 }
 
-// NewServer creates a server that will route every connection's decoded
-// messages to handler.
+// NewServer 创建服务端，并把每条连接解码后的消息交给 handler。
 func NewServer(handler Handler, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
@@ -84,7 +80,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				return nil // expected shutdown
+				return nil // 预期的停机路径
 			default:
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -120,7 +116,7 @@ func (s *Server) newConnection(conn net.Conn) *Connection {
 	return c
 }
 
-// Stats returns queue depths and monotonic rejection/replacement counters.
+// Stats 返回队列深度以及单调递增的拒绝/替换计数。
 func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,16 +145,14 @@ func (s *Server) untrack(c *Connection) {
 	delete(s.conns, c)
 }
 
-// ActiveConns returns the current connection count (for metrics/health).
+// ActiveConns 返回当前连接数，供指标和健康检查使用。
 func (s *Server) ActiveConns() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
 }
 
-// CloseConnections terminates every active connection. It is used during
-// server shutdown so Serve cancellation cannot leave connection goroutines
-// behind after the listener is closed.
+// CloseConnections 终止全部在线连接，用于停机时确保监听器关闭后不残留连接 goroutine。
 func (s *Server) CloseConnections() {
 	s.mu.Lock()
 	connections := make([]*Connection, 0, len(s.conns))
@@ -193,36 +187,34 @@ type Connection struct {
 	// snapshot 是容量 1 的最新快照槽位；慢消费者会丢旧帧，不会阻塞发布者。
 	snapshot chan []byte
 
-	closeOnce sync.Once // protects socket close + onClose
-	queueOnce sync.Once // protects close(c.out)
-	deadOnce  sync.Once // protects close(c.closed)
+	closeOnce sync.Once // 保证 socket 与 onClose 只处理一次
+	queueOnce sync.Once // 保证 c.out 只关闭一次
+	deadOnce  sync.Once // 保证 c.closed 只关闭一次
 	closed    chan struct{}
 	onClose   func()
 	counters  *serverCounters
 
-	// ctx is opaque per-connection context owned by the caller (the session
-	// router). The network layer stores it without interpreting it, keeping
-	// network and session concerns separate.
+	// ctx 是调用方拥有的连接级不透明上下文（通常为 Session）。网络层只保存不解释，
+	// 从而把连接传输与会话业务解耦。
 	ctxMu sync.Mutex
 	ctx   interface{}
 }
 
-// SetContext stores an opaque per-connection value (typically the session
-// state). The network layer does not interpret it.
+// SetContext 保存连接级不透明值，通常是 Session；网络层不解释其内容。
 func (c *Connection) SetContext(v interface{}) {
 	c.ctxMu.Lock()
 	defer c.ctxMu.Unlock()
 	c.ctx = v
 }
 
-// Context returns the opaque per-connection value, or nil.
+// Context 返回连接级上下文，未设置时为 nil。
 func (c *Connection) Context() interface{} {
 	c.ctxMu.Lock()
 	defer c.ctxMu.Unlock()
 	return c.ctx
 }
 
-// IsClosed reports whether teardown has started.
+// IsClosed 表示连接清理是否已经开始。
 func (c *Connection) IsClosed() bool {
 	select {
 	case <-c.closed:
@@ -265,8 +257,7 @@ func (c *Connection) SendSnapshot(frame []byte) bool {
 		case c.snapshot <- frame:
 			return true
 		default:
-			// Slot full: evict the stale snapshot, then retry the send. The
-			// eviction loop is bounded by capacity 1, so this never spins.
+			// 槽位已满：淘汰旧快照后重试。容量固定为 1，因此不会无界自旋。
 			select {
 			case <-c.snapshot:
 				if c.counters != nil {
@@ -284,10 +275,8 @@ func (c *Connection) recordReliableRejection() {
 	}
 }
 
-// Close forces the connection down immediately. It is safe to call from any
-// goroutine and is idempotent. Closing the socket causes the reader to observe
-// an error and unwind, which in turn closes the out channel and releases
-// resources.
+// Close 立即强制关闭连接，可由任意 goroutine 幂等调用。socket 关闭会唤醒 Reader，
+// 随后结束发送队列并释放资源。
 func (c *Connection) Close() {
 	c.closeOnce.Do(func() {
 		c.deadOnce.Do(func() { close(c.closed) })
@@ -298,10 +287,8 @@ func (c *Connection) Close() {
 	})
 }
 
-// CloseAfterFlush closes the outbound queue so the writer drains any queued
-// frames (e.g. a final Disconnect) and then the connection tears down via
-// run()'s normal path. It is used for graceful rejection where the peer must
-// receive the terminal frame before the socket closes. Safe and idempotent.
+// CloseAfterFlush 先关闭发送队列，让 Writer 排空已排队帧（例如最终 Disconnect）后再按
+// run 的正常路径断开。用于必须让对端先收到终止帧的优雅拒绝，操作安全且幂等。
 func (c *Connection) CloseAfterFlush() {
 	c.closeQueue()
 }
@@ -313,8 +300,7 @@ func (c *Connection) closeQueue() {
 	c.queueOnce.Do(func() { close(c.out) })
 }
 
-// SetReadDeadline is exposed for the login-timeout path (a connection must
-// complete LoginRequest within LOGIN_TIMEOUT_MS or be closed).
+// SetReadDeadline 用于登录超时：连接必须在 LOGIN_TIMEOUT_MS 内完成 LoginRequest。
 func (c *Connection) SetReadDeadline(d time.Time) error { return c.conn.SetReadDeadline(d) }
 
 func (c *Connection) run() {
@@ -331,7 +317,7 @@ func (c *Connection) run() {
 	<-readerDone
 	c.closeQueue()
 	<-writerDone
-	c.Close() // idempotent: closes socket + untracks exactly once
+	c.Close() // 幂等：只关闭一次 socket 并只移出在线集合一次
 }
 
 func (c *Connection) readLoop(done chan<- struct{}) {
@@ -368,7 +354,7 @@ func (c *Connection) writeLoop(done chan<- struct{}) {
 		select {
 		case frame, ok := <-c.out:
 			if !ok {
-				// Reliable queue closed: drain any pending snapshot, then exit.
+				// 可靠队列已关闭：排空待发快照后退出。
 				for {
 					select {
 					case f := <-c.snapshot:
@@ -391,9 +377,7 @@ func (c *Connection) writeLoop(done chan<- struct{}) {
 	}
 }
 
-// writeFrame writes a single frame and flushes it so a partial frame is never
-// observed by the peer. It reports false on any error, signalling the writer
-// to unwind.
+// writeFrame 写入并刷新一个完整帧，避免对端观察到半帧；发生任何错误均返回 false。
 func (c *Connection) writeFrame(w *bufio.Writer, frame []byte) bool {
 	if _, err := w.Write(frame); err != nil {
 		c.logger.Debug("connection write failed", "err", err)

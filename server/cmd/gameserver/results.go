@@ -12,9 +12,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
-// A 128-bit random match ID is allocated with the room and reused across
-// delivery retries. Unlike process-local room IDs, it remains collision-
-// resistant across server restarts.
+// 房间创建时分配 128 位随机 matchID，发送重试始终复用；与进程内 roomID 不同，
+// 服务重启后仍具备抗碰撞能力。
 func newMatchID() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -23,15 +22,14 @@ func newMatchID() (string, error) {
 	return "match-" + hex.EncodeToString(value[:]), nil
 }
 
-// submitGameResult runs off the room Tick and the socket reader. The World
-// provides a detached authoritative result; the writer admits it without
-// waiting for MySQL. Duplicate terminal events do not enqueue a second result.
+// submitGameResult 在 Room Tick 与 socket Reader 之外运行。World 提供独立权威结果，
+// writer 无需等待 MySQL 即可接收；重复终局事件不会重复入队。
 func (a *gameApplication) submitGameResult(roomID room.ID, outcome game.GameOutcome) {
 	a.submitGameResultAfterCapture(roomID, outcome, nil)
 }
 
-// afterCapture releases the last disconnect's Room membership once the result
-// no longer depends on live World state. It also runs when capture is refused.
+// 结果不再依赖 live World 后，afterCapture 释放最后断线玩家的 Room 成员关系；
+// 即使结果捕获被拒绝也会执行。
 func (a *gameApplication) submitGameResultAfterCapture(roomID room.ID, outcome game.GameOutcome, afterCapture func()) {
 	defer func() {
 		if afterCapture != nil {
@@ -90,9 +88,8 @@ func (a *gameApplication) submitGameResultAfterCapture(roomID room.ID, outcome g
 		afterCapture()
 		afterCapture = nil
 	}
-	// A final disconnect can overtake delivery of the last StageCleared event.
-	// The copied World history is authoritative: a cleared final stage is a
-	// victory even when its event observer has not yet updated application state.
+	// 最终断线可能早于最后一个 StageCleared 事件到达。复制的 World 历史才是权威：
+	// 即使事件观察器尚未更新 application 状态，最终关已通关仍判定胜利。
 	result = terminalResultOnDeparture(result, a.gameplay.StageLimit())
 	envelope := persistence.ResultEnvelope{MatchID: active.matchID, RoomID: uint64(roomID),
 		CreatedAt: active.createdAt, Result: result}
@@ -107,7 +104,7 @@ func (a *gameApplication) submitGameResultAfterCapture(roomID room.ID, outcome g
 			a.logger.Error("terminal result rejected", "room_id", roomID, "match_id", active.matchID, "err", err)
 			return
 		}
-		// A copied result no longer depends on the Room staying alive.
+		// 结果复制完成后不再依赖 Room 存活。
 		if !a.waitResultRetry(nil) {
 			a.logger.Error("result queue never accepted terminal result", "room_id", roomID, "match_id", active.matchID)
 			return

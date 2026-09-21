@@ -20,8 +20,7 @@ const (
 
 var ErrRewardState = errors.New("reward action is not valid in the current stage state")
 
-// RewardUpdate is a targeted reliable domain message. A must deliver it only
-// to PlayerID; combat events remain safe to broadcast to the whole room.
+// RewardUpdate 是定向可靠领域消息，只能发送给对应 PlayerID；战斗事件仍可全房间广播。
 type RewardUpdate struct {
 	Kind         RewardUpdateKind
 	StageIndex   uint32
@@ -43,9 +42,8 @@ type RewardUpdateBatch struct {
 	Overflow bool
 }
 
-// StartReward validates every catalog item against every current player before
-// changing state. That makes every offered choice and timeout default safe to
-// apply later without partially mutating player state.
+// StartReward 在改变状态前先用所有当前玩家校验目录中每件物品，确保之后应用任一选项或
+// 超时默认项都安全，不会只修改玩家一半状态。
 func (w *World) StartReward(catalog equipment.Catalog, seed int64, durationTicks uint64) error {
 	if w.stage.State != stage.StageClear || w.rewardRound != nil {
 		return ErrRewardState
@@ -147,8 +145,7 @@ func (w *World) emitRewardUpdate(update RewardUpdate) {
 	w.rewardUpdates = append(w.rewardUpdates, update.Clone())
 }
 
-// TakeRewardUpdates transfers one targeted batch to the Room owner. It must be
-// consumed every tick just like TakeEvents.
+// TakeRewardUpdates 把一个定向批次转移给 Room，必须像 TakeEvents 一样每 Tick 消费。
 func (w *World) TakeRewardUpdates() RewardUpdateBatch {
 	batch := RewardUpdateBatch{Updates: w.rewardUpdates, Overflow: w.rewardOverflow}
 	w.rewardUpdates = nil

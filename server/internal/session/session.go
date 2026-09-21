@@ -1,12 +1,9 @@
-// Package session implements the per-connection session state machine that
-// sits between the network layer (Role A) and the Room business logic (Role B).
+// Package session 实现每条连接独立的会话状态机，位于网络层与 Room 业务层之间。
 //
-// Every decoded inbound message must pass through the state machine BEFORE
-// being routed to the Room. The legality matrix is frozen in
-// docs/protocol/message-routing.md; do not diverge from it.
+// 每条已解码消息在路由到 Room 前都必须先通过状态机校验。合法性矩阵以
+// docs/protocol/message-routing.md 为准，修改时必须保持一致。
 //
-// Resume/Redis token ownership belongs to Role D; this package only consumes
-// the ResumeRequest/ResumeResponse messages, it does not manage tokens.
+// 断线恢复使用的 Redis 令牌由持久化层管理；本包只处理恢复相关的会话状态，不管理令牌。
 package session
 
 import (
@@ -15,10 +12,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/generated/protocol"
 )
 
-// State mirrors protocol.SessionState but is the in-process domain type.
-// We intentionally do NOT reuse the protobuf enum directly as domain state
-// (ARCHITECTURE.md §10: protobuf must not carry domain state); we map to it
-// only when producing wire messages.
+// State 是进程内的领域状态，与 protocol.SessionState 对应，但不直接复用 protobuf 枚举。
+// 只有生成网络消息时才转换，避免把传输结构当作服务端内部状态。
 type State uint8
 
 const (
@@ -52,7 +47,7 @@ func (s State) String() string {
 	}
 }
 
-// ToProto maps the domain state to the wire enum.
+// ToProto 将进程内状态转换成网络协议枚举。
 func (s State) ToProto() protocol.SessionState {
 	switch s {
 	case StateConnected:
@@ -74,13 +69,10 @@ func (s State) ToProto() protocol.SessionState {
 	}
 }
 
-// legalityMatrix encodes the message x state table from
-// docs/protocol/message-routing.md. A message type present in a state's set is
-// legal in that state.
+// legalityMatrix 实现“消息类型 × 会话状态”合法性表；某消息出现在对应集合中，
+// 才允许在该状态继续处理。
 //
-// Build note: this is indexed by State; the three system messages (Ping/Pong)
-// are legal in every pre-DISCONNECTED state and are handled separately in
-// Accept to avoid repeating them in every row.
+// Ping/Pong 在断线前的所有状态都合法，因此在 Accept 中统一处理，避免每行重复配置。
 var legalityMatrix = map[State]map[protocol.MessageType]bool{
 	StateConnected: {
 		protocol.MessageType_MSG_LOGIN_REQUEST:  true,
@@ -91,19 +83,17 @@ var legalityMatrix = map[State]map[protocol.MessageType]bool{
 		protocol.MessageType_MSG_MATCH_CANCEL:  true,
 	},
 	StateMatching: {
-		protocol.MessageType_MSG_MATCH_REQUEST: true, // no-op (idempotent)
+		protocol.MessageType_MSG_MATCH_REQUEST: true, // 不执行额外操作，保持幂等
 		protocol.MessageType_MSG_MATCH_CANCEL:  true,
 	},
 	StateInRoom: {
-		protocol.MessageType_MSG_MATCH_REQUEST:      true, // replay only after defeat or final clear
+		protocol.MessageType_MSG_MATCH_REQUEST:      true, // 仅团灭或最终通关后允许重赛
 		protocol.MessageType_MSG_PLAYER_INPUT:       true,
 		protocol.MessageType_MSG_NEXT_STAGE_REQUEST: true,
 	},
 	StateReward: {
-		// A client can have one or two 30 Hz inputs already in flight when the
-		// authoritative room crosses StageClear -> Reward. The application
-		// decodes and drops them; treating that normal hand-off as a protocol
-		// violation would disconnect healthy players.
+		// 权威房间从 StageClear 切到 Reward 时，网络中可能仍有一两个 30Hz 输入包。
+		// 编排层会解码后丢弃；若把正常的在途包视为违规，会错误断开健康玩家。
 		protocol.MessageType_MSG_PLAYER_INPUT:       true,
 		protocol.MessageType_MSG_REWARD_CHOICE:      true,
 		protocol.MessageType_MSG_NEXT_STAGE_REQUEST: true,
@@ -123,49 +113,44 @@ type Session struct {
 	roomID    uint64
 }
 
-// New returns a Session in the Connected state with no identity.
+// New 创建处于 Connected 状态、尚未分配身份的 Session。
 func New() *Session {
 	return &Session{state: StateConnected}
 }
 
-// State returns the current state (read-only).
+// State 返回当前会话状态。
 func (s *Session) State() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.state
 }
 
-// Identity returns the assigned session/player IDs (both 0 until login).
+// Identity 返回服务端分配的 sessionID/playerID；登录前二者均为 0。
 func (s *Session) Identity() (sessionID, playerID uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sessionID, s.playerID
 }
 
-// RoomID returns the room the session is bound to, or 0 when not in a room.
-// The router (not this package) is the sole writer; it stores the raw room.ID
-// as uint64 to avoid importing the room package into the state machine.
+// RoomID 返回当前绑定的房间，未进房时为 0。绑定只由 router 写入；这里用 uint64
+// 保存原始 room.ID，以免状态机反向依赖 room 包。
 func (s *Session) RoomID() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.roomID
 }
 
-// BindRoom records the room binding. It is called by the router after a
-// successful Join receipt (nil result). A non-zero id marks the session as
-// in-room; zero clears the binding on leave.
+// BindRoom 记录房间绑定。router 只有在 Join 回执成功后才调用；非零表示已进房，
+// 传入 0 表示离开并清除绑定。
 func (s *Session) BindRoom(id uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.roomID = id
 }
 
-// Accept validates whether mt is legal in the current state, returning the
-// rejection ReasonCode when it is not. It returns true only when the message
-// may proceed.
+// Accept 判断消息 mt 在当前状态是否允许继续；拒绝时同时返回协议原因码。
 //
-// Ping/Pong are legal in every state before DISCONNECTED/CLOSED, matching the
-// routing matrix.
+// 按路由矩阵约定，Ping/Pong 在 DISCONNECTED/CLOSED 之前的所有状态都合法。
 func (s *Session) Accept(mt protocol.MessageType) (ok bool, reason protocol.ReasonCode) {
 	s.mu.RLock()
 	state := s.state
@@ -188,10 +173,8 @@ func (s *Session) Accept(mt protocol.MessageType) (ok bool, reason protocol.Reas
 	return false, protocol.ReasonCode_REASON_INVALID_STATE
 }
 
-// Transition performs an explicit state change. It is intended for lifecycle
-// events that originate from outside inbound message validation (login
-// success, match found, TCP loss, close). It returns false if the transition
-// is not allowed from the current state.
+// Transition 执行显式状态切换，用于登录成功、匹配完成、TCP 断开和关闭等生命周期事件。
+// 若当前状态不允许切到目标状态则返回 false。
 func (s *Session) Transition(to State) bool {
 	// “检查是否合法”和“真正赋值”必须放在同一写锁内，否则两个并发状态切换都可能
 	// 基于同一个旧状态通过检查，最终得到不可预测的结果。
@@ -204,21 +187,20 @@ func (s *Session) Transition(to State) bool {
 	return true
 }
 
-// canTransition encodes the arrow diagram from message-routing.md. CLOSED is
-// a one-way terminal state.
+// canTransition 实现 message-routing.md 中的状态迁移图；CLOSED 是不可离开的终态。
 func (s *Session) canTransition(from, to State) bool {
 	if from == StateClosed {
-		return false // terminal
+		return false // 终态
 	}
 	switch to {
 	case StateClosed:
-		// any live state may close (disconnect grace expiry, server shutdown).
+		// 任意存活状态都可关闭，例如重连宽限期结束或服务端停机。
 		return true
 	case StateDisconnected:
-		// TCP loss from any non-terminal state.
+		// 任意非终态都可能因 TCP 中断进入断线状态。
 		return from != StateClosed
 	case StateLobby:
-		// login ok (connected) or match cancelled (matching -> lobby).
+		// 登录成功，或玩家取消匹配时回到大厅。
 		return from == StateConnected || from == StateMatching
 	case StateMatching:
 		return from == StateLobby
@@ -227,14 +209,12 @@ func (s *Session) canTransition(from, to State) bool {
 	case StateReward:
 		return from == StateInRoom
 	case StateConnected:
-		return from == StateDisconnected // rebind before resume completes
+		return from == StateDisconnected // 恢复完成前先重新绑定
 	}
 	return false
 }
 
-// AssignIdentity records the server-issued session/player IDs after a
-// successful login. Only valid in the Connected state; the caller transitions
-// to Lobby separately.
+// AssignIdentity 在登录成功后记录服务端分配的 session/player ID；调用方随后另行切到 Lobby。
 func (s *Session) AssignIdentity(sessionID, playerID uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -13,10 +13,8 @@ import (
 	"github.com/Pluto114/The-Return-of-the-Odyssey/server/internal/room"
 )
 
-// EventSink is the reliable delivery target for a single player. The network
-// layer's *network.Connection satisfies it (Send). Unlike snapshots, events
-// are not lossy-tolerant: a full reliable queue means the connection is
-// already saturated and the room is on its way to event_backpressure.
+// EventSink 是单个玩家的可靠发送目标，*network.Connection 通过 Send 实现它。
+// 事件与快照不同，不允许丢失；可靠队列满说明连接已饱和，需要执行背压处理。
 type EventSink interface {
 	Send(frame []byte) bool
 }
@@ -34,22 +32,19 @@ type EventDispatcher struct {
 	roomID room.ID
 }
 
-// NewEventDispatcher returns a dispatcher with no subscribers.
+// NewEventDispatcher 创建没有订阅者的事件分发器。
 func NewEventDispatcher() *EventDispatcher {
 	return &EventDispatcher{sinks: make(map[entity.ID]EventSink), logger: slog.Default()}
 }
 
-// SetLogger installs the logger used to report reliable-queue saturation
-// (Send returning false). The default is slog.Default(); a nil logger silences
-// saturation reporting entirely.
+// SetLogger 设置记录可靠队列饱和的日志器；默认使用 slog.Default，nil 表示完全静默。
 func (d *EventDispatcher) SetLogger(logger *slog.Logger) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.logger = logger
 }
 
-// Subscribe registers (or replaces) the sink for a player. Passing nil
-// unregisters.
+// Subscribe 注册或替换玩家 sink；传 nil 表示取消注册。
 func (d *EventDispatcher) Subscribe(playerID entity.ID, sink EventSink) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -60,25 +55,22 @@ func (d *EventDispatcher) Subscribe(playerID entity.ID, sink EventSink) {
 	d.sinks[playerID] = sink
 }
 
-// Unsubscribe removes a player's sink (called on leave/disconnect).
+// Unsubscribe 在离开或断线时移除玩家 sink。
 func (d *EventDispatcher) Unsubscribe(playerID entity.ID) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.sinks, playerID)
 }
 
-// Subscribers returns the current player count (for metrics/health).
+// Subscribers 返回当前订阅玩家数，供指标和健康检查使用。
 func (d *EventDispatcher) Subscribers() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return len(d.sinks)
 }
 
-// Run drains rm.Events() until the channel closes (room closed). It blocks;
-// run it in its own goroutine. Stage-scoped events carry their authoritative
-// stage index, so dispatch does not depend on a potentially older snapshot.
-// It records the room identity once so dispatch and saturation logs can be
-// correlated to the owning room (D5 observability).
+// Run 持续消费 rm.Events() 到房间关闭，必须单独运行。关卡事件自带权威 stage index，
+// 分发不依赖可能滞后的快照；同时记录 roomID，便于关联分发和队列饱和日志。
 func (d *EventDispatcher) Run(rm *room.Room) {
 	d.mu.Lock()
 	d.roomID = rm.Stats().RoomID
@@ -88,16 +80,13 @@ func (d *EventDispatcher) Run(rm *room.Room) {
 	}
 }
 
-// Dispatch fans a single event batch out to its subscribers. It is separated
-// from Run for testability.
+// Dispatch 向所有订阅者分发一个事件批次；与 Run 分离便于测试。
 func (d *EventDispatcher) Dispatch(batch game.EventBatch) {
 	for _, e := range batch.Events {
 		mt, msg, err := convert.Event(e)
 		if err != nil {
-			// An unknown kind is a programming error, not a recoverable network
-			// condition. Skip it but keep draining (do not wedge the stream),
-			// and surface it with full correlation fields so a bad event is
-			// traceable to its room/stage/tick/entity (D5 observability).
+			// 未知事件类型属于程序错误而非网络故障。跳过该项但继续消费，避免堵死事件流；
+			// 同时记录 room/stage/tick/entity 关联字段以便追踪。
 			d.logBadEvent(e, err)
 			continue
 		}
@@ -119,9 +108,8 @@ func (d *EventDispatcher) Dispatch(batch game.EventBatch) {
 	}
 }
 
-// logBadEvent reports a dropped event (unknown kind, marshal, or encode
-// failure) with room/stage/tick/entity correlation. These are never network
-// conditions — they indicate a server-side contract violation.
+// logBadEvent 记录因未知类型、序列化或编码失败而丢弃的事件，并附带关联字段；
+// 这些都表示服务端契约错误，不是可恢复网络问题。
 func (d *EventDispatcher) logBadEvent(e game.Event, err error) {
 	d.mu.RLock()
 	roomID := d.roomID
@@ -141,15 +129,11 @@ func (d *EventDispatcher) logBadEvent(e game.Event, err error) {
 	)
 }
 
-// broadcast delivers one already-encoded frame to every subscriber. It takes
-// the lock once per event (not per sink) so a slow sink cannot block the room
-// tick indirectly; Send itself is non-blocking.
+// broadcast 把已编码帧发给所有订阅者。每个事件只获取一次锁，Send 本身无阻塞，
+// 慢 sink 不会间接阻塞 Room Tick。
 //
-// A sink returning false means its reliable queue is saturated. The sink is
-// responsible for the disconnect (the closingSink closes the slow connection);
-// the dispatcher's job here is to surface the event — not to silently drop it
-// — so saturation is observable as an event_backpressure signal. Delivery to
-// other subscribers is unaffected.
+// sink 返回 false 表示可靠队列饱和；closingSink 负责关闭慢连接，分发器负责记录而不
+// 静默丢弃，其他订阅者的投递不受影响。
 func (d *EventDispatcher) broadcast(frame []byte) {
 	// Send 只做有界 channel 入队，不做真实网络 I/O，因此在读锁内遍历不会被慢 socket
 	// 长时间卡住；写 socket 的工作由每条 Connection 自己的 Writer goroutine 完成。
