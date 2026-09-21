@@ -286,16 +286,20 @@ func handlePing(c *network.Connection, h network.Header, payload []byte) error {
 	return sendMessage(c, h, protocol.MessageType_MSG_PONG, pong)
 }
 
+const gameplayProtocolVersion uint32 = 2
+
 func handleLogin(c *network.Connection, h network.Header, payload []byte, ids *idAllocator, sess *session.Session) error {
 	var req protocol.LoginRequest
 	if err := proto.Unmarshal(payload, &req); err != nil {
 		return err
 	}
 
-	// Protocol version check: must match the header Version (both = 1).
-	if req.ProtocolVersion != 0 && req.ProtocolVersion != uint32(network.VersionV1) {
+	// Frame encoding remains v1, while gameplay v2 marks dynamic authoritative
+	// arena geometry. Reject legacy/unspecified clients to prevent prediction
+	// jitter and apparent wall clipping from mismatched collision layouts.
+	if req.ProtocolVersion != gameplayProtocolVersion {
 		resp := &protocol.LoginResponse{
-			ProtocolVersion: uint32(network.VersionV1),
+			ProtocolVersion: gameplayProtocolVersion,
 			Reason:          protocol.ReasonCode_REASON_INVALID_VERSION,
 			Message:         "unsupported protocol version",
 		}
@@ -307,7 +311,7 @@ func handleLogin(c *network.Connection, h network.Header, payload []byte, ids *i
 	sess.Transition(session.StateLobby)
 
 	resp := &protocol.LoginResponse{
-		ProtocolVersion: uint32(network.VersionV1),
+		ProtocolVersion: gameplayProtocolVersion,
 		Reason:          protocol.ReasonCode_REASON_OK,
 		Message:         "ok",
 		SessionId:       sessionID,

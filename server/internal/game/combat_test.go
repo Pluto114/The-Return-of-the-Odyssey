@@ -177,7 +177,9 @@ func TestMovingTargetUsesRelativeSweep(t *testing.T) {
 }
 
 func TestMonsterChasesAtFixedRateAndRetargets(t *testing.T) {
-	w, err := game.NewWorld(game.DefaultConfig())
+	config := game.DefaultConfig()
+	config.CoverEnabled = false
+	w, err := game.NewWorld(config)
 	if err != nil {
 		t.Fatal(err)
 	}

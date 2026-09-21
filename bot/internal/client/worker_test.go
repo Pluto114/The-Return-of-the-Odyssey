@@ -386,7 +386,7 @@ func TestRunMatchResumesAfterTransientDisconnect(t *testing.T) {
 			serverErrors <- err
 			return
 		}
-		if string(resume.ResumeToken) != "resume-once" || resume.ProtocolVersion != 1 {
+		if string(resume.ResumeToken) != "resume-once" || resume.ProtocolVersion != 2 {
 			serverErrors <- fmt.Errorf("resume request = %+v", &resume)
 			return
 		}

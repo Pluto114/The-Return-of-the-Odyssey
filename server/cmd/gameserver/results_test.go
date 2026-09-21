@@ -191,7 +191,7 @@ func TestApplicationLastDisconnectQueuesAbandonedResult(t *testing.T) {
 		}
 		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
 		defer conn.Close()
-		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 2})
 		var login pb.LoginResponse
 		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		appSend(t, peers[i], pb.MessageType_MSG_MATCH_REQUEST, 2, &pb.MatchRequest{})

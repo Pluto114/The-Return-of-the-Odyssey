@@ -91,6 +91,7 @@ func TestFirstStagePlanStartsExactlyOnce(t *testing.T) {
 
 func TestMonsterRetargetsOnlyOnTenHertzDecisionTick(t *testing.T) {
 	config := game.DefaultConfig()
+	config.CoverEnabled = false
 	w, err := game.NewWorld(config)
 	if err != nil {
 		t.Fatal(err)

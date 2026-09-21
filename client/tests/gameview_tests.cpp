@@ -2,6 +2,7 @@
 // sequencing, and full-snapshot application semantics. No window, no sockets.
 #include "input/InputSample.h"
 #include "input/OneShotAction.h"
+#include "scene/StageScene.h"
 #include "sync/CombatView.h"
 #include "sync/CombatFeedback.h"
 #include "sync/GameView.h"
@@ -65,6 +66,58 @@ using odyssey::client::sync::StageInfo;
 using odyssey::client::sync::StepMovement;
 
 constexpr float kEps = 1e-5f;
+
+void TestProceduralStageScenes() {
+    using odyssey::client::scene::MakeStageScene;
+    const auto first = MakeStageScene(1, 4242);
+    const auto repeat = MakeStageScene(1, 4242);
+    CHECK(first.fingerprint == repeat.fingerprint);
+    CHECK(first.biome == repeat.biome);
+    CHECK(first.stars[17].x == repeat.stars[17].x);
+    CHECK(first.landmarks[5].phase == repeat.landmarks[5].phase);
+
+    const auto next = MakeStageScene(2, 4242);
+    CHECK(first.fingerprint != next.fingerprint);
+    CHECK(first.biome != next.biome);
+    CHECK(first.stars[0].x != next.stars[0].x || first.stars[0].z != next.stars[0].z);
+
+    for (std::uint32_t index = 1; index <= 24; ++index) {
+        const auto scene = MakeStageScene(index, 8000 + index);
+        CHECK(scene.grid_columns >= 8 && scene.grid_columns <= 13);
+        CHECK(scene.grid_rows >= 6 && scene.grid_rows <= 10);
+        for (const auto& star : scene.stars) {
+            CHECK(star.x >= 0.0f && star.x <= 1.0f);
+            CHECK(star.z >= 0.0f && star.z <= 1.0f);
+        }
+        for (const auto& landmark : scene.landmarks) {
+            CHECK(landmark.x >= 0.0f && landmark.x <= 1.0f);
+            CHECK(landmark.z >= 0.0f && landmark.z <= 1.0f);
+        }
+    }
+}
+
+void TestDynamicArenaLayouts() {
+    using odyssey::client::sync::InsideCover;
+    using odyssey::client::sync::MakeArenaLayout;
+    std::vector<std::string> signatures;
+    for (std::uint32_t index = 1; index <= 12; ++index) {
+        const auto layout = MakeArenaLayout(index, static_cast<std::int64_t>(index) * 4242);
+        CHECK(layout.block_count >= 6);
+        CHECK(!InsideCover(layout, 10.0f, 10.0f, 0.5f));
+        std::ostringstream signature;
+        signature << static_cast<std::uint32_t>(layout.topology) << ':'
+                  << layout.rotation << ':' << layout.mirrored;
+        for (std::size_t block_index = 0; block_index < layout.block_count; ++block_index) {
+            const auto& block = layout.blocks[block_index];
+            CHECK(block.min_x >= 0.0f && block.min_z >= 0.0f);
+            CHECK(block.max_x <= 20.0f && block.max_z <= 20.0f);
+            signature << ';' << block.min_x << ',' << block.min_z << ','
+                      << block.max_x << ',' << block.max_z;
+        }
+        for (const auto& previous : signatures) CHECK(previous != signature.str());
+        signatures.push_back(signature.str());
+    }
+}
 
 void TestAuthoritativeMatchScoreboard() {
     MatchScoreboard scoreboard;
@@ -145,6 +198,7 @@ void TestBoundedCombatFeedback() {
 
 void TestWindowTitleIdentifiesScoreboardBuild() {
     CHECK(std::string_view(odyssey::client::ui::kWindowTitle).find("积分榜") != std::string_view::npos);
+    CHECK(std::string_view(odyssey::client::ui::kWindowTitle).find("战术地图 V2") != std::string_view::npos);
 }
 
 void TestRewardCardSelection() {
@@ -646,11 +700,14 @@ void TestStepMovementRules() {
     CHECK(z4 <= kArenaMax);
 
     // Local prediction stops at the same cover edge as the server.
-    float x = 15.0f;
+    const auto layout = odyssey::client::sync::MakeArenaLayout(1, 0);
+    const auto& cover = layout.blocks[0];
+    float x = cover.max_x + 0.45f;
+    const float z = (cover.min_z + cover.max_z) * 0.5f;
     for (int i = 0; i < 10; ++i) {
-        x = StepMovement(x, 8.9f, -1.0f, 0.0f, kSimulationStepSeconds).first;
+        x = StepMovement(x, z, -1.0f, 0.0f, kSimulationStepSeconds, layout).first;
     }
-    CHECK(x > 14.72f && x < 15.0f);
+    CHECK(x >= cover.max_x + 0.32f);
 }
 
 void TestSnapshotInterpolation() {
@@ -689,6 +746,8 @@ void TestSnapshotInterpolation() {
 }  // namespace
 
 int main() {
+    TestProceduralStageScenes();
+    TestDynamicArenaLayouts();
     TestAuthoritativeMatchScoreboard();
     TestReplayAfterTerminalStage();
     TestBoundedCombatFeedback();

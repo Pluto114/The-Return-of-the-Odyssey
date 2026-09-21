@@ -123,6 +123,20 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 		}
 	}()
 
+	legacyConn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := appPeer{conn: legacyConn, reader: bufio.NewReader(legacyConn)}
+	appSend(t, legacy, pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+	var rejected pb.LoginResponse
+	appRead(t, legacy, pb.MessageType_MSG_LOGIN_RESPONSE, &rejected)
+	if rejected.Reason != pb.ReasonCode_REASON_INVALID_VERSION ||
+		rejected.ProtocolVersion != gameplayProtocolVersion || rejected.SessionId != 0 {
+		t.Fatalf("legacy client was not rejected: %+v", &rejected)
+	}
+	legacyConn.Close()
+
 	peers := make([]appPeer, 2)
 	for i := range peers {
 		conn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
@@ -130,7 +144,7 @@ func TestApplicationMatchMoveAndDisconnectLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
-		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 2})
 		var login pb.LoginResponse
 		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		if login.Reason != pb.ReasonCode_REASON_OK {
@@ -257,7 +271,7 @@ func TestApplicationFirstStageFailureDoesNotAnnounceMatch(t *testing.T) {
 		}
 		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
 		defer conn.Close()
-		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 2})
 		var login pb.LoginResponse
 		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		if login.Reason != pb.ReasonCode_REASON_OK {
@@ -324,7 +338,7 @@ func testApplicationAdvance(t *testing.T, opening uint32) {
 		}
 		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
 		defer conn.Close()
-		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 2})
 		var login pb.LoginResponse
 		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		if login.Reason != pb.ReasonCode_REASON_OK {
@@ -473,7 +487,7 @@ func testApplicationReplay(t *testing.T, victory bool) {
 		}
 		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
 		defer conn.Close()
-		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 2})
 		var login pb.LoginResponse
 		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		if login.Reason != pb.ReasonCode_REASON_OK {
@@ -642,7 +656,7 @@ func TestApplicationRematchStartFailureKeepsTeamInFailedRoom(t *testing.T) {
 		}
 		peers[i] = appPeer{conn: conn, reader: bufio.NewReader(conn)}
 		defer conn.Close()
-		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 1})
+		appSend(t, peers[i], pb.MessageType_MSG_LOGIN_REQUEST, 1, &pb.LoginRequest{ProtocolVersion: 2})
 		var login pb.LoginResponse
 		appRead(t, peers[i], pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		if login.Reason != pb.ReasonCode_REASON_OK {

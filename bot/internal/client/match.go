@@ -449,7 +449,7 @@ func RunMatch(ctx context.Context, address string, clientID int, config MatchCon
 		return sendMessage(conn, messageType, frameSequence, message)
 	}
 	if err := send(pb.MessageType_MSG_LOGIN_REQUEST, &pb.LoginRequest{
-		ProtocolVersion: 1, Token: "dev", DisplayName: fmt.Sprintf("bot-%d", clientID),
+		ProtocolVersion: 2, Token: "dev", DisplayName: fmt.Sprintf("bot-%d", clientID),
 	}); err != nil {
 		return result, err
 	}
@@ -536,7 +536,7 @@ func RunMatch(ctx context.Context, address string, clientID int, config MatchCon
 			}
 			frameSequence = 1
 			if err := sendMessage(conn, pb.MessageType_MSG_RESUME_REQUEST, frameSequence, &pb.ResumeRequest{
-				ResumeToken: resumeToken, ProtocolVersion: 1,
+				ResumeToken: resumeToken, ProtocolVersion: 2,
 			}); err != nil {
 				progress.setDisconnect(err.Error())
 				return progress.result(clientID, login.SessionId, login.PlayerId), err

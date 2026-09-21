@@ -116,6 +116,7 @@ type World struct {
 	monsters         map[entity.ID]*monsterState
 	projectiles      map[entity.ID]entity.Projectile
 	pickups          map[entity.ID]PickupView
+	covers           []coverBlock
 	nextEntity       entity.ID
 	stage            stage.View
 	events           []Event
@@ -181,6 +182,7 @@ func (w *World) Clear() {
 	clear(w.monsters)
 	clear(w.projectiles)
 	clear(w.pickups)
+	w.covers = nil
 	w.events = nil
 	w.eventOverflow = false
 	w.rewardRound = nil

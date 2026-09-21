@@ -34,19 +34,26 @@ struct InputCommand {
 
 // One deterministic movement step: direction is limited to unit length first,
 // so diagonal input never moves faster (plan T05/T06), then the arena clamps.
-inline std::pair<float, float> StepMovement(float x, float z, float dx, float dz, float dt) {
+inline std::pair<float, float> StepMovement(float x, float z, float dx, float dz, float dt,
+                                            const ArenaLayout& layout) {
     const float length_sq = dx * dx + dz * dz;
     if (length_sq > 1.0f) {
         const float inv = 1.0f / std::sqrt(length_sq);
         dx *= inv;
         dz *= inv;
     }
-    return MoveAroundCover(x, z, dx * kMoveSpeedUnitsPerSecond * dt,
+    return MoveAroundCover(layout, x, z, dx * kMoveSpeedUnitsPerSecond * dt,
                            dz * kMoveSpeedUnitsPerSecond * dt);
+}
+
+inline std::pair<float, float> StepMovement(float x, float z, float dx, float dz, float dt) {
+    return StepMovement(x, z, dx, dz, dt, MakeArenaLayout(0, 0));
 }
 
 class MovementPredictor {
 public:
+    void SetArenaLayout(const ArenaLayout& layout) { layout_ = layout; }
+
     // New session (or first authoritative snapshot of a resumed session).
     void Reset() {
         pending_.clear();
@@ -60,7 +67,7 @@ public:
     // applied locally immediately (prediction) and remembered for replay.
     void RecordInput(const InputCommand& command) {
         const auto [nx, nz] = StepMovement(x_, z_, command.dx, command.dz,
-                                           kSimulationStepSeconds);
+                                           kSimulationStepSeconds, layout_);
         x_ = nx;
         z_ = nz;
         has_prediction_ = true;
@@ -86,7 +93,7 @@ public:
         has_prediction_ = true;
         for (const auto& command : pending_) {
             const auto [nx, nz] = StepMovement(x_, z_, command.dx, command.dz,
-                                               kSimulationStepSeconds);
+                                               kSimulationStepSeconds, layout_);
             x_ = nx;
             z_ = nz;
         }
@@ -107,6 +114,7 @@ private:
     float z_ = 0.0f;
     bool has_prediction_ = false;
     float last_correction_distance_ = 0.0f;
+    ArenaLayout layout_ = MakeArenaLayout(0, 0);
 };
 
 }  // namespace odyssey::client::sync

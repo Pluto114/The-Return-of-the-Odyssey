@@ -107,6 +107,9 @@ func (w *World) StartStage(plan stage.Plan) error {
 	if next && plan.Index != w.stage.Index+1 {
 		return ErrStageIndex
 	}
+	// Install the new topology before relocating players, pickups or monsters;
+	// every collision consumer sees one authoritative layout for the stage.
+	w.covers = buildCoverBlocks(w.config, plan.Index, plan.Seed)
 	if next {
 		for _, player := range w.players {
 			player.player.Position = w.config.Spawn

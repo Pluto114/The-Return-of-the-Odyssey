@@ -15,6 +15,7 @@
 #include "network/ProtocolIds.h"
 #include "raylib.h"
 #include "rlgl.h"
+#include "scene/StageScene.h"
 #include "sync/CombatView.h"
 #include "sync/CombatFeedback.h"
 #include "sync/GameView.h"
@@ -139,7 +140,9 @@ constexpr std::uint16_t kDefaultServerPort = 7777;
 // Development-mode login (Phase 1 has no real auth; server assigns identity).
 constexpr const char* kDevToken = "dev";
 constexpr const char* kDevDisplayName = "odyssey-c";
-constexpr std::uint32_t kClientProtocolVersion = 1;
+// Gameplay revision 2 introduced stage-specific authoritative arena geometry.
+// Older clients must not join because their prediction uses the legacy map.
+constexpr std::uint32_t kClientProtocolVersion = 2;
 
 constexpr float kPingIntervalSeconds = 1.0f;
 constexpr double kFrameSeconds = 1.0 / 60.0;
@@ -216,6 +219,236 @@ void DrawMeter(Rectangle bounds, float ratio, Color fill) {
     DrawRectangleRec(value, fill);
 }
 
+struct ScenePalette {
+    Color floor;
+    Color floor_deep;
+    Color accent;
+    Color secondary;
+    Color haze;
+};
+
+ScenePalette PaletteFor(odyssey::client::scene::Biome biome) {
+    using odyssey::client::scene::Biome;
+    switch (biome) {
+        case Biome::kAzureNebula:
+            return {{10, 25, 48, 255}, {5, 12, 29, 255}, {71, 220, 235, 255},
+                    {119, 104, 255, 255}, {37, 121, 174, 255}};
+        case Biome::kFrozenMoon:
+            return {{20, 34, 49, 255}, {8, 18, 31, 255}, {163, 226, 255, 255},
+                    {102, 145, 201, 255}, {95, 158, 191, 255}};
+        case Biome::kEmberRift:
+            return {{44, 20, 22, 255}, {20, 8, 14, 255}, {255, 139, 72, 255},
+                    {235, 62, 82, 255}, {147, 53, 46, 255}};
+        case Biome::kAncientRelay:
+            return {{26, 30, 28, 255}, {10, 15, 18, 255}, {239, 197, 91, 255},
+                    {82, 203, 170, 255}, {115, 94, 48, 255}};
+        case Biome::kVoidGarden:
+            return {{26, 18, 47, 255}, {9, 7, 24, 255}, {199, 116, 255, 255},
+                    {91, 224, 188, 255}, {106, 54, 156, 255}};
+        case Biome::kIonStorm:
+            return {{18, 25, 52, 255}, {7, 9, 27, 255}, {110, 156, 255, 255},
+                    {255, 102, 210, 255}, {64, 79, 171, 255}};
+        default:
+            return {kPanel, kVoid, kCyan, kAlly, kGrid};
+    }
+}
+
+const char* PlayerBiomeName(odyssey::client::scene::Biome biome) {
+    using odyssey::client::scene::Biome;
+    switch (biome) {
+        case Biome::kAzureNebula: return ui::kAzureNebula;
+        case Biome::kFrozenMoon: return ui::kFrozenMoon;
+        case Biome::kEmberRift: return ui::kEmberRift;
+        case Biome::kAncientRelay: return ui::kAncientRelay;
+        case Biome::kVoidGarden: return ui::kVoidGarden;
+        case Biome::kIonStorm: return ui::kIonStorm;
+        default: return ui::kAzureNebula;
+    }
+}
+
+const char* PlayerTopologyName(odyssey::client::sync::ArenaTopology topology) {
+    using odyssey::client::sync::ArenaTopology;
+    switch (topology) {
+        case ArenaTopology::kCrosswindGates: return ui::kCrosswindGates;
+        case ArenaTopology::kBrokenRing: return ui::kBrokenRing;
+        case ArenaTopology::kTwinCorridors: return ui::kTwinCorridors;
+        case ArenaTopology::kSpiralRelay: return ui::kSpiralRelay;
+        case ArenaTopology::kCornerBastions: return ui::kCornerBastions;
+        case ArenaTopology::kStaggeredGauntlet: return ui::kStaggeredGauntlet;
+        default: return ui::kCrosswindGates;
+    }
+}
+
+Vector2 ScenePoint(float x, float z) {
+    return Vector2{kArenaX + x * kArenaW, kArenaY + z * kArenaH};
+}
+
+void DrawStageScene(const odyssey::client::scene::StageScene& scene, float time,
+                    bool reduced_effects) {
+    using odyssey::client::scene::Biome;
+    const ScenePalette palette = PaletteFor(scene.biome);
+    const Rectangle arena{kArenaX, kArenaY, kArenaW, kArenaH};
+    DrawRectangleGradientV(static_cast<int>(arena.x), static_cast<int>(arena.y),
+                           static_cast<int>(arena.width), static_cast<int>(arena.height),
+                           palette.floor, palette.floor_deep);
+
+    // Soft environmental fields establish large-scale silhouettes before the
+    // tactical grid. They are deliberately non-colliding background scenery.
+    for (const auto& field : scene.fields) {
+        const Vector2 center = ScenePoint(field.x, field.z);
+        const float radius = field.size * kArenaW;
+        const float breathe = reduced_effects ? 1.0f : 1.0f + 0.035f * std::sin(time * 0.45f + field.phase);
+        for (int ring = 4; ring >= 1; --ring) {
+            const float fraction = static_cast<float>(ring) / 4.0f;
+            DrawCircleV(center, radius * fraction * breathe,
+                        Fade((field.variant & 1U) ? palette.secondary : palette.haze,
+                             0.018f + (1.0f - fraction) * 0.018f));
+        }
+        if (scene.biome == Biome::kFrozenMoon || scene.biome == Biome::kVoidGarden) {
+            DrawCircleLines(static_cast<int>(center.x), static_cast<int>(center.y),
+                            radius * 0.55f, Fade(palette.accent, 0.09f));
+        }
+    }
+
+    // Every stage receives a differently angled navigation corridor.
+    const Vector2 lane_start = ScenePoint(scene.lane_x0, scene.lane_z0);
+    const Vector2 lane_end = ScenePoint(scene.lane_x1, scene.lane_z1);
+    DrawLineEx(lane_start, lane_end, 54.0f, Fade(palette.haze, 0.10f));
+    DrawLineEx(lane_start, lane_end, 2.0f, Fade(palette.accent, 0.36f));
+    const Vector2 lane_delta{lane_end.x - lane_start.x, lane_end.y - lane_start.y};
+    const float lane_length = std::max(1.0f, std::hypot(lane_delta.x, lane_delta.y));
+    const Vector2 lane_normal{-lane_delta.y / lane_length, lane_delta.x / lane_length};
+    for (float offset : {-21.0f, 21.0f}) {
+        DrawLineEx(Vector2{lane_start.x + lane_normal.x * offset, lane_start.y + lane_normal.y * offset},
+                   Vector2{lane_end.x + lane_normal.x * offset, lane_end.y + lane_normal.y * offset},
+                   1.0f, Fade(palette.accent, 0.14f));
+    }
+
+    // Grid density is generated per stage, with theme tint instead of a
+    // single fixed ten-by-ten graph-paper background.
+    for (std::uint32_t index = 1; index < scene.grid_columns; ++index) {
+        const float x = kArenaX + kArenaW * static_cast<float>(index) / scene.grid_columns;
+        DrawLine(static_cast<int>(x), static_cast<int>(kArenaY), static_cast<int>(x),
+                 static_cast<int>(kArenaY + kArenaH), Fade(palette.accent, 0.075f));
+    }
+    for (std::uint32_t index = 1; index < scene.grid_rows; ++index) {
+        const float y = kArenaY + kArenaH * static_cast<float>(index) / scene.grid_rows;
+        DrawLine(static_cast<int>(kArenaX), static_cast<int>(y),
+                 static_cast<int>(kArenaX + kArenaW), static_cast<int>(y),
+                 Fade(palette.accent, 0.075f));
+    }
+
+    for (const auto& star : scene.stars) {
+        const Vector2 center = ScenePoint(star.x, star.z);
+        const float twinkle = reduced_effects ? 0.7f : 0.58f + 0.24f * std::sin(time * 1.3f + star.phase);
+        const Color color = star.variant == 0 ? palette.secondary : kStarlight;
+        DrawCircleV(center, star.size, Fade(color, 0.20f + 0.22f * twinkle));
+        if (star.variant == 0 && star.size > 1.0f) {
+            DrawLineEx(Vector2{center.x - 4.0f, center.y}, Vector2{center.x + 4.0f, center.y},
+                       1.0f, Fade(color, 0.18f));
+        }
+    }
+
+    // Small landmarks make the layouts readable at a glance. Shape language
+    // shifts with the biome while positions and rotations come from the seed.
+    for (const auto& landmark : scene.landmarks) {
+        const Vector2 center = ScenePoint(landmark.x, landmark.z);
+        const float radius = landmark.size * kArenaW;
+        switch (scene.biome) {
+            case Biome::kAzureNebula:
+                DrawRing(center, radius * 0.62f, radius * 0.69f, landmark.phase,
+                         landmark.phase + 255.0f, 20, Fade(palette.accent, 0.25f));
+                DrawCircleV(center, 2.0f, Fade(palette.secondary, 0.55f));
+                break;
+            case Biome::kFrozenMoon:
+                DrawPolyLines(center, 6, radius * 0.65f, landmark.phase,
+                              Fade(palette.accent, 0.22f));
+                DrawLineEx(Vector2{center.x - radius * 0.48f, center.y + radius * 0.2f},
+                           Vector2{center.x + radius * 0.42f, center.y - radius * 0.34f},
+                           1.0f, Fade(kStarlight, 0.22f));
+                break;
+            case Biome::kEmberRift: {
+                const float angle = landmark.phase * 0.0174532925f;
+                const Vector2 direction{std::cos(angle), std::sin(angle)};
+                DrawLineEx(Vector2{center.x - direction.x * radius, center.y - direction.y * radius},
+                           Vector2{center.x + direction.x * radius, center.y + direction.y * radius},
+                           3.0f, Fade(palette.accent, 0.30f));
+                DrawCircleV(center, radius * 0.18f, Fade(palette.secondary, 0.55f));
+                break;
+            }
+            case Biome::kAncientRelay:
+                DrawPolyLines(center, landmark.variant % 2 == 0 ? 4 : 6, radius * 0.68f,
+                              landmark.phase, Fade(palette.accent, 0.28f));
+                DrawCircleLines(static_cast<int>(center.x), static_cast<int>(center.y),
+                                radius * 0.28f, Fade(palette.secondary, 0.35f));
+                break;
+            case Biome::kVoidGarden:
+                for (int petal = 0; petal < 3; ++petal) {
+                    DrawRing(center, radius * (0.30f + petal * 0.16f),
+                             radius * (0.33f + petal * 0.16f), landmark.phase + petal * 35.0f,
+                             landmark.phase + 170.0f + petal * 35.0f, 14,
+                             Fade(petal == 1 ? palette.secondary : palette.accent, 0.24f));
+                }
+                break;
+            case Biome::kIonStorm: {
+                const float flicker = reduced_effects ? 0.5f : 0.36f + 0.2f * std::sin(time * 4.0f + landmark.phase);
+                DrawPolyLines(center, 3, radius * 0.7f, landmark.phase,
+                              Fade(landmark.variant & 1U ? palette.secondary : palette.accent, flicker));
+                break;
+            }
+            default: break;
+        }
+    }
+
+    DrawRectangleLinesEx(arena, 2.0f, Fade(palette.accent, 0.62f));
+    DrawRectangleLinesEx(Rectangle{arena.x + 6, arena.y + 6, arena.width - 12, arena.height - 12},
+                         1.0f, Fade(palette.accent, 0.16f));
+}
+
+void DrawStageCover(const odyssey::client::scene::StageScene& scene, Rectangle wall) {
+    const ScenePalette palette = PaletteFor(scene.biome);
+    DrawRectangleRec(Rectangle{wall.x - 4.0f, wall.y - 4.0f,
+                               wall.width + 8.0f, wall.height + 8.0f},
+                     Fade(palette.accent, 0.055f));
+    DrawRectangleRec(wall, Fade(palette.floor_deep, 0.98f));
+    DrawRectangleGradientV(static_cast<int>(wall.x + 3), static_cast<int>(wall.y + 3),
+                           static_cast<int>(std::max(1.0f, wall.width - 6)),
+                           static_cast<int>(std::max(1.0f, wall.height - 6)),
+                           Fade(palette.haze, 0.46f), Fade(palette.floor_deep, 0.84f));
+    DrawRectangleLinesEx(wall, 2.0f, Fade(palette.accent, 0.88f));
+    const bool horizontal = wall.width >= wall.height;
+    if (horizontal) {
+        const float center_y = wall.y + wall.height * 0.5f;
+        DrawLineEx(Vector2{wall.x + 7.0f, center_y},
+                   Vector2{wall.x + wall.width - 7.0f, center_y},
+                   2.0f, Fade(palette.secondary, 0.62f));
+        const int ribs = std::max(1, static_cast<int>(wall.width / 28.0f));
+        for (int rib = 1; rib <= ribs; ++rib) {
+            const float x = wall.x + wall.width * rib / (ribs + 1.0f);
+            DrawLineEx(Vector2{x - 5.0f, wall.y + 5.0f},
+                       Vector2{x + 5.0f, wall.y + wall.height - 5.0f},
+                       1.0f, Fade(palette.accent, 0.36f));
+        }
+    } else {
+        const float center_x = wall.x + wall.width * 0.5f;
+        DrawLineEx(Vector2{center_x, wall.y + 7.0f},
+                   Vector2{center_x, wall.y + wall.height - 7.0f},
+                   2.0f, Fade(palette.secondary, 0.62f));
+        const int ribs = std::max(1, static_cast<int>(wall.height / 24.0f));
+        for (int rib = 1; rib <= ribs; ++rib) {
+            const float y = wall.y + wall.height * rib / (ribs + 1.0f);
+            DrawLineEx(Vector2{wall.x + 5.0f, y - 5.0f},
+                       Vector2{wall.x + wall.width - 5.0f, y + 5.0f},
+                       1.0f, Fade(palette.accent, 0.36f));
+        }
+    }
+    const float corner = 7.0f;
+    DrawLineEx(Vector2{wall.x, wall.y + corner}, Vector2{wall.x, wall.y}, 3.0f, palette.accent);
+    DrawLineEx(Vector2{wall.x, wall.y}, Vector2{wall.x + corner, wall.y}, 3.0f, palette.accent);
+    DrawLineEx(Vector2{wall.x + wall.width - corner, wall.y + wall.height},
+               Vector2{wall.x + wall.width, wall.y + wall.height}, 3.0f, palette.accent);
+}
+
 std::string FormatDuration(double seconds) {
     const auto total = static_cast<std::uint64_t>(std::max(0.0, std::round(seconds)));
     const auto minutes = total / 60;
@@ -287,6 +520,8 @@ using odyssey::client::sync::RewardState;
 using odyssey::client::sync::RewardView;
 using odyssey::client::sync::SnapshotInterpolator;
 using odyssey::client::sync::StageInfo;
+using odyssey::client::scene::StageScene;
+using odyssey::client::sync::ArenaLayout;
 
 struct DemoState {
     ConnectionState state = ConnectionState::kIdle;
@@ -423,6 +658,8 @@ int main() {
     SnapshotInterpolator remote_interp;   // other players (10Hz -> smooth)
     SnapshotInterpolator monster_interp;  // monsters (10Hz -> smooth)
     EquipmentTable equipment_table;
+    StageScene stage_scene = odyssey::client::scene::MakeStageScene(0, 0);
+    ArenaLayout arena_layout = odyssey::client::sync::MakeArenaLayout(0, 0);
 
     // This table is generated from data/equipment/catalog.json by CMake and
     // copied beside the executable. Missing data degrades to placeholders.
@@ -933,6 +1170,14 @@ int main() {
                             stage.state = snap.stage.state;
                             stage.monsters_remaining = snap.stage.monsters_remaining;
                             combat_view.SetStage(stage);
+                            const StageScene incoming_scene = odyssey::client::scene::MakeStageScene(
+                                snap.stage.index, snap.stage.seed);
+                            if (stage_scene.fingerprint != incoming_scene.fingerprint) {
+                                stage_scene = incoming_scene;
+                                arena_layout = odyssey::client::sync::MakeArenaLayout(
+                                    snap.stage.index, snap.stage.seed);
+                                predictor.SetArenaLayout(arena_layout);
+                            }
                             // New stage: old projectiles must not leak across
                             // the transition (they are event-driven only).
                             if (demo.prev_stage_index != 0 &&
@@ -1286,28 +1531,22 @@ int main() {
         const std::string hostile_count = std::to_string(demo.monsters_remaining) + " " + ui::kHostiles;
         DrawUiText(hostile_count.c_str(), 1043, 51, 14, kMuted);
 
-        // The arena is a navigational chart rather than a generic rectangle:
-        // grid, orbital rings and fixed stars establish the Odyssey identity.
-        DrawPanel(Rectangle{kArenaX, kArenaY, kArenaW, kArenaH}, kPanel, Fade(kCyan, 0.4f));
-        for (int index = 1; index < 10; ++index) {
-            const int x = static_cast<int>(kArenaX + kArenaW * index / 10.0f);
-            const int y = static_cast<int>(kArenaY + kArenaH * index / 10.0f);
-            DrawLine(x, static_cast<int>(kArenaY), x, static_cast<int>(kArenaY + kArenaH),
-                     Fade(kGrid, 0.58f));
-            DrawLine(static_cast<int>(kArenaX), y, static_cast<int>(kArenaX + kArenaW), y,
-                     Fade(kGrid, 0.58f));
-        }
-        const Vector2 chart_center{kArenaX + kArenaW * 0.5f, kArenaY + kArenaH * 0.5f};
-        DrawCircleLines(static_cast<int>(chart_center.x), static_cast<int>(chart_center.y),
-                        90.0f, Fade(kGrid, 0.62f));
-        DrawCircleLines(static_cast<int>(chart_center.x), static_cast<int>(chart_center.y),
-                        185.0f, Fade(kGrid, 0.48f));
-        for (int index = 0; index < 34; ++index) {
-            const int x = static_cast<int>(kArenaX) + 12 + (index * 97) % 1190;
-            const int y = static_cast<int>(kArenaY) + 12 + (index * 53) % 480;
-            DrawCircle(x, y, index % 5 == 0 ? 1.5f : 1.0f, Fade(kStarlight, 0.28f));
-        }
+        // Stage seed + index select a deterministic client-only biome. The
+        // scenery changes each stage while authoritative cover stays aligned
+        // with server collision.
+        BeginScissorMode(static_cast<int>((kArenaX * viewport.scale) + viewport.offset_x),
+                         static_cast<int>((kArenaY * viewport.scale) + viewport.offset_y),
+                         static_cast<int>(kArenaW * viewport.scale),
+                         static_cast<int>(kArenaH * viewport.scale));
+        DrawStageScene(stage_scene, static_cast<float>(GetTime()), reduced_effects);
+        EndScissorMode();
         DrawUiText(ui::kMission, 44, 128, 15, kMuted);
+        const std::string biome_text = std::string(ui::kEnvironment) + " / " +
+            PlayerBiomeName(stage_scene.biome) + "  ·  " + ui::kFormation + " / " +
+            PlayerTopologyName(arena_layout.topology);
+        DrawUiText(biome_text.c_str(),
+                   static_cast<int>(kArenaX + (kArenaW - MeasureUiText(biome_text.c_str(), 15)) * 0.5f),
+                   128, 15, PaletteFor(stage_scene.biome).accent);
         const auto weapon = equipment_table.find(demo.self_weapon_id);
         const std::string weapon_text = std::string(ui::kWeapon) + " / " +
             (weapon == equipment_table.end() ? ui::kBaseWeapon : weapon->second.name);
@@ -1329,18 +1568,12 @@ int main() {
         const auto to_screen_x = [](float wx) { return kArenaX + (wx / kWorldSize) * kArenaW; };
         const auto to_screen_y = [](float wz) { return kArenaY + (wz / kWorldSize) * kArenaH; };
 
-        for (const auto& cover : odyssey::client::sync::kCoverBlocks) {
+        for (std::size_t cover_index = 0; cover_index < arena_layout.block_count; ++cover_index) {
+            const auto& cover = arena_layout.blocks[cover_index];
             const Rectangle wall{to_screen_x(cover.min_x), to_screen_y(cover.min_z),
                                  to_screen_x(cover.max_x) - to_screen_x(cover.min_x),
                                  to_screen_y(cover.max_z) - to_screen_y(cover.min_z)};
-            DrawRectangleRec(wall, kPanelRaised);
-            DrawRectangleLinesEx(wall, 2.0f, Fade(kCyan, 0.75f));
-            DrawLineEx(Vector2{wall.x + 8, wall.y + 8},
-                       Vector2{wall.x + wall.width - 8, wall.y + wall.height - 8},
-                       2.0f, Fade(kCyan, 0.35f));
-            DrawLineEx(Vector2{wall.x + wall.width - 8, wall.y + 8},
-                       Vector2{wall.x + 8, wall.y + wall.height - 8},
-                       2.0f, Fade(kCyan, 0.35f));
+            DrawStageCover(stage_scene, wall);
         }
 
         for (const auto& [id, pickup] : combat_view.Pickups()) {
@@ -1783,7 +2016,9 @@ int main() {
                     std::to_string(demo.snapshots_received),
                 "Stage       index=" + std::to_string(demo.stage_index) + " state=" +
                     StageStateName(demo.stage_state) + " remain=" +
-                    std::to_string(demo.monsters_remaining),
+                    std::to_string(demo.monsters_remaining) + " biome=" +
+                    odyssey::client::scene::BiomeCode(stage_scene.biome) + " map=" +
+                    odyssey::client::sync::ArenaTopologyCode(arena_layout.topology),
                 "Combat      monsters=" + std::to_string(combat_view.MonsterCount()) +
                     " projectiles=" + std::to_string(combat_view.ProjectileCount()) +
                     " events=" + std::to_string(demo.spawns) + "/" +

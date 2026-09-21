@@ -404,7 +404,7 @@ inline bool DecodeDisconnect(const std::vector<std::uint8_t>& payload, Disconnec
 // ---- Login -----------------------------------------------------------------
 
 struct LoginRequestData {
-    std::uint32_t protocol_version = 1;
+    std::uint32_t protocol_version = 2;
     std::string token;          // v1: any non-empty string
     std::string display_name;   // optional, <= 32 bytes UTF-8
 };

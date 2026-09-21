@@ -177,7 +177,7 @@ func TestTCPProtocolToRoomAndTwoRecipientSnapshots(t *testing.T) {
 		if pong.Nonce != 123 {
 			t.Fatal("ping nonce changed")
 		}
-		send(p, pb.MessageType_MSG_LOGIN_REQUEST, 18, &pb.LoginRequest{ProtocolVersion: 1}, false)
+		send(p, pb.MessageType_MSG_LOGIN_REQUEST, 18, &pb.LoginRequest{ProtocolVersion: 2}, false)
 		var login pb.LoginResponse
 		read(p, pb.MessageType_MSG_LOGIN_RESPONSE, &login)
 		if login.Reason != pb.ReasonCode_REASON_OK {

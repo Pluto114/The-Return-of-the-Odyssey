@@ -7,8 +7,8 @@ namespace odyssey::client::ui {
 // Player-facing copy lives here so the font atlas is built from the same
 // strings that the interface actually draws. F3 diagnostics stay in English.
 inline constexpr const char* kTitle = "奥德赛归途";
-inline constexpr const char* kWindowTitle = "奥德赛归途 · 动态远征 · 积分榜";
-inline constexpr const char* kSubtitle = "双人远征 / 星际航线";
+inline constexpr const char* kWindowTitle = "奥德赛归途 · 战术地图 V2 · 积分榜";
+inline constexpr const char* kSubtitle = "双人远征 / 星际航线 / 战术地图 V2";
 inline constexpr const char* kPilot = "玩家";
 inline constexpr const char* kAttack = "攻击";
 inline constexpr const char* kStage = "关卡";
@@ -112,6 +112,20 @@ inline constexpr const char* kMagazineIncreased = "弹匣容量已提升至";
 inline constexpr const char* kEffects = "特效";
 inline constexpr const char* kEffectsFull = "完整";
 inline constexpr const char* kEffectsReduced = "简化";
+inline constexpr const char* kEnvironment = "星域";
+inline constexpr const char* kAzureNebula = "蔚蓝星云";
+inline constexpr const char* kFrozenMoon = "冰封卫星";
+inline constexpr const char* kEmberRift = "余烬裂谷";
+inline constexpr const char* kAncientRelay = "远古中继站";
+inline constexpr const char* kVoidGarden = "虚空花园";
+inline constexpr const char* kIonStorm = "离子风暴";
+inline constexpr const char* kFormation = "阵型";
+inline constexpr const char* kCrosswindGates = "错流闸门";
+inline constexpr const char* kBrokenRing = "破环阵列";
+inline constexpr const char* kTwinCorridors = "双层走廊";
+inline constexpr const char* kSpiralRelay = "螺旋中继";
+inline constexpr const char* kCornerBastions = "四角堡垒";
+inline constexpr const char* kStaggeredGauntlet = "交错险径";
 
 inline constexpr std::array kPlayerLabels{
     kTitle, kSubtitle, kPilot, kAttack, kStage, kAlly, kDown, kWaiting, kOnline, kOffline,
@@ -131,7 +145,9 @@ inline constexpr std::array kPlayerLabels{
     kHealthRestored, kHealth, kWeapon, kBaseWeapon, kWeaponCollected, kNoPotion,
     kMapSupplies, kPickupSyncMissing, kDirector, kLastStage, kTeamHealth, kLearning,
     kAmmo, kReload, kReloading, kEmptyMagazine, kMagazineIncreased,
-    kEffects, kEffectsFull, kEffectsReduced
+    kEffects, kEffectsFull, kEffectsReduced, kEnvironment, kAzureNebula, kFrozenMoon,
+    kEmberRift, kAncientRelay, kVoidGarden, kIonStorm, kFormation, kCrosswindGates,
+    kBrokenRing, kTwinCorridors, kSpiralRelay, kCornerBastions, kStaggeredGauntlet
 };
 
 }  // namespace odyssey::client::ui

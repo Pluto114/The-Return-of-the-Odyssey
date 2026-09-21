@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -121,25 +122,128 @@ func TestCoverBlocksMovementAndProjectiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	from := entity.Vec2{X: 15, Y: 8.9}
-	to := w.moveWithCover(from, entity.Vec2{X: -2}, 0.32)
-	if to.X < 14.72 {
+	w.covers = buildCoverBlocks(w.config, 1, 0)
+	block := w.covers[0]
+	from := entity.Vec2{X: block.max.X + .5, Y: (block.min.Y + block.max.Y) / 2}
+	to := w.moveWithCover(from, entity.Vec2{X: -.4}, 0.32)
+	if to != from {
 		t.Fatalf("player passed through cover: %+v", to)
 	}
-	if _, hit := w.firstCoverHit(from, entity.Vec2{X: 10, Y: 8.9}, 0.1); !hit {
+	if _, hit := w.firstCoverHit(from, entity.Vec2{X: block.min.X - 1, Y: from.Y}, 0.1); !hit {
 		t.Fatal("projectile path missed cover")
 	}
 }
 
+func TestEveryStageBuildsDistinctTacticalCover(t *testing.T) {
+	config := DefaultConfig()
+	seen := make(map[string]bool)
+	for index := uint32(1); index <= 12; index++ {
+		blocks := buildCoverBlocks(config, index, int64(index)*4242)
+		if len(blocks) < 6 {
+			t.Fatalf("stage %d has only %d cover pieces", index, len(blocks))
+		}
+		for _, block := range blocks {
+			if pointInBlock(config.Spawn, block, .5) {
+				t.Fatalf("stage %d blocks the player spawn", index)
+			}
+		}
+		signature := ""
+		for _, block := range blocks {
+			if block.min.X < config.Min.X || block.min.Y < config.Min.Y ||
+				block.max.X > config.Max.X || block.max.Y > config.Max.Y {
+				t.Fatalf("stage %d cover is outside arena: %+v", index, block)
+			}
+			signature += fmt.Sprintf("%.2f,%.2f,%.2f,%.2f;", block.min.X, block.min.Y, block.max.X, block.max.Y)
+		}
+		if seen[signature] {
+			t.Fatalf("stage %d repeated an earlier geometry", index)
+		}
+		seen[signature] = true
+	}
+}
+
+func TestMonstersNavigateEveryArenaTopology(t *testing.T) {
+	for index := uint32(1); index <= 12; index++ {
+		config := DefaultConfig()
+		w, err := NewWorld(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.AddPlayer(1); err != nil {
+			t.Fatal(err)
+		}
+		spawn := stage.Spawn{Position: entity.Vec2{X: 1.5, Y: 1.5},
+			Stats:  entity.CombatStats{MaxHealth: 100, MoveSpeed: 3, AttackCooldownTicks: TickRate},
+			Radius: .4, AttackRange: 1}
+		if err := w.StartStage(stage.Plan{Index: index, Seed: int64(index) * 4242,
+			DifficultyScore: 1, Monsters: []stage.Spawn{spawn}}); err != nil {
+			t.Fatal(err)
+		}
+		for range 450 {
+			w.Step(time.Unix(100, 0))
+			w.TakeEvents()
+		}
+		monster := w.Snapshot().Monsters[0]
+		if distance := math.Hypot(monster.Position.X-config.Spawn.X, monster.Position.Y-config.Spawn.Y); distance > 1.1 {
+			t.Errorf("stage %d monster stuck at %+v (distance %.2f)", index, monster.Position, distance)
+		}
+		if _, blocked := w.firstCoverHit(monster.Position, config.Spawn, 0); blocked {
+			t.Errorf("stage %d monster stopped without line of sight at %+v", index, monster.Position)
+		}
+	}
+}
+
+func TestMonsterPathfindingCoversFlanksAndSpawnSectors(t *testing.T) {
+	starts := []entity.Vec2{{X: 2, Y: 2}, {X: 10, Y: 2}, {X: 18, Y: 2},
+		{X: 18, Y: 10}, {X: 18, Y: 18}, {X: 10, Y: 18}, {X: 2, Y: 18}, {X: 2, Y: 10}}
+	goals := []entity.Vec2{{X: 1, Y: 10}, {X: 19, Y: 10}}
+	for index := uint32(1); index <= 12; index++ {
+		for _, goal := range goals {
+			for _, start := range starts {
+				config := DefaultConfig()
+				w, err := NewWorld(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := w.AddPlayer(1); err != nil {
+					t.Fatal(err)
+				}
+				spawn := stage.Spawn{Position: start,
+					Stats:  entity.CombatStats{MaxHealth: 100, MoveSpeed: 3, AttackCooldownTicks: TickRate},
+					Radius: .4, AttackRange: 1}
+				if err := w.StartStage(stage.Plan{Index: index, Seed: int64(index) * 4242,
+					DifficultyScore: 1, Monsters: []stage.Spawn{spawn}}); err != nil {
+					t.Fatal(err)
+				}
+				w.players[1].player.Position = goal
+				for range 600 {
+					w.Step(time.Unix(100, 0))
+					w.TakeEvents()
+				}
+				monster := w.Snapshot().Monsters[0]
+				if distance := math.Hypot(monster.Position.X-goal.X, monster.Position.Y-goal.Y); distance > 1.1 {
+					t.Fatalf("stage %d path %v -> %v stuck at %+v (distance %.2f)",
+						index, start, goal, monster.Position, distance)
+				}
+				if _, blocked := w.firstCoverHit(monster.Position, goal, 0); blocked {
+					t.Fatalf("stage %d path %v -> %v stopped without line of sight", index, start, goal)
+				}
+			}
+		}
+	}
+}
+
 func TestMonsterSpawnInsideCoverMovesToOpenGround(t *testing.T) {
-	w, err := NewWorld(DefaultConfig())
+	config := DefaultConfig()
+	w, err := NewWorld(config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := w.AddPlayer(1); err != nil {
 		t.Fatal(err)
 	}
-	spawn := stage.Spawn{Position: entity.Vec2{X: 6.3, Y: 11.9},
+	block := buildCoverBlocks(config, 1, 0)[0]
+	spawn := stage.Spawn{Position: entity.Vec2{X: (block.min.X + block.max.X) / 2, Y: (block.min.Y + block.max.Y) / 2},
 		Stats:  entity.CombatStats{MaxHealth: 10, AttackCooldownTicks: TickRate},
 		Radius: 0.4, AttackRange: 1}
 	if err := w.StartStage(stage.Plan{Index: 1, DifficultyScore: 1, Monsters: []stage.Spawn{spawn}}); err != nil {
