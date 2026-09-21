@@ -21,14 +21,12 @@ type EventSink interface {
 	Send(frame []byte) bool
 }
 
-// EventDispatcher consumes a room's event stream and fans each batch out to
-// every subscribed player. Events are broadcast (there is no per-player self
-// view): every recipient gets the same reliable messages.
+// EventDispatcher 是 Room 可靠事件 channel 的唯一消费者，把伤害、死亡、关卡切换等
+// 离散事件广播给所有玩家。它和快照分发的关键区别是：事件不允许 latest-wins，
+// 因为漏掉一次伤害或结算会让客户端状态机失步。
 //
-// It is the single consumer of room.Events() (B's contract requires exactly
-// one, and a slow or absent consumer drives the room's event_backpressure
-// shutdown). It performs no network I/O directly — it encodes each event and
-// hands the frame to each player's EventSink.
+// 若可靠队列塞满，Send 返回 false，由 closingSink 关闭慢连接并记录背压；其他玩家
+// 仍继续收事件。这样不会为了照顾一个慢客户端而阻塞整个房间，也不会静默丢关键消息。
 type EventDispatcher struct {
 	mu     sync.RWMutex
 	sinks  map[entity.ID]EventSink
@@ -153,6 +151,8 @@ func (d *EventDispatcher) logBadEvent(e game.Event, err error) {
 // — so saturation is observable as an event_backpressure signal. Delivery to
 // other subscribers is unaffected.
 func (d *EventDispatcher) broadcast(frame []byte) {
+	// Send 只做有界 channel 入队，不做真实网络 I/O，因此在读锁内遍历不会被慢 socket
+	// 长时间卡住；写 socket 的工作由每条 Connection 自己的 Writer goroutine 完成。
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	for playerID, sink := range d.sinks {

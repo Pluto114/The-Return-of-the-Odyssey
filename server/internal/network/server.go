@@ -10,15 +10,9 @@ import (
 	"time"
 )
 
-// Handler is the callback the network layer invokes with each fully-decoded
-// inbound message. It runs on the connection's Reader goroutine.
-//
-// The Handler receives the owning *Connection, the decoded header and the
-// payload. Implementations (the session router in cmd/gameserver) must NOT
-// block the Reader goroutine for long; they should only validate and enqueue
-// commands, never perform blocking I/O or write to the Room world.
-//
-// An error return signals that the connection should be closed.
+// Handler 在一条连接的 Reader goroutine 中执行，接收已经拆包完成的消息。
+// 它只应该做协议校验、会话校验和命令入队，不能执行耗时 I/O，更不能直接修改 Room
+// 的 World；否则一个慢请求会堵住该玩家后续所有消息。返回 error 表示应关闭连接。
 type Handler func(c *Connection, h Header, payload []byte) error
 
 // DisconnectHandler is invoked once after a connection has been untracked.
@@ -26,7 +20,8 @@ type Handler func(c *Connection, h Header, payload []byte) error
 // separate goroutine.
 type DisconnectHandler func(c *Connection)
 
-// Server accepts TCP connections and dispatches each to its own Connection.
+// Server 负责监听 TCP，并为每个客户端创建独立 Connection。
+// mu 只保护在线连接集合与断线回调；全局计数器用 atomic 累加，采集指标时无需阻塞写路径。
 type Server struct {
 	handler Handler
 	logger  *slog.Logger
@@ -75,8 +70,9 @@ func NewServer(handler Handler, logger *slog.Logger) *Server {
 	}
 }
 
-// Serve listens on ln and accepts until ctx is cancelled or ln errors.
-// It blocks; run it in its own goroutine.
+// Serve 持续 Accept，直到 context 取消或监听器出错。每个连接都会启动自己的 run，
+// 因此某个客户端收发变慢不会阻塞其他客户端。context 取消时主动关闭 listener，
+// 用于唤醒正在阻塞的 Accept，从而完成优雅停机。
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
@@ -175,28 +171,26 @@ func (s *Server) CloseConnections() {
 	}
 }
 
-// Connection represents a single client socket. It owns two goroutines:
-//   - Reader: reads frames and invokes Handler (the run loop's read side).
-//   - Writer: drains the outbound channel and writes frames.
+// Connection 表示一个客户端连接，内部拆成两个 goroutine：
+//   - Reader：从 socket 读帧并调用 Handler；
+//   - Writer：从发送队列取帧，且它是唯一允许写 socket 的 goroutine。
 //
-// Only the Writer goroutine performs socket writes, so the Reader (and thus
-// the Room Tick via Handler) can never be blocked by a slow client.
+// “单写者”可避免两个 goroutine 同时写导致协议帧交叉。发送再按语义拆成两条队列：
+//   - out：可靠、有界 FIFO，用于登录结果、伤害、关卡事件等，必须保序；
+//   - snapshot：容量 1 的 latest-wins 槽位，用于 10Hz 世界快照，新帧替换未发送旧帧。
 //
-// Outbound traffic is split into two queues with different loss policies:
-//   - out (reliable): bounded FIFO, every frame must reach the peer in order.
-//   - snapshot (latest-wins): capacity 1, a new snapshot replaces a pending
-//     stale one. Used for 10Hz world snapshots where only the newest state
-//     matters (docs/protocol/snapshots.md).
+// 因此慢客户端只会少看几张过期快照，不会反向卡住房间 Tick；若可靠队列也塞满，
+// 则说明客户端已无法跟上关键事件，应触发背压策略并断开，而不是悄悄丢事件。
 type Connection struct {
 	conn    net.Conn
 	handler Handler
 	logger  *slog.Logger
 
-	// out is the bounded outbound queue drained by the Writer goroutine.
+	// out 只由 Writer 消费。sendMu 不是用来保护 socket，而是保证“入队”和“关闭队列”
+	// 互斥，避免向已关闭 channel 发送而 panic。
 	out    chan []byte
-	sendMu sync.Mutex // serializes reliable queue admission with queue closure
-	// snapshot is the latest-wins slot (capacity 1). A slow consumer drops
-	// stale snapshots, never blocks the publisher (the room tick).
+	sendMu sync.Mutex
+	// snapshot 是容量 1 的最新快照槽位；慢消费者会丢旧帧，不会阻塞发布者。
 	snapshot chan []byte
 
 	closeOnce sync.Once // protects socket close + onClose
@@ -238,13 +232,8 @@ func (c *Connection) IsClosed() bool {
 	}
 }
 
-// Send queues an already-encoded frame (header + body) for writing. It is
-// non-blocking up to the queue capacity; when full it returns false so the
-// caller can apply backpressure policy (drop for snapshots, close for
-// reliable overflow).
-//
-// The byte slice must not be mutated after Send returns. Send is safe to call
-// after the connection has closed (it returns false rather than panicking).
+// Send 把可靠帧无阻塞地放入 FIFO。队列已满或连接已关闭时返回 false，让上层执行
+// “可靠消息积压即断开”的背压策略。传入切片在返回后不可再修改。
 func (c *Connection) Send(frame []byte) bool {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -263,13 +252,8 @@ func (c *Connection) Send(frame []byte) bool {
 	}
 }
 
-// SendSnapshot queues a latest-wins snapshot frame. If a previous snapshot is
-// still pending, it is replaced by the new one (stale world state is never
-// worth sending once a newer snapshot exists). It never blocks the caller
-// beyond the replace, so a slow consumer cannot stall the room tick.
-//
-// The byte slice must not be mutated after SendSnapshot returns. It returns
-// false only when the connection has already closed.
+// SendSnapshot 发布最新快照。如果槽位中已有未发送快照，就先淘汰旧帧再重试；
+// 因为容量固定为 1，这个循环不会无界增长。它只有在连接已关闭时才返回 false。
 func (c *Connection) SendSnapshot(frame []byte) bool {
 	select {
 	case <-c.closed:
@@ -334,13 +318,11 @@ func (c *Connection) closeQueue() {
 func (c *Connection) SetReadDeadline(d time.Time) error { return c.conn.SetReadDeadline(d) }
 
 func (c *Connection) run() {
-	// Reader and writer run concurrently. The connection ends when EITHER
-	// side finishes; whoever finishes last releases the socket.
-	//
-	//   - Normal EOF: reader ends -> close(out) -> writer drains + exits.
-	//   - CloseAfterFlush: out closed -> writer drains + exits -> close socket
-	//     -> reader unblocks and ends.
-	//   - Close (hard): socket closed -> reader + writer both error out.
+	// Reader/Writer 并行运行，但关闭顺序是确定的：
+	//   - 正常 EOF：Reader 结束 -> 关闭 out -> Writer 排空后退出；
+	//   - CloseAfterFlush：Writer 排空后关闭 socket -> Reader 被唤醒；
+	//   - 强制 Close：socket 立即关闭，两侧都从 I/O 中返回。
+	// sync.Once 保证无论哪个路径先到，socket、channel 和 onClose 都只关闭一次。
 	readerDone := make(chan struct{})
 	go c.readLoop(readerDone)
 	writerDone := make(chan struct{})
@@ -372,8 +354,8 @@ func (c *Connection) writeLoop(done chan<- struct{}) {
 	defer close(done)
 	w := bufio.NewWriter(c.conn)
 	for {
-		// Prefer the latest snapshot (non-blocking) so stale world state never
-		// lingers behind the reliable queue.
+		// 先非阻塞检查最新快照，减少画面延迟；若没有，再同时等待可靠帧或快照。
+		// socket 写入始终只发生在本 goroutine，因此不需要给每次 Write 额外加锁。
 		select {
 		case frame := <-c.snapshot:
 			if !c.writeFrame(w, frame) {

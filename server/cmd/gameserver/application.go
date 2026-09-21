@@ -48,9 +48,9 @@ type activeRoom struct {
 	close      *router.CloseWatcher
 	rematching bool // guarded by gameApplication.mu; coalesces repeated clicks
 
-	// The application owns progression between B's authoritative Room phases.
-	// These fields are guarded by gameApplication.mu. The stage number makes
-	// StageCleared handling idempotent if a reliable batch is ever replayed.
+	// 下面是“关卡编排状态”，由 gameApplication.mu 统一保护，不属于 World 的战斗状态。
+	// rewardStage 让重复 StageCleared 事件保持幂等；rewarded/ready 用于确认每个在线玩家
+	// 都已经领奖并点击准备；advancing 防止两个 goroutine 同时调用 AI 导演开启下一关。
 	rewardStage      uint32
 	rewarded         map[entity.ID]bool
 	delivered        map[entity.ID]bool
@@ -73,9 +73,15 @@ type resumeTokenRepository interface {
 	Revoke(context.Context, string) error
 }
 
-// gameApplication assembles A's transport/session boundary, B's Room, and
-// D's matchmaking and metrics modules. It is intentionally small: the first
-// milestone needs one in-process FIFO queue and two-player rooms.
+// gameApplication 是服务端的“业务编排层”，把网络连接、Session 状态机、匹配队列、
+// Room Actor、AI 导演、持久化与监控串起来，但它本身不执行战斗模拟。
+//
+// 并发职责划分：
+//   - Connection Reader goroutine 调用 handle，只做校验和快速入队；
+//   - 每个 Room goroutine 独占自己的 World；
+//   - observe* goroutine 分别消费一个房间的快照、可靠事件、奖励和 Tick 指标；
+//   - mu 只保护跨房间索引和编排状态，任何等待 channel/网络/数据库的操作都放到锁外；
+//   - nextRoomID 使用 atomic，创建房间无需依赖 map 锁来分配唯一 ID。
 type gameApplication struct {
 	ctx         context.Context
 	ids         *idAllocator
@@ -144,6 +150,8 @@ func buildGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.M
 }
 
 func (a *gameApplication) handle(c *network.Connection, h network.Header, payload []byte) error {
+	// 本函数运行在当前连接的 Reader goroutine。所有分支都应快速返回：解析、检查
+	// Session 状态，然后把动作交给 Matchmaker 或 Room；不能在这里等待下一次 Tick。
 	mt := pb.MessageType(h.MessageType)
 	if mt == pb.MessageType_MSG_PING || mt == pb.MessageType_MSG_LOGIN_REQUEST {
 		err := routeMessage(c, h, payload, a.ids, a.logger)
@@ -651,8 +659,8 @@ func (a *gameApplication) leaveFormerRoom(rm *room.Room, sessionID room.SessionI
 	}
 }
 
-// newActiveRoom wires each dispatcher exactly once, for both first matches and
-// rematches. The old room stays alive until its former members leave.
+// newActiveRoom 创建 Room 后，为它接上五条独立观察链。每个输出 channel 只有一个消费者，
+// 避免多个 goroutine 抢消息导致部分玩家看不到事件。初次匹配和重赛都走同一套装配流程。
 func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
 	matchID, err := newMatchID()
 	if err != nil {
@@ -691,6 +699,8 @@ func (a *gameApplication) newActiveRoom() (room.ID, *activeRoom, error) {
 	a.rooms[roomID] = active
 	a.publishMetricsLocked()
 	a.mu.Unlock()
+	// 这些 goroutine 只消费 Room 已发布的副本，不直接修改 World。房间关闭后 channel
+	// 会被关闭，range 自动退出，不会遗留后台任务。
 	go a.observeSnapshots(roomID, rm, active.snapshots)
 	go a.observeEvents(roomID, rm, active.events)
 	go a.observeRewards(roomID, rm)
@@ -800,8 +810,8 @@ func counterDelta(current, previous uint64) uint64 {
 	return current
 }
 
-// observeSnapshots remains the room's single snapshot consumer. It records
-// authoritative entity counts before delegating network fan-out to A's router.
+// observeSnapshots 是 rm.Snapshots() 的唯一消费者：先记录权威实体数量，再交给路由层
+// 为每个玩家编码个性化快照。快照可丢旧保新，不参与关卡状态机推进。
 func (a *gameApplication) observeSnapshots(roomID room.ID, rm *room.Room, dispatcher *router.SnapshotDispatcher) {
 	for snapshot := range rm.Snapshots() {
 		a.recordSnapshotMetrics(roomID, snapshot)
@@ -820,9 +830,9 @@ func (a *gameApplication) recordSnapshotMetrics(roomID room.ID, snapshot room.Sn
 	a.publishCombatMetricsLocked()
 }
 
-// observeEvents remains the room's single reliable-event consumer. Metrics
-// observation is non-blocking with respect to Room Tick and preserves the
-// original event batch for A's dispatcher.
+// observeEvents 是可靠事件的唯一消费者。先统计、再广播；遇到 StageCleared/TeamDefeated
+// 时另起 goroutine 做后续编排，绝不在事件消费循环里等待 Room receipt，否则会形成：
+// Room 等事件队列腾空间，而观察者又等 Room Tick 回复的死锁/背压环。
 func (a *gameApplication) observeEvents(roomID room.ID, rm *room.Room, dispatcher *router.EventDispatcher) {
 	for batch := range rm.Events() {
 		a.recordEventMetrics(roomID, batch)
@@ -996,8 +1006,9 @@ func (a *gameApplication) rewardRecipient(roomID room.ID, playerID entity.ID) (*
 	return nil, nil
 }
 
-// tryAdvanceStage opens the Director gate only after every connected room
-// member has an applied reward and has explicitly pressed ready.
+// tryAdvanceStage 是 AI 导演的“闸门”：只有所有仍在线的房间成员都完成领奖并点击准备，
+// 才把 advancing 置为 true 并启动一次 advanceStage。检查和置位在同一把 mu 下完成，
+// 所以两个玩家同时按准备也只会产生一次导演决策。
 func (a *gameApplication) tryAdvanceStage(roomID room.ID) {
 	a.mu.Lock()
 	active := a.rooms[roomID]
@@ -1027,6 +1038,9 @@ func (a *gameApplication) tryAdvanceStage(roomID room.ID) {
 }
 
 func (a *gameApplication) advanceStage(roomID room.ID, active *activeRoom) {
+	// CompletedStage 返回 Room 在 StageClear 时冻结的 Plan+Performance 副本。
+	// Director.Decide 是纯计算，可在房间 goroutine 外运行；计算完后仍必须通过
+	// Room.StartStage 排队，最终由 Room 的唯一写者把新 Plan 应用到 World。
 	completed, err := waitCompletedStage(active.room)
 	if err != nil {
 		a.advanceStageFailed(roomID, active, err)
@@ -1039,9 +1053,8 @@ func (a *gameApplication) advanceStage(roomID room.ID, active *activeRoom) {
 		a.advanceStageFailed(roomID, active, err)
 		return
 	}
-	// PreparingNextStage may become visible one tick after the final private
-	// reward update. Retry that short authoritative hand-off without generating
-	// a second Director decision.
+	// 最后一条私人奖励更新与 PreparingNextStage 可能相差一个 Tick。这里短暂重试提交
+	// 同一份 plan，但绝不重新调用 Director，保证一次关卡切换只有一个 seed/决策记录。
 	for attempt := 0; attempt < 30; attempt++ {
 		receipt, startErr := active.room.StartStage(plan)
 		if errors.Is(startErr, room.ErrQueueFull) {

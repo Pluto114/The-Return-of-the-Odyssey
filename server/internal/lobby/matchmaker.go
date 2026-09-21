@@ -28,10 +28,10 @@ func (m Match) Found() bool {
 	return len(m.Players) != 0
 }
 
-// Matchmaker groups unique players in FIFO order. Its methods are safe for
-// concurrent use. It deliberately does not depend on protocol, session, or room
-// packages: callers translate network requests into PlayerIDs and hand completed
-// matches to the room owner.
+// Matchmaker 按 FIFO 把玩家组成固定人数的小队。多个 Connection Reader 可能同时请求
+// 匹配或取消，因此 waiting 链表和 queued 索引必须由同一把 mutex 原子地更新。
+// queued 同时用于 O(1) 去重/取消，避免遍历队列。本包不依赖协议、Session 或 Room，
+// 匹配完成后只把 PlayerID 列表交给上层创建房间。
 type Matchmaker struct {
 	mu              sync.Mutex
 	playersPerMatch int
@@ -67,6 +67,8 @@ func (m *Matchmaker) Enqueue(player PlayerID) (Match, error) {
 		return Match{}, ErrPlayerAlreadyQueued
 	}
 
+	// “判重、入队、凑队并移除”全部在同一临界区完成，确保两个并发请求不会把同一玩家
+	// 分进两局，也不会让取消操作看到一半更新的结构。
 	m.queued[player] = m.waiting.PushBack(player)
 	if m.waiting.Len() < m.playersPerMatch {
 		return Match{}, nil

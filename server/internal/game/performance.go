@@ -21,6 +21,7 @@ func (r StageResult) Clone() StageResult {
 }
 
 type stagePerformance struct {
+	// 本关进行时逐项累加；只有 StageClear 时才 freeze，之后导演读取的值不再变化。
 	startedAtTick  uint64
 	damageDealt    float64
 	damageTaken    float64
@@ -31,6 +32,8 @@ type stagePerformance struct {
 }
 
 func (w *World) freezePerformance() {
+	// 使用权威 tick 计算耗时，而不是客户端上报的时钟；伤害、死亡、装备强度也都来自
+	// World 内部结算，因此客户端无法伪造表现来操纵下一关难度。
 	elapsedTicks := w.tick - w.performance.startedAtTick
 	clearTime := float64(elapsedTicks) / TickRate
 	if clearTime <= 0 {
@@ -59,6 +62,7 @@ func (w *World) freezePerformance() {
 }
 
 func (w *World) PerformanceMetrics() (director.PerformanceMetrics, error) {
+	// 只允许在本关已经明确结束的阶段读取，避免导演拿到仍在变化的“半成品”指标。
 	if !w.performance.ready || (w.stage.State != stage.StageClear && w.stage.State != stage.Reward && w.stage.State != stage.PreparingNextStage) {
 		return director.PerformanceMetrics{}, ErrPerformanceUnavailable
 	}
@@ -74,6 +78,8 @@ func (w *World) CompletedStage() (StageResult, error) {
 }
 
 func (w *World) equipmentPower() float64 {
+	// 将攻击、防御、生命、移速、攻速分别换算成相对基础属性的倍率，再取团队平均值。
+	// 导演用它归一化 DPS：装备提升仍有爽感，但不会被误判成玩家操作突然变强。
 	if len(w.players) == 0 {
 		return 1
 	}

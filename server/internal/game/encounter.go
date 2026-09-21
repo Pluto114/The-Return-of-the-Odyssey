@@ -10,9 +10,9 @@ import (
 
 const firstStageMonsterCount = 8
 
-// NewFirstStagePlan builds the server-owned opening encounter. The supplied
-// seed selects and orders positions from a fixed arena-relative layout, so a
-// room can reproduce the exact plan without using process-global randomness.
+// NewFirstStagePlan 生成服务器拥有的第一关。第一关没有上一关表现可供导演参考，
+// 因此使用基准难度与 8 个候选出生点；seed 只负责确定位置顺序。整个过程不依赖
+// 进程级随机数，同一个 room/seed 可精确复现，之后的关卡才交给 AI 导演自适应。
 func NewFirstStagePlan(config Config, seed int64) (stage.Plan, error) {
 	if err := config.Validate(); err != nil {
 		return stage.Plan{}, err

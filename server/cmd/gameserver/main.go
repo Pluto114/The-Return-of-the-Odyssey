@@ -1,9 +1,8 @@
-// Command gameserver is the entry point for the Odyssey game server.
+// Command gameserver 是游戏服务端入口。
 //
-// Phase 1 scope: accept TCP connections, speak the 16-byte frame protocol,
-// validate each message against the session state machine, answer Ping with
-// Pong, and perform development-mode login (test nickname -> server-issued
-// session/player IDs). Room/combat/matchmaking are not wired yet (Role B/D).
+// 启动顺序：加载配置与玩法数据 -> 创建业务编排层 -> 连接 Redis/MySQL（按配置启用）->
+// 启动 TCP、监控、管理后台和 pprof。所有长期 goroutine 共享根 context；收到 Ctrl+C 或
+// SIGTERM 后先停止接收连接，再关闭在线连接、排空持久化队列并关闭 HTTP 服务。
 package main
 
 import (
@@ -39,8 +38,8 @@ import (
 var errClosing = errors.New("gameserver: closing connection after rejection")
 var errSendRejected = errors.New("gameserver: reliable send queue rejected frame")
 
-// serverIDAllocator issues sequential session/player IDs for development
-// login. Atomic counters are enough for Phase 1 (no persistence).
+// idAllocator 用原子自增分配进程内唯一的 session/player ID。
+// 登录可能来自多条 Connection Reader goroutine，因此不能使用普通整数自增。
 type idAllocator struct {
 	session atomic.Uint64
 	player  atomic.Uint64
@@ -74,6 +73,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	metricSet := metrics.New()
+	// application 是“业务大脑”，负责把连接、匹配、Room、导演和持久化编排起来；
+	// 真正的逐帧战斗状态仍由每个 Room 独占维护。
 	app, err := newConfiguredGameApplication(ctx, logger, metricSet, gameplay)
 	if err != nil {
 		logger.Error("failed to initialize application", "err", err)
@@ -235,13 +236,14 @@ func serveHTTP(server *http.Server, name string, logger *slog.Logger, stop conte
 	}
 }
 
-// routeMessage decodes the payload by MessageType, validates it against the
-// connection's session state machine, and produces the appropriate reply.
+// routeMessage 处理所有连接都通用的基础消息（Ping/Login）：先按 MessageType 解码，
+// 再通过 Session 状态机校验，最后生成回复。匹配、输入、奖励等登录后业务由
+// gameApplication.handle 继续路由到对应模块。
 func routeMessage(c *network.Connection, h network.Header, payload []byte, ids *idAllocator, logger *slog.Logger) error {
 	mt := protocol.MessageType(h.MessageType)
 
-	// Session state is stored per-connection. In Phase 1 the connection IS the
-	// session context; a real session registry (resume/redis) lands with D.
+	// Session 作为连接上下文保存；网络层只存 interface{}，并不知道业务状态含义，
+	// 从而保持“拆包传输”和“会话规则”解耦。
 	var sess *session.Session
 	if v := c.Context(); v != nil {
 		sess = v.(*session.Session)
@@ -250,8 +252,8 @@ func routeMessage(c *network.Connection, h network.Header, payload []byte, ids *
 		c.SetContext(sess)
 	}
 
-	// State machine validation (message-routing.md). Ping/Pong and login are
-	// the only accepted messages before login; everything else is rejected.
+	// 所有消息先过状态机。例如未登录不能发玩家输入，奖励阶段不能再次请求匹配。
+	// 把合法性集中在一张状态迁移表里，比在每个 handler 中零散判断更不容易漏。
 	if ok, reason := sess.Accept(mt); !ok {
 		logger.Debug("message rejected by state machine", "state", sess.State(), "mt", mt, "reason", reason)
 		return sendDisconnect(c, h, reason, "invalid message for session state")
@@ -263,11 +265,11 @@ func routeMessage(c *network.Connection, h network.Header, payload []byte, ids *
 	case protocol.MessageType_MSG_LOGIN_REQUEST:
 		return handleLogin(c, h, payload, ids, sess)
 	case protocol.MessageType_MSG_PLAYER_INPUT:
-		// Accepted by the state machine only when IN_ROOM. Room is not wired
-		// in Phase 1; acknowledge nothing and drop for now (B will consume).
+		// 该分支仅保留给基础路由单测；生产路径中的玩家输入由
+		// gameApplication.handle 解析并送入对应 Room。
 		return nil
 	default:
-		// Legally accepted but not yet implemented (match, reward, etc.).
+		// 生产业务消息由 gameApplication.handle 处理；这里不重复实现。
 		logger.Debug("message accepted but unhandled", "mt", mt)
 		return nil
 	}

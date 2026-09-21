@@ -112,9 +112,9 @@ var legalityMatrix = map[State]map[protocol.MessageType]bool{
 	StateClosed:       {},
 }
 
-// Session is the authoritative per-connection state. It is safe for concurrent
-// use by the connection Reader goroutine (the only writer of inbound
-// transitions) and any goroutine that needs a read-only snapshot of state.
+// Session 是每条连接的权威状态机。Connection Reader 会推进状态；断线、重赛、奖励编排
+// 等其他 goroutine 也可能读写，因此使用 RWMutex。状态机先于业务 handler 校验消息，
+// 可阻止“未登录先移动”“战斗中重复匹配”等跨阶段请求进入 Room。
 type Session struct {
 	mu        sync.RWMutex
 	state     State
@@ -193,6 +193,8 @@ func (s *Session) Accept(mt protocol.MessageType) (ok bool, reason protocol.Reas
 // success, match found, TCP loss, close). It returns false if the transition
 // is not allowed from the current state.
 func (s *Session) Transition(to State) bool {
+	// “检查是否合法”和“真正赋值”必须放在同一写锁内，否则两个并发状态切换都可能
+	// 基于同一个旧状态通过检查，最终得到不可预测的结果。
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.canTransition(s.state, to) {

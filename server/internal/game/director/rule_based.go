@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	// 单关难度最多上调 20%、下调 15%，避免一次异常发挥造成体验骤变。
 	MaxDifficultyIncrease = 0.20
 	MaxDifficultyDecrease = 0.15
 )
@@ -59,6 +60,8 @@ func NewRuleBasedPlanner(config RuleConfig) (RuleBasedPlanner, error) {
 }
 
 type Decision struct {
+	// Decision 是给监控面板/答辩解释用的“决策记录”；真正进入 World 的是 stage.Plan。
+	// Reasons 保留每条规则的贡献，例如“快速通关 +6%”“有人死亡 -3%”。
 	PreviousDifficulty float64
 	NewDifficulty      float64
 	Adjustment         float64
@@ -72,9 +75,14 @@ func (p RuleBasedPlanner) Generate(previous stage.Plan, performance PerformanceM
 	return plan, err
 }
 
-// Decide applies explicit bounded rules and returns their explanation beside
-// the immutable plan. The same config, plan and metrics always produce the
-// same decision and spawn layout.
+// Decide 按可解释、有限幅度的规则生成下一关。流程如下：
+//  1. 校验上一关方案和表现指标，拒绝 NaN/越界数据；
+//  2. adjustment 汇总通关速度、血量、死亡、装备归一化 DPS、承伤；
+//  3. 将总调整限制在 [-15%, +20%]，再限制到全局难度上下限；
+//  4. 按难度平方根调整怪物数量，剩余强度分摊到单只怪物属性；
+//  5. 从上一关 seed 确定性地产生新 seed 与出生点，并再次校验完整 Plan。
+//
+// 这里没有随机全局状态：输入相同就能重现完全相同的关卡，便于定位线上问题。
 func (p RuleBasedPlanner) Decide(previous stage.Plan, performance PerformanceMetrics) (stage.Plan, Decision, error) {
 	if err := p.config.validate(); err != nil {
 		return stage.Plan{}, Decision{}, err
@@ -94,6 +102,8 @@ func (p RuleBasedPlanner) Decide(previous stage.Plan, performance PerformanceMet
 	newDifficulty = math.Max(p.config.MinDifficulty, math.Min(p.config.MaxDifficulty, newDifficulty))
 	adjustment = newDifficulty/previous.DifficultyScore - 1
 
+	// 怪物数量按难度比的平方根变化，另一半强度交给单体属性承担。
+	// 这样不会只靠“堆怪”，也不会只靠“血厚”，关卡压力变化更平滑。
 	count := int(math.Round(float64(len(previous.Monsters)) * math.Sqrt(newDifficulty/previous.DifficultyScore)))
 	count = max(1, min(p.config.MaxMonsters, count))
 	nextIndex := previous.Index + 1
@@ -124,6 +134,8 @@ func (p RuleBasedPlanner) Decide(previous stage.Plan, performance PerformanceMet
 }
 
 func (p RuleBasedPlanner) adjustment(metrics PerformanceMetrics) (float64, []string) {
+	// 每关先自然增长 3%，再由玩家表现加减：强队增加压力，困难队降低压力。
+	// DPS 会除以 EquipmentPower，避免玩家仅因拿到好装备就被导演过度惩罚。
 	adjustment := 0.03
 	reasons := []string{"base progression +3%"}
 	if metrics.ClearTimeSeconds <= p.config.TargetClearTimeSeconds*0.75 {
@@ -164,6 +176,8 @@ func (p RuleBasedPlanner) adjustment(metrics PerformanceMetrics) (float64, []str
 }
 
 func (p RuleBasedPlanner) positions(count int, seed int64) []entity.Vec2 {
+	// 出生点由 seed 驱动，不使用并发共享的 math/rand。先随机尝试远离玩家出生点且不重复
+	// 的位置；极端小地图下尝试失败，则使用黄金比例构造的确定性后备位置。
 	width, height := p.config.Max.X-p.config.Min.X, p.config.Max.Y-p.config.Min.Y
 	marginX, marginY := width*0.08, height*0.08
 	usableWidth, usableHeight := width-2*marginX, height-2*marginY

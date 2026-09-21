@@ -20,14 +20,12 @@ type SnapshotSink interface {
 	SendSnapshot(frame []byte) bool
 }
 
-// SnapshotDispatcher consumes a room's snapshot stream and fans out a
-// personalized WorldSnapshot to each subscribed player. Each recipient sees
-// itself as Self and receives the per-player input acknowledgement; other
-// players and monsters are shared.
+// SnapshotDispatcher 是 Room 快照 channel 的唯一消费者，再把同一份权威状态转换为
+// 每个玩家自己的 WorldSnapshot：接收者本人放在 Self 中，并带上该玩家的输入确认序号。
 //
-// It is the single consumer of room.Snapshots() (B's contract requires exactly
-// one). It performs no network I/O directly — it encodes the wire frame and
-// hands it to the player's SnapshotSink, which applies latest-wins delivery.
+// dispatcher 本身不直接写 socket，只编码后交给 SnapshotSink。sinks 使用 RWMutex，
+// 允许断线/重连 goroutine 修改订阅关系，同时快照分发 goroutine安全读取。最终发送采用
+// latest-wins，因此这里即使遇到慢客户端也不会阻塞房间模拟。
 type SnapshotDispatcher struct {
 	mu    sync.RWMutex
 	sinks map[entity.ID]SnapshotSink
@@ -77,6 +75,8 @@ func (d *SnapshotDispatcher) Run(rm *room.Room) {
 // Run for testability and for the room-close path (a final Closed snapshot can
 // be dispatched explicitly before the channel closes).
 func (d *SnapshotDispatcher) Dispatch(snap room.Snapshot) {
+	// 整次遍历持有读锁，保证某个 sink 不会在“查到后、调用前”被并发替换。
+	// SendSnapshot 是无阻塞操作，所以读锁持有时间有明确上界。
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	for _, p := range snap.Players {

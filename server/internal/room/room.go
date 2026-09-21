@@ -1,5 +1,7 @@
-// Package room owns each world's single writer and exposes bounded, nonblocking
-// command admission to session/lobby callers. It never performs network I/O.
+// Package room 是“房间 Actor”层：每个房间启动一个独立 goroutine，且只有它能修改
+// game.World。网络、匹配、断线处理等其他 goroutine 不能直接碰世界状态，只能通过
+// 有界 channel 投递命令。这样把复杂的“多人同时写地图”问题，转换成房间内的顺序执行，
+// 是服务端避免竞态、保证同一输入序列可复现的核心设计。本包不做任何网络 I/O。
 package room
 
 import (
@@ -150,8 +152,15 @@ type binding struct {
 	generation uint64
 }
 
-// Room must not be copied. Only run mutates world, members and the actor's stats.
-// mu protects admission, binding lookup and shutdown; callers never access World.
+// Room 不能被复制。
+//
+// 并发边界可以简单记成三层：
+//   - run 所在的房间 goroutine 是“唯一写者”，负责 world、members 和逐帧统计；
+//   - mu 只保护外部 goroutine 的入队、会话绑定查询与关闭过程，不用于包住游戏 Tick；
+//   - latest/status 使用 atomic.Pointer 发布只读快照，监控线程读取时无需阻塞房间。
+//
+// controls 与 inputs 分队列，是为了让加入、离开、开关卡等生命周期命令不会被大量
+// 30Hz 玩家输入淹没。两个队列都有容量上限，满时立即返回 ErrQueueFull 形成背压。
 type Room struct {
 	id       ID
 	config   Config
@@ -177,8 +186,9 @@ type Room struct {
 	stats      Stats
 }
 
-// Start immediately starts one owner goroutine. Call Close or cancel the parent
-// context on teardown. A never-joined room also expires after EmptyTimeout.
+// Start 创建 World 后立即启动唯一的房间 goroutine。
+// 上层可调用 Close 或取消父 context；从未有人加入或已经空掉的房间也会在
+// EmptyTimeout 后自动回收，避免泄漏 goroutine 和内存。
 func Start(ctx context.Context, id ID, config Config, catalogs ...equipment.Catalog) (*Room, error) {
 	if id == 0 {
 		return nil, fmt.Errorf("invalid room ID")
@@ -336,9 +346,12 @@ func (r *Room) submit(c control) (<-chan error, error) {
 	}
 }
 
-// Input validates shape and enqueues intent without blocking for a tick. The
-// actor resolves player identity from the session binding and validates order.
-// A successful enqueue is NOT an acknowledgement; inspect snapshots for ack.
+// Input 只校验并入队“操作意图”，不会在网络 goroutine 中等待下一次 Tick。
+// 真正的 playerID 由服务端保存的 Session 绑定解析，客户端不能冒充其他玩家。
+//
+// generation 用于拦截旧连接遗留的输入：玩家离开再加入后 generation 会变化，队列里
+// 旧 generation 的 movement 即使稍后出队也会被丢弃。入队成功不等于已经执行；客户端
+// 应以快照中的 LastProcessedInputSeq 作为权威确认。
 func (r *Room) Input(sessionID SessionID, input game.Input) error {
 	if sessionID == 0 {
 		return ErrInvalidSession
@@ -393,6 +406,8 @@ func (r *Room) Stats() Stats {
 func (r *Room) Close() { r.cancel(); <-r.done }
 
 func (r *Room) run() {
+	// 房间使用固定 30Hz 节拍。Ticker 在系统繁忙时会合并/丢弃过期信号，服务端不会为了
+	// “补帧”连续执行很多次物理运算，因此一次调度抖动不会造成模拟突然快进。
 	ticker := time.NewTicker(game.TickInterval)
 	defer ticker.Stop()
 	defer r.emptyTimer.Stop()
@@ -422,6 +437,10 @@ func (r *Room) run() {
 }
 
 func (r *Room) tick(now time.Time) {
+	// 一个 Tick 固定分四步，答辩时可概括为：
+	// 1. 先处理少量控制命令；2. 再消费玩家输入；3. 推进一步权威模拟；
+	// 4. 发布事件、快照和监控采样。
+	// ControlsPerTick/InputsPerTick 限制单帧工作量，防止请求洪峰拖垮 30Hz 主循环。
 	sample := TickSample{RoomID: r.id, StartedAt: now}
 	for range r.config.ControlsPerTick {
 		select {
@@ -475,6 +494,8 @@ inputs:
 		}
 	}
 simulate:
+	// 到这里开始真正修改 World。本文件之外的 goroutine 永远不会调用 World.Step，
+	// 所以移动、伤害、掉落、关卡状态天然按一个全序发生，无需给每个实体单独加锁。
 	r.world.Step(time.Now())
 	batch := r.world.TakeEvents()
 	if batch.Overflow {
@@ -555,9 +576,11 @@ func (r *Room) applyControl(c control) error {
 
 func (r *Room) publish(closed bool) {
 	s := Snapshot{RoomID: r.id, Closed: closed, Snapshot: r.world.Snapshot()}
+	// atomic 发布给 LatestSnapshot/Admin 等旁路读者；Snapshot 内部已经深拷贝，
+	// 读者修改自己的副本不会污染下一帧权威状态。
 	r.latest.Store(&s)
-	// Only this goroutine sends. A consumer may drain between the two selects,
-	// but after the drain there is always room for the replacement.
+	// updates 容量为 1，采用 latest-wins：消费者慢时先移除旧快照，再放入新快照。
+	// 位置等连续状态允许跳过旧帧，不能反过来阻塞房间 Tick。
 	select {
 	case <-r.updates:
 		r.stats.DroppedSnapshots++
@@ -573,6 +596,8 @@ func (r *Room) storeStats() {
 }
 
 func (r *Room) finish() {
+	// 先禁止新的命令入队，再清空队列并给每个 receipt 返回 ErrClosed。
+	// 这一步很重要：否则等待“加入/开关/结算结果”的 goroutine 会永久卡住。
 	r.cancel()
 	r.mu.Lock()
 	r.closed = true
