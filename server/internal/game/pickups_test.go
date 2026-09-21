@@ -11,9 +11,9 @@ import (
 func pickupCatalog(t *testing.T) equipment.Catalog {
 	t.Helper()
 	catalog, err := equipment.NewCatalog(1, []equipment.Definition{
-		{ID: 1001, Key: "iron", Name: "Iron", Slot: equipment.Weapon,
+		{ID: 1001, Key: "iron", Name: "Iron", Slot: equipment.Weapon, MagazineBonus: 4,
 			Modifiers: []equipment.Modifier{{Stat: equipment.Attack, Operation: equipment.Add, Value: 5}}},
-		{ID: 1002, Key: "rapid", Name: "Rapid", Slot: equipment.Weapon,
+		{ID: 1002, Key: "rapid", Name: "Rapid", Slot: equipment.Weapon, MagazineBonus: 6,
 			Modifiers: []equipment.Modifier{{Stat: equipment.AttackSpeed, Operation: equipment.Multiply, Value: 1.2}}},
 	})
 	if err != nil {
@@ -68,6 +68,9 @@ func TestStagePickupsHealAndEquipWeaponAuthoritatively(t *testing.T) {
 	player.player.Position = weapon.Position
 	w.Step(time.Unix(1, int64(time.Second/30)))
 	afterWeapon := w.Snapshot()
+	if p := afterWeapon.Players[0]; p.MagazineCapacity != 16 || p.Ammo != 12 {
+		t.Fatalf("pickup must expand capacity without granting free ammo: %+v", p)
+	}
 	if afterWeapon.Players[0].Equipment.WeaponID != 1001 || afterWeapon.Players[0].CurrentStats.Attack != 25 || len(afterWeapon.Pickups) != 0 {
 		t.Fatalf("weapon pickup result: player=%+v pickups=%+v", afterWeapon.Players[0], afterWeapon.Pickups)
 	}

@@ -24,19 +24,23 @@ func vec2f(v entity.Vec2) *protocol.Vec2 {
 // with modifiers) drives attack/defense/move-speed; Health drives hp/max_hp.
 func PlayerSnapshot(p entity.Player) *protocol.PlayerSnapshot {
 	return &protocol.PlayerSnapshot{
-		PlayerId:  uint64(p.ID),
-		Position:  vec2f(p.Position),
-		Velocity:  vec2f(p.Velocity),
-		Aim:       vec2f(p.Aim),
-		Hp:        float32(p.Health),
-		MaxHp:     float32(p.CurrentStats.MaxHealth),
-		Attack:    float32(p.CurrentStats.Attack),
-		Defense:   float32(p.CurrentStats.Defense),
-		MoveSpeed: float32(p.CurrentStats.MoveSpeed),
-		Alive:     p.Alive,
-		WeaponId:  p.Equipment.WeaponID,
-		RelicId:   p.Equipment.RelicID,
-		PotionId:  p.Equipment.PotionID,
+		PlayerId:             uint64(p.ID),
+		Position:             vec2f(p.Position),
+		Velocity:             vec2f(p.Velocity),
+		Aim:                  vec2f(p.Aim),
+		Hp:                   float32(p.Health),
+		MaxHp:                float32(p.CurrentStats.MaxHealth),
+		Attack:               float32(p.CurrentStats.Attack),
+		Defense:              float32(p.CurrentStats.Defense),
+		MoveSpeed:            float32(p.CurrentStats.MoveSpeed),
+		Alive:                p.Alive,
+		WeaponId:             p.Equipment.WeaponID,
+		RelicId:              p.Equipment.RelicID,
+		PotionId:             p.Equipment.PotionID,
+		Ammo:                 p.Ammo,
+		MagazineCapacity:     p.MagazineCapacity,
+		ReloadTicksRemaining: p.ReloadTicksRemaining,
+		ReloadDurationTicks:  p.ReloadDurationTicks,
 	}
 }
 
@@ -70,10 +74,15 @@ func MonsterSnapshot(m game.MonsterView) *protocol.MonsterSnapshot {
 // 5 failed / 6 closed), aligned with the proto comment.
 func StageState(v stage.View) *protocol.StageState {
 	return &protocol.StageState{
-		Index:             v.Index,
-		Seed:              v.Seed,
-		State:             uint32(v.State),
-		MonstersRemaining: uint32(v.MonstersRemaining),
+		Index:                 v.Index,
+		Seed:                  v.Seed,
+		State:                 uint32(v.State),
+		MonstersRemaining:     uint32(v.MonstersRemaining),
+		StageLimit:            v.StageLimit,
+		DifficultyScore:       float32(v.DifficultyScore),
+		DifficultyAdjustment:  float32(v.DifficultyAdjustment),
+		PreviousClearSeconds:  float32(v.PreviousClearSeconds),
+		PreviousTeamHpPercent: float32(v.PreviousTeamHPPercent),
 	}
 }
 

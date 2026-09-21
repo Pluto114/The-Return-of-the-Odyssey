@@ -1,8 +1,9 @@
 {
   "version": 1,
   "items": {
-    "1001": { "name": "铁制手枪", "slot": "武器", "description": "攻击力 +5" },
-    "1002": { "name": "速射手枪", "slot": "武器", "description": "攻击速度 ×1.2" },
+    "1001": { "name": "铁制手枪", "slot": "武器", "description": "攻击力 +5，弹匣 +4" },
+    "1002": { "name": "速射手枪", "slot": "武器", "description": "攻击速度 ×1.2，弹匣 +6" },
+    "1003": { "name": "弹鼓手枪", "slot": "武器", "description": "攻击力 +2，弹匣 +12" },
     "2001": { "name": "生命遗物", "slot": "遗物", "description": "生命上限 +25" },
     "2002": { "name": "疾风遗物", "slot": "遗物", "description": "移动速度 ×1.1" },
     "3001": { "name": "治疗药剂", "slot": "药剂", "description": "装备后按 Q 使用，恢复 30 点生命值" },

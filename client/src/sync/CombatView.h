@@ -150,7 +150,9 @@ public:
         return it != projectiles_.end() && DestroyProjectile(id, it->second.x, it->second.z);
     }
 
-    void ClearProjectiles() { projectiles_.clear(); impacts_.clear(); }
+    void ClearProjectiles() {
+        projectiles_.clear(); impacts_.clear(); hit_flash_.clear(); dead_.clear();
+    }
 
     std::size_t ProjectileCount() const { return projectiles_.size(); }
     const std::map<std::uint64_t, ProjectileVisual>& Projectiles() const { return projectiles_; }

@@ -14,6 +14,44 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestBotReloadIntentFollowsAuthoritativeMagazine(t *testing.T) {
+	p := &combatProgress{}
+	snapshot := combatSnapshot(1)
+	snapshot.Self.MagazineCapacity = 12
+	snapshot.Self.Ammo = 0
+	snapshot.Stage = &pb.StageState{Index: 4, DifficultyScore: 1.7, DifficultyAdjustment: 0.13}
+	if err := p.observeSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !p.reloadIntent() {
+		t.Fatal("empty magazine must request reload")
+	}
+	snapshot.Self.ReloadTicksRemaining = 44
+	if err := p.observeSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if p.reloadIntent() {
+		t.Fatal("must not restart active reload")
+	}
+	snapshot.Self.ReloadTicksRemaining = 0
+	snapshot.Self.Ammo = 12
+	if err := p.observeSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if p.reloadIntent() {
+		t.Fatal("full magazine requested reload")
+	}
+	reloads, samples := p.ammoDiagnostics()
+	if reloads != 1 || len(samples) != 1 || samples[0].Stage != 4 {
+		t.Fatalf("wrong diagnostics: %d/%v", reloads, samples)
+	}
+	samples[0].Stage = 99
+	_, again := p.ammoDiagnostics()
+	if again[0].Stage != 4 {
+		t.Fatal("diagnostics leaked mutable state")
+	}
+}
+
 func TestRunAimsShootsAndRequiresStageClear(t *testing.T) {
 	address, serverErrors, stop := startFakeServer(t, func(conn net.Conn, reader *bufio.Reader) error {
 		if err := handshakeBot(conn, reader); err != nil {

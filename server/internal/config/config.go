@@ -89,7 +89,7 @@ func Default() *Config {
 		ResultDeadLetterPath:       "var/odyssey/result-dead-letter.jsonl",
 		EquipmentCatalogPath:       "data/equipment/catalog.json",
 		RewardDurationSec:          10,
-		StageLimit:                 3,
+		StageLimit:                 12,
 		FirstStageSeedBase:         1,
 		DirectorMinDifficulty:      0.5,
 		DirectorMaxDifficulty:      10,

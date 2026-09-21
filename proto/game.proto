@@ -41,6 +41,8 @@ message PlayerInput {
   // One-shot use-potion trigger. Server validates and consumes the equipped
   // Potion during an active stage; clients should send true for one input tick.
   bool use_potion = 6;
+  // One-shot manual reload; movement remains available during reload.
+  bool reload = 7;
 }
 
 // S -> C. Authoritative world state, 10Hz. Includes a self-snapshot plus the
@@ -85,6 +87,10 @@ message PlayerSnapshot {
   uint32 weapon_id = 11;
   uint32 relic_id = 12;
   uint32 potion_id = 13;
+  uint32 ammo = 14;
+  uint32 magazine_capacity = 15;
+  uint32 reload_ticks_remaining = 16;
+  uint32 reload_duration_ticks = 17;
 }
 
 // Compact snapshot for a monster. Mirrors B's game.MonsterView. Only what the
@@ -125,6 +131,12 @@ message StageState {
   // 4 preparing next / 5 failed / 6 closed. Aligned with stage.State.
   uint32 state = 3;
   uint32 monsters_remaining = 4;
+  // Server-owned expedition length and Director decision, also on reconnect.
+  uint32 stage_limit = 5;
+  float difficulty_score = 6;
+  float difficulty_adjustment = 7;
+  float previous_clear_seconds = 8;
+  float previous_team_hp_percent = 9;
 }
 
 // ---------------------------------------------------------------------------

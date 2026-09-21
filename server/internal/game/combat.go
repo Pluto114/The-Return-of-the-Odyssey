@@ -115,6 +115,7 @@ func (w *World) StartStage(plan stage.Plan) error {
 			player.input.Aim = entity.Vec2{}
 			player.input.Shoot = false
 			player.input.UsePotion = false
+			player.input.Reload = false
 			player.receivedAt = time.Time{}
 			player.pending = false
 			player.firing = false
@@ -134,6 +135,15 @@ func (w *World) StartStage(plan stage.Plan) error {
 	w.performance = stagePerformance{startedAtTick: w.tick, equipmentPower: w.equipmentPower()}
 	w.currentPlan = plan.Clone()
 	w.stage = stage.View{Index: plan.Index, Seed: plan.Seed, State: stage.Playing, MonstersRemaining: len(plan.Monsters)}
+	w.stage.StageLimit = w.config.StageLimit
+	w.stage.DifficultyScore = plan.DifficultyScore
+	w.stage.DifficultyAdjustment = plan.DifficultyAdjustment
+	w.stage.PreviousClearSeconds = plan.PreviousClearSeconds
+	w.stage.PreviousTeamHPPercent = plan.PreviousTeamHPPercent
+	for _, player := range w.players {
+		player.player.Ammo = player.player.MagazineCapacity
+		player.player.ReloadTicksRemaining = 0
+	}
 	w.spawnStagePickups(plan.Index)
 	for _, spawn := range plan.Monsters {
 		id := w.allocateID()
@@ -184,9 +194,17 @@ func (w *World) stepCombat() {
 	assigned := make(map[entity.ID]int, len(playerIDs))
 	for _, id := range playerIDs {
 		p := w.players[id]
-		if !p.player.Alive || !p.firing || w.tick < p.nextShot || len(w.projectiles) >= w.config.Combat.MaxProjectiles {
+		if p.player.ReloadTicksRemaining > 0 {
+			p.player.ReloadTicksRemaining--
+			if p.player.ReloadTicksRemaining == 0 && p.player.Alive {
+				p.player.Ammo = p.player.MagazineCapacity
+			}
 			continue
 		}
+		if !p.player.Alive || !p.firing || p.player.Ammo == 0 || w.tick < p.nextShot || len(w.projectiles) >= w.config.Combat.MaxProjectiles {
+			continue
+		}
+		p.player.Ammo--
 		p.nextShot = w.tick + uint64(p.player.CurrentStats.AttackCooldownTicks)
 		c := w.config.Combat
 		projectile := entity.Projectile{ID: w.allocateID(), OwnerID: id, Position: p.player.Position,

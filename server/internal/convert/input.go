@@ -47,6 +47,7 @@ func Input(in *protocol.PlayerInput) (game.Input, error) {
 	}
 	out.Shoot = in.Shoot
 	out.UsePotion = in.UsePotion
+	out.Reload = in.Reload
 	return out, nil
 }
 

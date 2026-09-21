@@ -105,6 +105,7 @@ func (w *World) applyRewardSelection(selection reward.Selection, eventTick uint6
 	player.player.CurrentStats = stats
 	player.player.Health = health
 	player.syncEquipment()
+	w.syncMagazine(player)
 	w.emitRewardUpdate(RewardUpdate{Kind: RewardSelectionApplied, StageIndex: w.stage.Index, ServerTick: eventTick,
 		PlayerID: selection.PlayerID(), EquipmentID: selection.EquipmentID(), Defaulted: selection.Defaulted()})
 	if w.rewardRound.Complete() {

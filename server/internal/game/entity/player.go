@@ -27,6 +27,10 @@ type Player struct {
 	Alive                   bool
 	Aim                     Vec2
 	Equipment               EquipmentState
+	Ammo                    uint32
+	MagazineCapacity        uint32
+	ReloadTicksRemaining    uint32
+	ReloadDurationTicks     uint32
 }
 
 // EquipmentState carries stable static-data IDs in authoritative snapshots.

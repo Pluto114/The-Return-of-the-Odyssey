@@ -103,6 +103,9 @@ func (p RuleBasedPlanner) Decide(previous stage.Plan, performance PerformanceMet
 	perMonsterScale := math.Sqrt((newDifficulty / previous.DifficultyScore) * float64(len(previous.Monsters)) / float64(count))
 
 	plan := stage.Plan{Index: nextIndex, Seed: nextSeed, DifficultyScore: newDifficulty, Monsters: make([]stage.Spawn, count)}
+	plan.DifficultyAdjustment = adjustment
+	plan.PreviousClearSeconds = performance.ClearTimeSeconds
+	plan.PreviousTeamHPPercent = performance.TeamHPPercent
 	for i := range plan.Monsters {
 		spawn := previous.Monsters[i%len(previous.Monsters)]
 		spawn.Position = positions[i]

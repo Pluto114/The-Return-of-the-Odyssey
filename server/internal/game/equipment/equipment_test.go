@@ -36,15 +36,16 @@ func TestDefaultCatalogLoadsAsStableStaticData(t *testing.T) {
 	if catalog.Version() != 1 {
 		t.Fatalf("version = %d, want 1", catalog.Version())
 	}
-	want := []equipment.ID{1001, 1002, 2001, 2002, 3001, 3002}
+	want := []equipment.ID{1001, 1002, 1003, 2001, 2002, 3001, 3002}
 	if got := catalog.IDs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ids = %v, want %v", got, want)
 	}
 	wantDisplay := map[equipment.ID]struct {
 		name, slot, description string
 	}{
-		1001: {"Iron Sidearm", "weapon", "Attack +5"},
-		1002: {"Rapid Sidearm", "weapon", "Attack speed x1.2"},
+		1001: {"Iron Sidearm", "weapon", "Attack +5; magazine +4"},
+		1002: {"Rapid Sidearm", "weapon", "Attack speed x1.2; magazine +6"},
+		1003: {"Drum Sidearm", "weapon", "Attack +2; magazine +12"},
 		2001: {"Vitality Relic", "relic", "Max health +25"},
 		2002: {"Wind Relic", "relic", "Move speed x1.1"},
 		3001: {"Healing Potion", "potion", "Restore 30 health"},

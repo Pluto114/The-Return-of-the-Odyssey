@@ -41,12 +41,13 @@ type Config struct {
 	MoveSpeed    float64
 	InputTimeout time.Duration
 	CoverEnabled bool
+	StageLimit   uint32
 	Combat       CombatConfig
 }
 
 func DefaultConfig() Config {
 	return Config{Capacity: 2, Max: entity.Vec2{X: 20, Y: 20}, Spawn: entity.Vec2{X: 10, Y: 10},
-		MoveSpeed: 5, InputTimeout: 200 * time.Millisecond, CoverEnabled: true, Combat: DefaultCombatConfig()}
+		MoveSpeed: 5, InputTimeout: 200 * time.Millisecond, CoverEnabled: true, StageLimit: 12, Combat: DefaultCombatConfig()}
 }
 
 func (c Config) Validate() error {
@@ -68,6 +69,7 @@ type Input struct {
 	Aim       entity.Vec2
 	Shoot     bool
 	UsePotion bool
+	Reload    bool
 }
 
 func (i Input) Validate() error {
@@ -158,6 +160,9 @@ func (w *World) AddPlayer(id entity.ID) error {
 	stats.MoveSpeed = w.config.MoveSpeed
 	delete(w.departedPlayers, id)
 	w.players[id] = &playerState{player: entity.Player{ID: id, Position: w.config.Spawn, BaseStats: stats, CurrentStats: stats, Health: stats.MaxHealth, Alive: true, Aim: entity.Vec2{X: 1}}}
+	w.players[id].player.Ammo = BaseMagazineCapacity
+	w.players[id].player.MagazineCapacity = BaseMagazineCapacity
+	w.players[id].player.ReloadDurationTicks = ReloadDurationTicks
 	return nil
 }
 
@@ -208,6 +213,9 @@ func (w *World) ApplyInput(id entity.ID, input Input, receivedAt time.Time) erro
 		return ErrStaleInput
 	}
 	input.Direction = systems.NormalizeDirection(input.Direction)
+	// Preserve one-shot actions across several packets arriving in one tick.
+	input.Reload = input.Reload || (p.pending && p.input.Reload)
+	input.UsePotion = input.UsePotion || (p.pending && p.input.UsePotion)
 	p.input, p.receivedAt, p.pending = input, receivedAt, true
 	return nil
 }
@@ -218,6 +226,7 @@ func (w *World) Step(now time.Time) {
 	for _, p := range w.players {
 		p.firing = false
 		if !p.player.Alive {
+			p.player.ReloadTicksRemaining = 0
 			p.player.Velocity = entity.Vec2{}
 			continue
 		}
@@ -235,6 +244,9 @@ func (w *World) Step(now time.Time) {
 				p.player.LastProcessedInputSeq = p.input.Seq
 				if w.stage.State == stage.Playing && p.input.UsePotion {
 					w.usePotion(p)
+				}
+				if w.stage.State == stage.Playing && p.input.Reload {
+					startReload(p)
 				}
 			}
 		}

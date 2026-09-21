@@ -87,6 +87,7 @@ struct PlayerInputData {
     float aim_z = 0.0f;           // aim heading, world z
     bool shoot = false;
     bool use_potion = false;      // one-shot request; server validates/consumes Potion
+    bool reload = false;
     std::uint64_t client_tick_ms = 0;
 };
 
@@ -102,6 +103,7 @@ inline std::vector<std::uint8_t> EncodePlayerInput(const PlayerInputData& data) 
     aim->set_y(data.aim_z);
     proto.set_shoot(data.shoot);
     proto.set_use_potion(data.use_potion);
+    proto.set_reload(data.reload);
     std::vector<std::uint8_t> out(proto.ByteSizeLong());
     proto.SerializeToArray(out.data(), static_cast<int>(out.size()));
     return out;
@@ -126,6 +128,10 @@ struct SnapshotPlayerView {
     std::uint32_t weapon_id = 0;
     std::uint32_t relic_id = 0;
     std::uint32_t potion_id = 0;
+    std::uint32_t ammo = 0;
+    std::uint32_t magazine_capacity = 0;
+    std::uint32_t reload_ticks_remaining = 0;
+    std::uint32_t reload_duration_ticks = 0;
 };
 
 struct SnapshotPickupView {
@@ -153,6 +159,11 @@ struct StageStateView {
     std::int64_t seed = 0;
     std::uint32_t state = 0;  // 0 waiting/1 playing/2 clear/3 reward/4 prep/5 failed/6 closed
     std::uint32_t monsters_remaining = 0;
+    std::uint32_t stage_limit = 0;
+    float difficulty_score = 0;
+    float difficulty_adjustment = 0;
+    float previous_clear_seconds = 0;
+    float previous_team_hp_percent = 0;
 };
 
 struct WorldSnapshotView {
@@ -186,6 +197,10 @@ inline SnapshotPlayerView MapPlayer(const odyssey::protocol::v1::PlayerSnapshot&
     out.weapon_id = p.weapon_id();
     out.relic_id = p.relic_id();
     out.potion_id = p.potion_id();
+    out.ammo = p.ammo();
+    out.magazine_capacity = p.magazine_capacity();
+    out.reload_ticks_remaining = p.reload_ticks_remaining();
+    out.reload_duration_ticks = p.reload_duration_ticks();
     return out;
 }
 
@@ -245,6 +260,11 @@ inline bool DecodeWorldSnapshot(const std::vector<std::uint8_t>& payload,
         out.stage.seed = proto.stage().seed();
         out.stage.state = proto.stage().state();
         out.stage.monsters_remaining = proto.stage().monsters_remaining();
+        out.stage.stage_limit = proto.stage().stage_limit();
+        out.stage.difficulty_score = proto.stage().difficulty_score();
+        out.stage.difficulty_adjustment = proto.stage().difficulty_adjustment();
+        out.stage.previous_clear_seconds = proto.stage().previous_clear_seconds();
+        out.stage.previous_team_hp_percent = proto.stage().previous_team_hp_percent();
     } else {
         out.stage = StageStateView{};
     }

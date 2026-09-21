@@ -16,6 +16,7 @@
 #include "raylib.h"
 #include "rlgl.h"
 #include "sync/CombatView.h"
+#include "sync/CombatFeedback.h"
 #include "sync/GameView.h"
 #include "sync/Interpolation.h"
 #include "sync/MatchScore.h"
@@ -109,7 +110,7 @@ void LoadChineseFont(const odyssey::client::sync::EquipmentTable& equipment_tabl
     std::set<int> glyphs;
     glyphs.insert(' ');
     glyphs.insert('?');  // Fallback for an unanticipated server-provided label.
-    for (int codepoint = '0'; codepoint <= '9'; ++codepoint) { glyphs.insert(codepoint); }
+    for (int codepoint = 32; codepoint <= 126; ++codepoint) { glyphs.insert(codepoint); }
     for (int index = 0; index < count; ++index) { glyphs.insert(decoded[index]); }
     UnloadCodepoints(decoded);
     const std::vector<int> codepoints(glyphs.begin(), glyphs.end());
@@ -333,6 +334,11 @@ struct DemoState {
     float self_hp = 0.0f;
     float self_max_hp = 0.0f;
     std::uint32_t stage_index = 0;
+    std::uint32_t stage_limit = 0;
+    float difficulty_score = 0, difficulty_adjustment = 0;
+    float previous_clear_seconds = 0, previous_team_hp_percent = 0;
+    std::uint32_t ammo = 0, magazine_capacity = 0;
+    std::uint32_t reload_ticks = 0, reload_duration = 0;
     std::uint32_t stage_state = 0;
     std::uint32_t monsters_remaining = 0;
     std::uint32_t prev_stage_index = 0;
@@ -393,6 +399,7 @@ int main() {
     InputSampler input_sampler;
     InputSequencer input_sequencer;
     odyssey::client::input::OneShotAction potion_action;
+    odyssey::client::input::OneShotAction reload_action;
     InputSample last_sample;
     InputReport last_report;      // normalized vector + sequence (connected ticks)
     float last_aim_x = 1.0f;      // aim heading sent to the server (for the HUD)
@@ -402,11 +409,13 @@ int main() {
     bool awaiting_new_stage = false;
     bool replay_after_victory = false;
     bool show_debug = false;
+    bool reduced_effects = false;
     std::int64_t old_stage_seed = 0;
     double rematch_requested_at = 0.0;
     double last_input_time = 0.0;
     GameView game_view;           // players from authoritative snapshots
     CombatView combat_view;       // monsters (snapshot) + projectiles (events)
+    odyssey::client::sync::CombatFeedback feedback;
     MatchScoreboard match_scoreboard;  // authoritative-event run summary
     RewardView reward_view;       // treasure chest options / choice state
     RecoveryState recovery;       // reconnect/resume state machine (D8)
@@ -491,12 +500,21 @@ int main() {
         if (IsKeyPressed(KEY_F3)) {
             show_debug = !show_debug;
         }
+        feedback.Tick(frame_dt);
+        if (IsKeyPressed(KEY_F4)) reduced_effects = !reduced_effects;
         if (demo.state == ConnectionState::kConnected && demo.in_room &&
             demo.stage_state == 1 && IsKeyPressed(KEY_Q)) {
             // Keep the one-frame key press until the next 30 Hz input packet.
             potion_action.Press();
         }
-        if (IsKeyPressed(KEY_R)) {
+        const bool reload_pressed = IsKeyPressed(KEY_R);
+        if (reload_pressed && demo.state == ConnectionState::kConnected &&
+            demo.in_room && demo.stage_state == 1 && demo.self_hp > 0) {
+            reload_action.Press();
+        }
+        if (demo.stage_state != 1 || demo.state != ConnectionState::kConnected) reload_action.Reset();
+        if (reload_pressed && demo.state != ConnectionState::kConnected &&
+            demo.state != ConnectionState::kConnecting) {
             // Retry after a failed/disconnected connect attempt.
             demo.state = ConnectionState::kIdle;
             demo.state_detail = "retrying";
@@ -514,6 +532,8 @@ int main() {
             monster_interp.Clear();
             game_view = GameView{};
              combat_view.Clear();
+             feedback.Clear();
+             reload_action.Reset();
              match_scoreboard.Reset();
              reward_view.Clear();
              potion_action.Reset();
@@ -536,11 +556,11 @@ int main() {
         // request only after defeat or the final clear, moving both players.
         const bool expedition_complete = demo.stage_clear_started_at > 0.0 &&
             ui::ExpeditionComplete(demo.stage_index, demo.stage_state,
-                                   GetTime() - demo.stage_clear_started_at);
+                                   GetTime() - demo.stage_clear_started_at, demo.stage_limit);
         if (demo.state == ConnectionState::kConnected && demo.in_room &&
             ui::CanReplay(demo.stage_index, demo.stage_state,
                           demo.stage_clear_started_at > 0.0
-                              ? GetTime() - demo.stage_clear_started_at : 0.0) &&
+                              ? GetTime() - demo.stage_clear_started_at : 0.0, demo.stage_limit) &&
             !rematch_pending && !awaiting_new_stage &&
             (IsKeyPressed(KEY_N) ||
              (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
@@ -629,6 +649,7 @@ int main() {
                     input.aim_z = aim_z;
                     input.shoot = IsKeyDown(KEY_SPACE);
                     input.use_potion = potion_action.Consume();
+                    input.reload = reload_action.Consume();
                     input.client_tick_ms = static_cast<std::uint64_t>(now * 1000.0);
                     last_aim_x = aim_x;
                     last_aim_z = aim_z;
@@ -675,6 +696,8 @@ int main() {
                         monster_interp.Clear();
                         game_view = GameView{};
                         combat_view.Clear();
+                        feedback.Clear();
+                        reload_action.Reset();
                         reward_view.Clear();
                         potion_action.Reset();
                         demo.self_hp = 0.0f;
@@ -772,6 +795,9 @@ int main() {
                                 old_stage_seed = combat_view.Stage().seed;
                                  game_view = GameView{};
                                  combat_view.Clear();
+                                 feedback.Clear();
+                                 reload_action.Reset();
+                                 potion_action.Reset();
                                  match_scoreboard.Reset();
                                  reward_view.Clear();
                                 demo.stage_index = 0;
@@ -840,7 +866,8 @@ int main() {
                             sv.server_tick = snap.server_tick;
                             sv.room_id = demo.room_id;
                             sv.closed = false;
-                            const auto add = [&sv, &snap](const SnapshotPlayerView& p) {
+                            const auto add = [&sv, &snap, &feedback](const SnapshotPlayerView& p) {
+                                feedback.Track(p.id, p.pos_x, p.pos_z);
                                 odyssey::client::sync::PlayerView v;
                                 v.id = p.id;
                                 v.x = p.pos_x;
@@ -911,10 +938,19 @@ int main() {
                             if (demo.prev_stage_index != 0 &&
                                 snap.stage.index != demo.prev_stage_index) {
                                 combat_view.ClearProjectiles();
+                                feedback.Clear();
+                                reload_action.Reset();
                                 demo.last_event_note = "stage index changed -> projectiles cleared";
                             }
                             demo.prev_stage_index = snap.stage.index;
                             demo.stage_index = snap.stage.index;
+                            demo.stage_limit = snap.stage.stage_limit;
+                            demo.difficulty_score = snap.stage.difficulty_score;
+                            demo.difficulty_adjustment = snap.stage.difficulty_adjustment;
+                            demo.previous_clear_seconds = snap.stage.previous_clear_seconds;
+                            demo.previous_team_hp_percent = snap.stage.previous_team_hp_percent;
+                            for (const auto& monster : snap.monsters)
+                                feedback.Track(monster.id, monster.pos_x, monster.pos_z);
                             if (snap.stage.state == 2 && demo.stage_state != 2) {
                                 demo.stage_clear_started_at = GetTime();
                             } else if (snap.stage.state != 2) {
@@ -930,6 +966,10 @@ int main() {
                                 const float previous_move_speed = demo.self_move_speed;
                                 const std::uint32_t previous_weapon_id = demo.self_weapon_id;
                                 demo.self_hp = snap.self.hp;
+                                demo.ammo = snap.self.ammo;
+                                demo.magazine_capacity = snap.self.magazine_capacity;
+                                demo.reload_ticks = snap.self.reload_ticks_remaining;
+                                demo.reload_duration = snap.self.reload_duration_ticks;
                                 demo.self_max_hp = snap.self.max_hp;
                                 demo.self_attack = snap.self.attack;
                                 demo.self_defense = snap.self.defense;
@@ -1009,6 +1049,7 @@ int main() {
                             projectile.expires_at_tick = spawn.expires_at_tick;
                             projectile.server_tick = spawn.server_tick;
                             combat_view.SpawnProjectile(projectile);
+                            feedback.Muzzle(spawn.pos_x, spawn.pos_z);
                             ++demo.spawns;
                             demo.last_event_note = "projectile spawn id=" +
                                                    std::to_string(spawn.projectile_id);
@@ -1027,6 +1068,9 @@ int main() {
                          if (payload::DecodeDamageEvent(event->message.payload, damage)) {
                              ++demo.damages;
                              combat_view.ApplyDamageFx(damage.target_id);
+                             feedback.Damage(damage.target_id, damage.amount,
+                                             damage.target_id == demo.player_id,
+                                             damage.source_id == demo.player_id);
                              match_scoreboard.ObserveDamage(damage.source_id, damage.target_id,
                                                             damage.amount);
                             demo.last_event_note = "damage target=" +
@@ -1039,6 +1083,7 @@ int main() {
                          if (payload::DecodeDeathEvent(event->message.payload, death)) {
                              ++demo.deaths;
                              combat_view.ApplyDeath(death.entity_id);
+                             feedback.Death(death.entity_id);
                              match_scoreboard.ObserveDeath(death.entity_id, death.killer_id);
                             demo.last_event_note = "death entity=" +
                                                    std::to_string(death.entity_id) + " killer=" +
@@ -1072,6 +1117,9 @@ int main() {
                                  // A new stage begins: drop event-driven bullets
                                 // from the previous wave and any reward panel.
                                  combat_view.ClearProjectiles();
+                                 feedback.Clear();
+                                 reload_action.Reset();
+                                 potion_action.Reset();
                                  reward_view.Clear();
                                  demo.ready_sent = false;
                                  demo.pickup_stage_index = stage_event.stage_index;
@@ -1201,7 +1249,8 @@ int main() {
 
         const Rectangle stage_card{570.0f, 18.0f, 198.0f, 60.0f};
         DrawPanel(stage_card, kPanelRaised, Fade(kGold, 0.3f));
-        DrawUiText((std::string(ui::kStage) + " " + std::to_string(demo.stage_index)).c_str(), 584, 27, 13, kMuted);
+        DrawUiText((std::string(ui::kStage) + " " + std::to_string(demo.stage_index) + "/" +
+                    std::to_string(demo.stage_limit)).c_str(), 584, 27, 13, kMuted);
         DrawUiText(PlayerStageName(demo.stage_state), 584, 46, 17,
                  demo.stage_state == 5 ? kDanger : kGold);
 
@@ -1339,7 +1388,9 @@ int main() {
             const float sy = to_screen_y(mz);
             const bool dead = combat_view.IsDead(id);
             DrawCircleV(Vector2{sx, sy}, 19.0f, Fade(dead ? kMuted : kDanger, 0.10f));
-            DrawPoly(Vector2{sx, sy}, 4, 12.0f, 45.0f, dead ? kMuted : kDanger);
+            const bool flash = !reduced_effects && combat_view.IsHitFlashing(id);
+            DrawPoly(Vector2{sx, sy}, 4, flash ? 15.0f : 12.0f, 45.0f,
+                     dead ? kMuted : flash ? kStarlight : kDanger);
             if (dead) {
                 DrawLine(static_cast<int>(sx) - 9, static_cast<int>(sy) - 9,
                          static_cast<int>(sx) + 9, static_cast<int>(sy) + 9, kVoid);
@@ -1456,6 +1507,65 @@ int main() {
                 const Vector2 end{center.x + direction.x * (12.0f + 14.0f * progress),
                                   center.y + direction.y * (12.0f + 14.0f * progress)};
                 DrawLineEx(start, end, 2.0f, Fade(kGold, alpha * 0.8f));
+            }
+        }
+
+        BeginScissorMode(static_cast<int>((kArenaX * viewport.scale) + viewport.offset_x),
+                         static_cast<int>((kArenaY * viewport.scale) + viewport.offset_y),
+                         static_cast<int>(kArenaW * viewport.scale),
+                         static_cast<int>(kArenaH * viewport.scale));
+        if (!reduced_effects) {
+            for (const auto& spark : feedback.Particles()) {
+                const float alpha = 1.0f - spark.age / spark.lifetime;
+                const Vector2 pos{to_screen_x(spark.x), to_screen_y(spark.z)};
+                const Vector2 tail{to_screen_x(spark.x - spark.vx * 0.04f),
+                                   to_screen_y(spark.z - spark.vz * 0.04f)};
+                DrawLineEx(tail, pos, 2.0f + 2.0f * alpha,
+                           Fade(spark.danger ? kDanger : kGold, alpha));
+            }
+            DrawRectangleLinesEx(Rectangle{kArenaX + 3, kArenaY + 3, kArenaW - 6, kArenaH - 6},
+                                 7.0f, Fade(kDanger, feedback.HurtFlash() * 0.8f));
+        }
+        for (const auto& number : feedback.Numbers()) {
+            const std::string amount = "-" + std::to_string(static_cast<int>(std::ceil(number.amount)));
+            const int x = static_cast<int>(to_screen_x(number.x) + 16);
+            const int y = static_cast<int>(to_screen_y(number.z) - 32 - number.age * 45);
+            const float alpha = std::min(1.0f, (0.8f - number.age) * 4);
+            DrawText(amount.c_str(), x + 1, y + 1, 21, Fade(kVoid, alpha));
+            DrawText(amount.c_str(), x, y, 21, Fade(number.danger ? kDanger : kGold, alpha));
+        }
+        if (feedback.HitMarker() > 0) {
+            for (int sx : {-1, 1}) for (int sy : {-1, 1})
+                DrawLineEx(Vector2{canvas_mouse.x + sx * 6.0f, canvas_mouse.y + sy * 6.0f},
+                           Vector2{canvas_mouse.x + sx * 12.0f, canvas_mouse.y + sy * 12.0f},
+                           2.5f, Fade(kGold, feedback.HitMarker()));
+        }
+        EndScissorMode();
+
+        if (demo.in_room) {
+            DrawPanel(Rectangle{44, 553, 445, 55}, Fade(kVoid, 0.88f), Fade(kCyan, 0.25f));
+            char metrics[160];
+            std::snprintf(metrics, sizeof(metrics), "%s %.2f  (%+.0f%%)", ui::kDirector,
+                          demo.difficulty_score, demo.difficulty_adjustment * 100);
+            DrawUiText(metrics, 56, 563, 16, demo.difficulty_adjustment < 0 ? kCyan : kGold);
+            if (demo.stage_index > 1) {
+                std::snprintf(metrics, sizeof(metrics), "%s %.1fs / %s %.0f%%", ui::kLastStage,
+                              demo.previous_clear_seconds, ui::kTeamHealth, demo.previous_team_hp_percent * 100);
+                DrawUiText(metrics, 56, 586, 13, kMuted);
+            } else DrawUiText(ui::kLearning, 56, 586, 13, kMuted);
+
+            DrawPanel(Rectangle{950, 548, 286, 60}, Fade(kVoid, 0.92f), Fade(kGold, 0.4f));
+            const bool reloading = demo.reload_ticks > 0;
+            std::snprintf(metrics, sizeof(metrics), "%s %u / %u", ui::kAmmo, demo.ammo, demo.magazine_capacity);
+            DrawUiText(metrics, 964, 558, 20, demo.ammo == 0 ? kDanger : kStarlight);
+            if (reloading) {
+                DrawUiText(ui::kReloading, 1134, 560, 16, kGold);
+                const float progress = demo.reload_duration > 0
+                    ? 1.0f - static_cast<float>(demo.reload_ticks) / demo.reload_duration : 0.0f;
+                DrawMeter(Rectangle{964, 589, 258, 7}, progress, kGold);
+            } else {
+                DrawUiText(demo.ammo == 0 ? ui::kEmptyMagazine : "R", 964, 587, 14,
+                           demo.ammo == 0 ? kDanger : kMuted);
             }
         }
 
@@ -1621,14 +1731,19 @@ int main() {
             DrawUiText(ui::kMouse, 145, 678, 18, kStarlight);
             DrawUiText(ui::kFire, 270, 656, 13, kMuted);
             DrawUiText(ui::kHoldSpace, 270, 678, 18, kGold);
-            DrawUiText(ui::kPotion, 440, 656, 13, kMuted);
+            DrawUiText(ui::kReload, 425, 656, 13, kMuted);
+            DrawText("R", 425, 678, 18, kGold);
+            DrawUiText(ui::kPotion, 535, 656, 13, kMuted);
             DrawUiText(demo.self_potion_id == 0 ? ui::kNoPotion : ui::kPressQ,
-                       440, 678, 18, demo.self_potion_id == 0 ? kMuted : kCyan);
-            DrawUiText(ui::kRestart, 600, 656, 13, kMuted);
-            DrawUiText(ui::kNAfterFinish, 600, 678, 18, kStarlight);
+                       535, 678, 18, demo.self_potion_id == 0 ? kMuted : kCyan);
+            DrawUiText(ui::kRestart, 690, 656, 13, kMuted);
+            DrawUiText(ui::kNAfterFinish, 690, 678, 18, kStarlight);
         }
         DrawUiText(ui::kExit, 825, 656, 13, kMuted);
         DrawText("ESC", 825, 678, 18, kStarlight);
+        DrawUiText(ui::kEffects, 916, 656, 13, kMuted);
+        DrawUiText((std::string("F4 ") + (reduced_effects ? ui::kEffectsReduced : ui::kEffectsFull)).c_str(),
+                   916, 678, 16, kStarlight);
         DrawUiText(ui::kDeveloper, 1040, 656, 13, kMuted);
         DrawText("F3", 1040, 678, 18, show_debug ? kCyan : kStarlight);
 

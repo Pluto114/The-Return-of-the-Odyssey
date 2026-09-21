@@ -14,7 +14,7 @@ func TestDefaultsMatchExample(t *testing.T) {
 	if c.TCPAddr != "127.0.0.1:7777" {
 		t.Fatalf("default TCPAddr = %q", c.TCPAddr)
 	}
-	if c.EquipmentCatalogPath != "data/equipment/catalog.json" || c.RewardDurationSec != 10 || c.StageLimit != 3 {
+	if c.EquipmentCatalogPath != "data/equipment/catalog.json" || c.RewardDurationSec != 10 || c.StageLimit != 12 {
 		t.Fatalf("default gameplay config = %q/%d/%d", c.EquipmentCatalogPath, c.RewardDurationSec, c.StageLimit)
 	}
 	if c.ResumeEnabled || c.ResumeTTLSeconds != 30 || c.RedisOperationMS != 2000 {

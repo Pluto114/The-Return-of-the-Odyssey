@@ -5,8 +5,9 @@
       "id": 1001,
       "key": "iron_sidearm",
       "name": "Iron Sidearm",
-      "description": "Attack +5",
+      "description": "Attack +5; magazine +4",
       "slot": "weapon",
+      "magazine_bonus": 4,
       "modifiers": [
         { "stat": "attack", "operation": "add", "value": 5 }
       ]
@@ -15,10 +16,22 @@
       "id": 1002,
       "key": "rapid_sidearm",
       "name": "Rapid Sidearm",
-      "description": "Attack speed x1.2",
+      "description": "Attack speed x1.2; magazine +6",
       "slot": "weapon",
+      "magazine_bonus": 6,
       "modifiers": [
         { "stat": "attack_speed", "operation": "multiply", "value": 1.2 }
+      ]
+    },
+    {
+      "id": 1003,
+      "key": "drum_sidearm",
+      "name": "Drum Sidearm",
+      "description": "Attack +2; magazine +12",
+      "slot": "weapon",
+      "magazine_bonus": 12,
+      "modifiers": [
+        { "stat": "attack", "operation": "add", "value": 2 }
       ]
     },
     {

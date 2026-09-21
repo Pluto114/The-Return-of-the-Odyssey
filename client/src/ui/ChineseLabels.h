@@ -7,7 +7,7 @@ namespace odyssey::client::ui {
 // Player-facing copy lives here so the font atlas is built from the same
 // strings that the interface actually draws. F3 diagnostics stay in English.
 inline constexpr const char* kTitle = "奥德赛归途";
-inline constexpr const char* kWindowTitle = "奥德赛归途 · 中文测试版 · 积分榜";
+inline constexpr const char* kWindowTitle = "奥德赛归途 · 动态远征 · 积分榜";
 inline constexpr const char* kSubtitle = "双人远征 / 星际航线";
 inline constexpr const char* kPilot = "玩家";
 inline constexpr const char* kAttack = "攻击";
@@ -100,6 +100,18 @@ inline constexpr const char* kWeaponCollected = "已拾取武器";
 inline constexpr const char* kNoPotion = "暂无";
 inline constexpr const char* kMapSupplies = "本关道具";
 inline constexpr const char* kPickupSyncMissing = "未收到地图道具，请重启游戏服务器";
+inline constexpr const char* kDirector = "AI 导演 / 难度";
+inline constexpr const char* kLastStage = "上关用时";
+inline constexpr const char* kTeamHealth = "队伍生命";
+inline constexpr const char* kLearning = "正在观察团队表现";
+inline constexpr const char* kAmmo = "弹药";
+inline constexpr const char* kReload = "换弹";
+inline constexpr const char* kReloading = "装弹中…";
+inline constexpr const char* kEmptyMagazine = "弹匣已空 / 按 R 换弹";
+inline constexpr const char* kMagazineIncreased = "弹匣容量已提升至";
+inline constexpr const char* kEffects = "特效";
+inline constexpr const char* kEffectsFull = "完整";
+inline constexpr const char* kEffectsReduced = "简化";
 
 inline constexpr std::array kPlayerLabels{
     kTitle, kSubtitle, kPilot, kAttack, kStage, kAlly, kDown, kWaiting, kOnline, kOffline,
@@ -117,7 +129,9 @@ inline constexpr std::array kPlayerLabels{
     kFire, kHoldSpace, kRestart, kNAfterDefeat, kNAfterFinish, kExit, kDeveloper,
     kPotion, kPressQ, kAttackIncreased, kMaxHealthIncreased, kMoveSpeedIncreased,
     kHealthRestored, kHealth, kWeapon, kBaseWeapon, kWeaponCollected, kNoPotion,
-    kMapSupplies, kPickupSyncMissing
+    kMapSupplies, kPickupSyncMissing, kDirector, kLastStage, kTeamHealth, kLearning,
+    kAmmo, kReload, kReloading, kEmptyMagazine, kMagazineIncreased,
+    kEffects, kEffectsFull, kEffectsReduced
 };
 
 }  // namespace odyssey::client::ui

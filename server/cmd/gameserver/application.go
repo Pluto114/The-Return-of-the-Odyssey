@@ -136,6 +136,9 @@ func buildGameApplication(ctx context.Context, logger *slog.Logger, m *metrics.M
 		waiting:     make(map[lobby.PlayerID]*participant),
 		rooms:       make(map[room.ID]*activeRoom),
 	}
+	if gameplay.Valid() {
+		app.roomConfig.World.StageLimit = gameplay.StageLimit()
+	}
 	app.publishMetricsLocked()
 	return app, nil
 }

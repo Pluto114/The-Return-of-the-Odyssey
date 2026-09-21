@@ -1,0 +1,110 @@
+{
+  "planned": 2,
+  "started": 2,
+  "succeeded": 2,
+  "failed": 0,
+  "elapsed": "1m7.8740268s",
+  "server": "127.0.0.1:17777",
+  "mode": "functional",
+  "target_stages": 12,
+  "reward_scenario": "normal",
+  "seed": 1,
+  "matches_completed": 2,
+  "stages_cleared": 24,
+  "rewards_applied": 22,
+  "ready_sent": 22,
+  "potion_inputs": 22,
+  "recovery_attempts": 0,
+  "recovery_succeeded": 0,
+  "phase_succeeded": {
+    "combat": 24,
+    "complete": 2,
+    "login": 2,
+    "match": 2,
+    "ready": 22,
+    "resume": 0,
+    "reward": 22
+  },
+  "phase_failed": {},
+  "last_progress": {
+    "client_id": 0,
+    "phase": "complete",
+    "session_id": 1,
+    "player_id": 1,
+    "room_id": 1,
+    "stage_index": 12,
+    "last_server_tick": 2036,
+    "stages_cleared": 12,
+    "rewards_applied": 11,
+    "ready_sent": 11,
+    "potion_inputs": 11,
+    "recovery_attempts": 0,
+    "recovery_succeeded": 0,
+    "reloads_started": 10,
+    "director_samples": [
+      {
+        "stage": 1,
+        "difficulty": 1,
+        "adjustment": 0
+      },
+      {
+        "stage": 2,
+        "difficulty": 1.19,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 3,
+        "difficulty": 1.4161,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 4,
+        "difficulty": 1.685159,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 5,
+        "difficulty": 2.0053391,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 6,
+        "difficulty": 2.3863537,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 7,
+        "difficulty": 2.8397608,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 8,
+        "difficulty": 3.3793154,
+        "adjustment": 0.19
+      },
+      {
+        "stage": 9,
+        "difficulty": 3.953799,
+        "adjustment": 0.17
+      },
+      {
+        "stage": 10,
+        "difficulty": 4.467793,
+        "adjustment": 0.13
+      },
+      {
+        "stage": 11,
+        "difficulty": 5.048606,
+        "adjustment": 0.13
+      },
+      {
+        "stage": 12,
+        "difficulty": 5.2505503,
+        "adjustment": 0.04
+      }
+    ]
+  },
+  "os": "windows",
+  "arch": "amd64",
+  "go_version": "go1.26.8"
+}

@@ -1,6 +1,7 @@
 # The Return of the Odyssey
 
 基于 Go 服务端权威架构的多人 Roguelike 实训项目。
+2026-09-21 动态远征更新：默认十二关、导演难度 HUD、手动换弹与装备扩容、打击反馈。新版入口和操作见 [玩家指南](docs/PLAYER-GUIDE.md)，验证范围见 [本轮验证](docs/verification/dynamic-expedition/README.md)。
 当前功能分支进度与待验收项见 [项目开发进度（2026-09-16）](docs/PROJECT-STATUS.md)；下面的 9 月 15 日描述仅说明当时的主分支基线。
 当前阶段：**D 单关平台集成基线（2026-09-15）**。正式入口已启动首关战斗；D 已接入装备同源配置、战斗 Bot、真实指标与管理看板、Redis 恢复存储和 MySQL 异步结算模块。完整奖励、三关、恢复和终局写入仍需整合 A 的新入口与 C 的兼容修复，当前不是最终完整玩法版本。
 

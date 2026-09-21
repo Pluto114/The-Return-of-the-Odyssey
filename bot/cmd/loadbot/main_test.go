@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	botclient "github.com/Pluto114/The-Return-of-the-Odyssey/bot/internal/client"
@@ -47,7 +48,7 @@ func TestSummaryRecordsFailurePhaseAndLastProgress(t *testing.T) {
 	want := errors.New("reward failed")
 	progress := botclient.MatchResult{ClientID: 4, Phase: botclient.PhaseReward, RoomID: 8, StageIndex: 2, LastServerTick: 99}
 	summary.record(progress, want, false)
-	if summary.PhaseFailed[string(botclient.PhaseReward)] != 1 || summary.FirstFailure != want.Error() || summary.LastProgress != progress {
+	if summary.PhaseFailed[string(botclient.PhaseReward)] != 1 || summary.FirstFailure != want.Error() || !reflect.DeepEqual(summary.LastProgress, progress) {
 		t.Fatalf("summary = %+v", summary)
 	}
 }

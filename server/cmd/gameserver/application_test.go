@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -277,6 +278,12 @@ func TestApplicationFirstStageFailureDoesNotAnnounceMatch(t *testing.T) {
 }
 
 func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
+	for _, opening := range []uint32{1, 3, 11} {
+		t.Run(fmt.Sprintf("stage_%d", opening), func(t *testing.T) { testApplicationAdvance(t, opening) })
+	}
+}
+
+func testApplicationAdvance(t *testing.T, opening uint32) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Default()
@@ -353,7 +360,7 @@ func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
 		active.close.Subscribe(entity.ID(peers[i].id), closingSink{connection: serverConn})
 	}
 
-	plan := stage.Plan{Index: 1, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{{
+	plan := stage.Plan{Index: opening, Seed: 42, DifficultyScore: 1, Monsters: []stage.Spawn{{
 		Position: entity.Vec2{X: 13, Y: 10}, Radius: 0.4, AttackRange: 1,
 		Stats: entity.CombatStats{MaxHealth: 1, MoveSpeed: 0, AttackCooldownTicks: 30},
 	}}}
@@ -367,8 +374,8 @@ func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
 	for i := range peers {
 		var started pb.StageStartedEvent
 		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
-		if started.StageIndex != 1 {
-			t.Fatalf("peer %d opening stage = %d, want 1", i, started.StageIndex)
+		if started.StageIndex != opening {
+			t.Fatalf("peer %d opening stage = %d, want %d", i, started.StageIndex, opening)
 		}
 	}
 	appSend(t, peers[0], pb.MessageType_MSG_PLAYER_INPUT, 2,
@@ -377,7 +384,7 @@ func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
 	offers := make([]pb.RewardOptions, len(peers))
 	for i := range peers {
 		appRead(t, peers[i], pb.MessageType_MSG_REWARD_OPTIONS, &offers[i])
-		if offers[i].StageIndex != 1 || len(offers[i].EquipmentIds) == 0 {
+		if offers[i].StageIndex != opening || len(offers[i].EquipmentIds) == 0 {
 			t.Fatalf("peer %d invalid private reward offer: %+v", i, &offers[i])
 		}
 		if i == 0 {
@@ -414,8 +421,13 @@ func TestApplicationClearRewardReadyAndAdvanceLifecycle(t *testing.T) {
 	for i := range peers {
 		var started pb.StageStartedEvent
 		appRead(t, peers[i], pb.MessageType_MSG_STAGE_STARTED_EVENT, &started)
-		if started.StageIndex != 2 {
-			t.Fatalf("peer %d next stage = %d, want 2", i, started.StageIndex)
+		if started.StageIndex != opening+1 {
+			t.Fatalf("peer %d next stage = %d, want %d", i, started.StageIndex, opening+1)
+		}
+		var snapshot pb.WorldSnapshot
+		appRead(t, peers[i], pb.MessageType_MSG_WORLD_SNAPSHOT, &snapshot)
+		if snapshot.Stage.StageLimit != 12 || snapshot.Stage.DifficultyScore <= 1 || snapshot.Self.MagazineCapacity != snapshot.Self.Ammo {
+			t.Fatalf("stage limit/director/refill not synchronized: %v", &snapshot)
 		}
 	}
 }

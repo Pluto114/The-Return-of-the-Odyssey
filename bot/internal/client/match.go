@@ -82,20 +82,28 @@ func (c MatchConfig) Validate() error { return c.validate() }
 // MatchResult is a bounded diagnostic summary suitable for both functional
 // verification and sustained-load aggregation.
 type MatchResult struct {
-	ClientID          int    `json:"client_id"`
-	Phase             Phase  `json:"phase"`
-	SessionID         uint64 `json:"session_id"`
-	PlayerID          uint64 `json:"player_id"`
-	RoomID            uint64 `json:"room_id"`
-	StageIndex        uint32 `json:"stage_index"`
-	LastServerTick    uint64 `json:"last_server_tick"`
-	StagesCleared     uint32 `json:"stages_cleared"`
-	RewardsApplied    uint32 `json:"rewards_applied"`
-	ReadySent         uint32 `json:"ready_sent"`
-	PotionInputs      uint32 `json:"potion_inputs"`
-	RecoveryAttempts  uint32 `json:"recovery_attempts"`
-	RecoverySucceeded uint32 `json:"recovery_succeeded"`
-	DisconnectReason  string `json:"disconnect_reason,omitempty"`
+	ClientID          int              `json:"client_id"`
+	Phase             Phase            `json:"phase"`
+	SessionID         uint64           `json:"session_id"`
+	PlayerID          uint64           `json:"player_id"`
+	RoomID            uint64           `json:"room_id"`
+	StageIndex        uint32           `json:"stage_index"`
+	LastServerTick    uint64           `json:"last_server_tick"`
+	StagesCleared     uint32           `json:"stages_cleared"`
+	RewardsApplied    uint32           `json:"rewards_applied"`
+	ReadySent         uint32           `json:"ready_sent"`
+	PotionInputs      uint32           `json:"potion_inputs"`
+	RecoveryAttempts  uint32           `json:"recovery_attempts"`
+	RecoverySucceeded uint32           `json:"recovery_succeeded"`
+	DisconnectReason  string           `json:"disconnect_reason,omitempty"`
+	ReloadsStarted    uint32           `json:"reloads_started"`
+	DirectorSamples   []DirectorSample `json:"director_samples,omitempty"`
+}
+
+type DirectorSample struct {
+	Stage      uint32  `json:"stage"`
+	Difficulty float32 `json:"difficulty"`
+	Adjustment float32 `json:"adjustment"`
 }
 
 type actionKind uint8
@@ -368,11 +376,13 @@ func (p *lifecycleProgress) setDisconnect(reason string) {
 
 func (p *lifecycleProgress) result(clientID int, sessionID, playerID uint64) MatchResult {
 	stage, tick := p.combat.position()
+	reloads, samples := p.combat.ammoDiagnostics()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return MatchResult{
 		ClientID: clientID, Phase: p.phase, SessionID: sessionID, PlayerID: playerID, RoomID: p.roomID,
 		StageIndex: stage, LastServerTick: tick, StagesCleared: p.stagesCleared,
+		ReloadsStarted: reloads, DirectorSamples: samples,
 		RewardsApplied: p.rewardsApplied, ReadySent: p.readySent, PotionInputs: p.potionInputs,
 		RecoveryAttempts: p.recoveryAttempts, RecoverySucceeded: p.recoverySucceeded, DisconnectReason: p.disconnectReason,
 	}
@@ -571,7 +581,7 @@ func RunMatch(ctx context.Context, address string, clientID int, config MatchCon
 			}
 			if err := send(pb.MessageType_MSG_PLAYER_INPUT, &pb.PlayerInput{
 				InputSeq: inputSequence, ClientTickMs: uint64(now.UnixMilli()), Move: &pb.Vec2{X: direction},
-				Aim: aim, Shoot: shoot, UsePotion: usePotion,
+				Aim: aim, Shoot: shoot, UsePotion: usePotion, Reload: progress.combat.reloadIntent(),
 			}); err != nil {
 				progress.setDisconnect(err.Error())
 				return progress.result(clientID, login.SessionId, login.PlayerId), err

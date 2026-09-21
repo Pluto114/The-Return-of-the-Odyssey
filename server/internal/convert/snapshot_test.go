@@ -23,7 +23,7 @@ func TestWorldSnapshotSeparatesSelfFromOthers(t *testing.T) {
 				Health: 100, Alive: true, Aim: entity.Vec2{X: 1}},
 		},
 		Monsters: []game.MonsterView{
-			{ID: 1 << 63 | 1, Position: entity.Vec2{X: 5, Y: 6}, Velocity: entity.Vec2{}, Health: 50, MaxHealth: 100, State: entity.MonsterChase},
+			{ID: 1<<63 | 1, Position: entity.Vec2{X: 5, Y: 6}, Velocity: entity.Vec2{}, Health: 50, MaxHealth: 100, State: entity.MonsterChase},
 		},
 		Stage: stage.View{Index: 1, Seed: 99, State: stage.Playing, MonstersRemaining: 1},
 	}
@@ -75,16 +75,20 @@ func TestWorldSnapshotAbsentSelf(t *testing.T) {
 
 func TestPlayerSnapshotFieldMapping(t *testing.T) {
 	p := entity.Player{
-		ID:       5,
-		Position: entity.Vec2{X: 1.5, Y: -2.5},
-		Velocity: entity.Vec2{X: 0.5, Y: 0.25},
-		Aim:      entity.Vec2{X: 0.5, Y: 0.5},
-		BaseStats: stats(30, 10, 200, 6),
+		ID:           5,
+		Position:     entity.Vec2{X: 1.5, Y: -2.5},
+		Velocity:     entity.Vec2{X: 0.5, Y: 0.25},
+		Aim:          entity.Vec2{X: 0.5, Y: 0.5},
+		BaseStats:    stats(30, 10, 200, 6),
 		CurrentStats: stats(35, 12, 200, 6.5),
-		Health:   150,
-		Alive:    true,
+		Health:       150,
+		Alive:        true,
+		Ammo:         3, MagazineCapacity: 24, ReloadTicksRemaining: 30, ReloadDurationTicks: 45,
 	}
 	out := PlayerSnapshot(p)
+	if out.Ammo != 3 || out.MagazineCapacity != 24 || out.ReloadTicksRemaining != 30 || out.ReloadDurationTicks != 45 {
+		t.Fatalf("ammo state lost in snapshot: %v", out)
+	}
 	if out.PlayerId != 5 {
 		t.Errorf("PlayerId = %d, want 5", out.PlayerId)
 	}

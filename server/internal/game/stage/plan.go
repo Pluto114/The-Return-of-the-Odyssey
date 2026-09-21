@@ -29,10 +29,13 @@ type Spawn struct {
 }
 
 type Plan struct {
-	Index           uint32
-	Seed            int64
-	DifficultyScore float64
-	Monsters        []Spawn
+	Index                 uint32
+	Seed                  int64
+	DifficultyScore       float64
+	Monsters              []Spawn
+	DifficultyAdjustment  float64
+	PreviousClearSeconds  float64
+	PreviousTeamHPPercent float64
 }
 
 func (p Plan) Clone() Plan { p.Monsters = slices.Clone(p.Monsters); return p }
@@ -53,8 +56,13 @@ func (p Plan) Validate(min, max entity.Vec2, maxMonsters int) error {
 }
 
 type View struct {
-	Index             uint32
-	Seed              int64
-	State             State
-	MonstersRemaining int
+	Index                 uint32
+	Seed                  int64
+	State                 State
+	MonstersRemaining     int
+	StageLimit            uint32
+	DifficultyScore       float64
+	DifficultyAdjustment  float64
+	PreviousClearSeconds  float64
+	PreviousTeamHPPercent float64
 }

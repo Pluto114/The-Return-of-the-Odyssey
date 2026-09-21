@@ -95,6 +95,7 @@ func (w *World) collectPickups() {
 				}
 				player.loadout, player.player.CurrentStats, player.player.Health = loadout, stats, health
 				player.syncEquipment()
+				w.syncMagazine(player)
 			default:
 				continue
 			}

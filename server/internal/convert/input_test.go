@@ -15,6 +15,7 @@ func TestInput(t *testing.T) {
 			Aim:       &protocol.Vec2{X: 0.5, Y: 0.25},
 			Shoot:     true,
 			UsePotion: true,
+			Reload:    true,
 		}
 		got, err := Input(in)
 		if err != nil {
@@ -34,6 +35,9 @@ func TestInput(t *testing.T) {
 		}
 		if !got.UsePotion {
 			t.Errorf("UsePotion = false, want true")
+		}
+		if !got.Reload {
+			t.Error("reload intent lost")
 		}
 	})
 

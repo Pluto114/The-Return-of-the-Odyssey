@@ -7,15 +7,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $odysseyRoot = Split-Path $PSScriptRoot -Parent
-$odysseyClient = Join-Path $odysseyRoot 'build/client-scoreboard/client/odyssey_client.exe'
+$odysseyClient = Join-Path $odysseyRoot 'build/client-polish-release/client/odyssey_client.exe'
 if (-not (Test-Path -LiteralPath $odysseyClient -PathType Leaf)) {
     throw "找不到新版客户端：$odysseyClient。请先按 client/README.md 构建。"
 }
 $odysseyClient = (Resolve-Path -LiteralPath $odysseyClient).Path
 $odysseyBinary = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($odysseyClient))
-foreach ($odysseyFeatureText in @('再玩一把', '未收到地图道具')) {
+foreach ($odysseyFeatureText in @('再玩一把', '弹匣已空', 'AI 导演')) {
     if (-not $odysseyBinary.Contains($odysseyFeatureText)) {
-        throw "这份客户端缺少最新功能“$odysseyFeatureText”：$odysseyClient。请重新构建。"
+        throw ('这份客户端缺少最新功能 [{0}]：{1}。请重新构建。' -f $odysseyFeatureText, $odysseyClient)
     }
 }
 
@@ -63,4 +63,4 @@ if ($CheckOnly) {
 for ($odysseyIndex = 0; $odysseyIndex -lt $Count; ++$odysseyIndex) {
     Start-Process -FilePath $odysseyClient -WorkingDirectory (Split-Path $odysseyClient) -WindowStyle Normal
 }
-Write-Output "已打开 $Count 个新版客户端窗口；每关会同步回血与武器道具，第三关结束后可再玩一把。"
+Write-Output "已打开 $Count 个动态远征客户端；默认十二关，R 换弹，F4 简化特效，最终关后可再玩一把。"

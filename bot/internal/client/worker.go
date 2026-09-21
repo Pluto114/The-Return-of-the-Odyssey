@@ -43,6 +43,10 @@ type combatProgress struct {
 	aimX                float32
 	aimY                float32
 	shoot               bool
+	reload              bool
+	reloadTicks         uint32
+	reloadsStarted      uint32
+	directorSamples     []DirectorSample
 
 	projectileSpawns   uint64
 	projectileDestroys uint64
@@ -204,6 +208,16 @@ func (p *combatProgress) observeSnapshot(snapshot *pb.WorldSnapshot) error {
 	p.aimX = aimX
 	p.aimY = aimY
 	p.shoot = shoot
+	if p.reloadTicks == 0 && snapshot.Self.ReloadTicksRemaining > 0 {
+		p.reloadsStarted++
+	}
+	p.reloadTicks = snapshot.Self.ReloadTicksRemaining
+	if s := snapshot.Stage; s != nil && s.DifficultyScore > 0 &&
+		len(p.directorSamples) < 1000 && (len(p.directorSamples) == 0 || p.directorSamples[len(p.directorSamples)-1].Stage != s.Index) {
+		p.directorSamples = append(p.directorSamples, DirectorSample{Stage: s.Index, Difficulty: s.DifficultyScore, Adjustment: s.DifficultyAdjustment})
+	}
+	p.reload = snapshot.Self.Alive && snapshot.Self.MagazineCapacity > 0 &&
+		snapshot.Self.Ammo == 0 && snapshot.Self.ReloadTicksRemaining == 0
 	p.mu.Unlock()
 	return nil
 }
@@ -212,6 +226,18 @@ func (p *combatProgress) combatIntent() (*pb.Vec2, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return &pb.Vec2{X: p.aimX, Y: p.aimY}, p.shoot
+}
+
+func (p *combatProgress) reloadIntent() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reload
+}
+
+func (p *combatProgress) ammoDiagnostics() (uint32, []DirectorSample) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reloadsStarted, append([]DirectorSample(nil), p.directorSamples...)
 }
 
 func (p *combatProgress) recordInput(sequence uint32, combat bool) {

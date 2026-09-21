@@ -55,6 +55,9 @@ func TestRuleBasedDirectorIsDeterministicPureAndBounded(t *testing.T) {
 	if a.Index != previous.Index+1 || a.Seed == previous.Seed || len(a.Monsters) != decisionA.MonsterCount {
 		t.Fatalf("next plan metadata = %+v, decision = %+v", a, decisionA)
 	}
+	if a.DifficultyAdjustment != decisionA.Adjustment || a.PreviousClearSeconds != high.ClearTimeSeconds || a.PreviousTeamHPPercent != high.TeamHPPercent {
+		t.Fatal("director explanation does not match its real decision")
+	}
 	if err := a.Validate(config.Min, config.Max, config.Combat.MaxMonsters); err != nil {
 		t.Fatal(err)
 	}
@@ -74,12 +77,12 @@ func TestRuleBasedDirectorIsDeterministicPureAndBounded(t *testing.T) {
 	}
 }
 
-func TestRuleBasedDirectorGeneratesThreeValidStages(t *testing.T) {
+func TestRuleBasedDirectorGeneratesTwelveValidStages(t *testing.T) {
 	planner, config := rulePlanner(t)
 	plan := firstPlan(t, config)
 	metrics := director.PerformanceMetrics{ClearTimeSeconds: 45, TeamHPPercent: 0.6, AverageDPS: 30, DamageTaken: 50, EquipmentPower: 1}
 	seenSeeds := map[int64]bool{plan.Seed: true}
-	for wantIndex := uint32(2); wantIndex <= 4; wantIndex++ {
+	for wantIndex := uint32(2); wantIndex <= 12; wantIndex++ {
 		next, err := planner.Generate(plan, metrics)
 		if err != nil {
 			t.Fatal(err)

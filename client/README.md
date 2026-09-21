@@ -20,9 +20,9 @@ pwsh -File scripts/build/build.ps1 -Target client
 
 产物：`build/client-windows/client/odyssey_client.exe`（另有 `odyssey_window_probe.exe` 纯窗口诊断程序）。
 
-本机若仍开着旧客户端，不要将旧窗口当作已更新的新版本，也不要覆盖正在使用的 exe；本次积分榜与地图道具联调已构建至 `build/client-scoreboard/client/odyssey_client.exe`，请从此目录打开两份客户端。该版本包含团队评分、“再玩一把”，以及每关同步刷新的回血与武器道具。地图道具由服务端生成，更新代码后必须先停止旧 gameserver，再重新启动服务端；新版客户端若未收到道具，会在地图左上角直接提示。
+本次动态远征版产物在 `build/client-polish-release/client/odyssey_client.exe`。默认十二关、服务端弹药及换弹、装备扩容、导演难度信息、命中反馈均需同时更新服务端和两个客户端。请先退出旧客户端并停止旧 gameserver，再启动新版本，不能只更新 exe 而保留旧服务端。
 
-中文联调推荐用单独目录构建：`cmake --preset client-windows -B build/client-zh`，然后 `cmake --build build/client-zh --target odyssey_client`。双击 `build/client-zh/client/odyssey_client.exe` 可识别“奥德赛归途 · 中文测试版”的窗口标题。客户端从 Windows 已安装的黑体加载显示所需的中文字形，不复制或分发系统字体；中文装备名称从 `client/assets/equipment.zh-CN.json` 按权威装备 ID 生成并放在 exe 同目录。
+中文联调推荐单独构建：先 `. ./scripts/env.ps1 -Client`，运行 `cmake --preset client-windows -B build/client-polish-release -DCMAKE_BUILD_TYPE=Release`，然后 `cmake --build build/client-polish-release --parallel 4`。窗口标题为“奥德赛归途 · 动态远征 · 积分榜”。客户端从 Windows 已安装的黑体加载字形，不分发系统字体；中文装备名称从 `client/assets/equipment.zh-CN.json` 按权威装备 ID 生成并放在 exe 同目录。
 
 ## 测试
 
@@ -61,9 +61,10 @@ build\client-zh\client\odyssey_client.exe
 | `Q` | 在战斗中使用已装备的治疗药剂；药剂消耗一次，生命值由服务器确认后更新 |
 | 点击奖励卡片，或主键盘/小键盘 `1` `2` `3` | 奖励宝箱选择（服务器校验合法性） |
 | `ENTER` | Reward 状态下“准备下一关”（Ready 屏障归服务器） |
-| `R` | 连接失败或断开后重新尝试连接，不能在团灭后重开本局 |
-| 团灭后点“重新开局”、第三关胜利后点“再玩一把”，或按 `N` | 为当前两名在线队友创建新房间，从第一关重新开始；无需重启服务器 |
+| `R` | 战斗中手动换弹（基础 12 发、1.5 秒）；仅断线或连接失败时重试连接 |
+| 团灭后点“重新开局”、最终关胜利后点“再玩一把”，或按 `N` | 为当前两名在线队友创建新房间，从第一关重新开始；无需重启服务器 |
 | `F3` | 显示或隐藏开发诊断面板；普通玩家无需打开 |
+| `F4` | 完整 / 简化新增打击特效 |
 | `ESC` / 关闭按钮 | 停止网络线程并退出 |
 
 Windows 玩家版默认以普通窗口程序启动，不再显示开发控制台。每个进程分别把事件诊断写入工作目录下的 `odyssey-client-<PID>.log` 和 `odyssey-client-error-<PID>.log`，因此两个客户端可以从同一目录启动。开发时若确实需要控制台，可在 CMake 配置阶段设置 `-DODYSSEY_CLIENT_CONSOLE=ON` 后重新构建。

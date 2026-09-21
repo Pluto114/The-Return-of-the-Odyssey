@@ -1,5 +1,11 @@
 # Bot 压测模块
 
+动态远征版 Bot 已按服务端弹药状态自动发送换弹请求。完整默认远征使用 `-stages 12`；旧命令中的 `-stages 3` 只验证前三关，不代表整局胜利。结果的 `last_progress` 包含权威 `reloads_started` 和逐关 `director_samples`。
+
+```powershell
+go run ./bot/cmd/loadbot -server 127.0.0.1:7777 -mode functional -clients 2 -stages 12 -duration 5m -ramp 0s
+```
+
 `internal/load` 负责并发调度，`internal/client` 使用 A 的 Frame/protobuf 与正式 gameserver 完成 Login→Match→战斗→奖励→Ready→连续三关。Bot 从权威 Snapshot 选择最近的存活怪物，发送 Aim/Shoot，仅在 Playing 期间发送 30Hz Input；奖励按固定 Seed 选择，也可运行非法、重复和超时场景。收到 Resume Token 后，瞬断会进行一次有界恢复。只有每关战斗输入得到 Snapshot ACK，且收到对应 `StageCleared`，对局才算成功。
 
 调度模块通过注入 `Worker` 与协议实现解耦。未来的真实 Worker 必须遵守以下约定：

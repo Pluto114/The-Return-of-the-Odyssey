@@ -22,6 +22,17 @@ type Loadout struct {
 	PotionID ID
 }
 
+// MagazineCapacity is derived from static equipment data, never client input.
+func (c Catalog) MagazineCapacity(loadout Loadout, base uint32) uint32 {
+	capacity := uint64(base)
+	for _, id := range []ID{loadout.WeaponID, loadout.RelicID} {
+		if definition, ok := c.Lookup(id); ok {
+			capacity += uint64(definition.MagazineBonus)
+		}
+	}
+	return uint32(min(capacity, 120))
+}
+
 func (l Loadout) Equip(definition Definition) (Loadout, error) {
 	if err := definition.validate(); err != nil {
 		return l, err

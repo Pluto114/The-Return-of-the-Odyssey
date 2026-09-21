@@ -167,6 +167,7 @@ void TestPlayerInputWire() {
     data.aim_z = 1.0f;
     data.shoot = true;
     data.use_potion = true;
+    data.reload = true;
     data.client_tick_ms = 12345;
     const auto bytes = EncodePlayerInput(data);
 
@@ -186,6 +187,7 @@ void TestPlayerInputWire() {
     }
     CHECK(parsed.shoot());
     CHECK(parsed.use_potion());
+    CHECK(parsed.reload());
     // Zero-intent (release) encodes fine with seq and no direction magnitude.
     odyssey::client::network::payload::PlayerInputData idle;
     idle.input_seq = 78;
@@ -194,6 +196,7 @@ void TestPlayerInputWire() {
     CHECK(idle_parsed.ParseFromArray(idle_bytes.data(), static_cast<int>(idle_bytes.size())));
     CHECK(idle_parsed.input_seq() == 78);
     CHECK(!idle_parsed.use_potion());
+    CHECK(!idle_parsed.reload());
     if (idle_parsed.has_move()) {
         CHECK(idle_parsed.move().x() == 0.0f);
         CHECK(idle_parsed.move().y() == 0.0f);
@@ -219,6 +222,15 @@ void TestWorldSnapshotDecode() {
     self->set_weapon_id(1001);
     self->set_relic_id(2002);
     self->set_potion_id(3001);
+    self->set_ammo(3);
+    self->set_magazine_capacity(24);
+    self->set_reload_ticks_remaining(30);
+    self->set_reload_duration_ticks(45);
+    proto.mutable_stage()->set_stage_limit(12);
+    proto.mutable_stage()->set_difficulty_score(1.5f);
+    proto.mutable_stage()->set_difficulty_adjustment(-0.1f);
+    proto.mutable_stage()->set_previous_clear_seconds(55);
+    proto.mutable_stage()->set_previous_team_hp_percent(0.4f);
 
     auto* other1 = proto.add_players();
     other1->set_player_id(1);
@@ -250,6 +262,15 @@ void TestWorldSnapshotDecode() {
 
     odyssey::client::network::payload::WorldSnapshotView view;
     CHECK(DecodeWorldSnapshot(bytes, view));
+    CHECK(view.self.ammo == 3);
+    CHECK(view.self.magazine_capacity == 24);
+    CHECK(view.self.reload_ticks_remaining == 30);
+    CHECK(view.self.reload_duration_ticks == 45);
+    CHECK(view.stage.stage_limit == 12);
+    CHECK(view.stage.difficulty_score == 1.5f);
+    CHECK(view.stage.difficulty_adjustment == -0.1f);
+    CHECK(view.stage.previous_clear_seconds == 55);
+    CHECK(view.stage.previous_team_hp_percent == 0.4f);
     CHECK(view.server_tick == 1234);
     CHECK(view.last_processed_input == 55);
     CHECK(view.has_self);

@@ -3,6 +3,7 @@
 #include "input/InputSample.h"
 #include "input/OneShotAction.h"
 #include "sync/CombatView.h"
+#include "sync/CombatFeedback.h"
 #include "sync/GameView.h"
 #include "sync/Interpolation.h"
 #include "sync/MatchScore.h"
@@ -101,14 +102,45 @@ void TestAuthoritativeMatchScoreboard() {
 void TestReplayAfterTerminalStage() {
     using odyssey::client::ui::CanReplay;
     using odyssey::client::ui::ExpeditionComplete;
-    CHECK(CanReplay(1, 5, 0.0));
-    CHECK(!CanReplay(1, 1, 99.0));
-    CHECK(!CanReplay(1, 2, 99.0));
-    CHECK(!CanReplay(2, 2, 99.0));
-    CHECK(!CanReplay(3, 2, 1.0));
-    CHECK(ExpeditionComplete(3, 2, 1.5));
-    CHECK(CanReplay(3, 2, 1.5));
-    CHECK(!ExpeditionComplete(3, 3, 99.0));
+    CHECK(CanReplay(1, 5, 0.0, 12));
+    CHECK(!CanReplay(1, 1, 99.0, 12));
+    CHECK(!CanReplay(1, 2, 99.0, 12));
+    CHECK(!CanReplay(3, 2, 99.0, 12));
+    CHECK(!CanReplay(11, 2, 99.0, 12));
+    CHECK(!CanReplay(12, 2, 1.0, 12));
+    CHECK(ExpeditionComplete(12, 2, 1.5, 12));
+    CHECK(CanReplay(12, 2, 1.5, 12));
+    CHECK(!ExpeditionComplete(12, 3, 99.0, 12));
+    CHECK(!ExpeditionComplete(12, 2, 99.0, 0));
+    CHECK(ExpeditionComplete(4, 2, 1.5, 4));
+}
+
+void TestBoundedCombatFeedback() {
+    odyssey::client::sync::CombatFeedback feedback;
+    feedback.Track(1, 10, 10);
+    feedback.Damage(1, 20, true, true);
+    CHECK(feedback.Numbers().size() == 1);
+    CHECK(feedback.Particles().size() == 7);
+    CHECK(feedback.HitMarker() == 1);
+    CHECK(feedback.HurtFlash() == 1);
+    for (int i = 0; i < 1000; ++i) {
+        feedback.Damage(1, 10, false, true);
+        feedback.Death(1);
+    }
+    CHECK(feedback.Particles().size() <= feedback.kMaxParticles);
+    CHECK(feedback.Numbers().size() <= feedback.kMaxNumbers);
+    feedback.Tick(1.1f);
+    CHECK(feedback.Numbers().empty());
+    CHECK(feedback.Particles().empty());
+    CHECK(feedback.HitMarker() == 0);
+    CHECK(feedback.HurtFlash() == 0);
+    feedback.Death(1);
+    CHECK(feedback.Particles().empty()); // expired target is not retained forever
+    feedback.Track(2, 1, 1);
+    feedback.Death(2);
+    CHECK(feedback.Particles().size() == 20);
+    feedback.Clear();
+    CHECK(feedback.Particles().empty());
 }
 
 void TestWindowTitleIdentifiesScoreboardBuild() {
@@ -139,7 +171,8 @@ void TestChineseEquipmentLabels() {
     std::stringstream contents;
     contents << file.rdbuf();
     EquipmentTable table;
-    CHECK(ParseEquipmentTable(contents.str(), table) == 6);
+    CHECK(ParseEquipmentTable(contents.str(), table) == 7);
+    CHECK(table.at(1003).name == "弹鼓手枪");
     CHECK(table.at(2002).name == "疾风遗物");
     CHECK(table.at(2002).description == "移动速度 ×1.1");
     CHECK(table.at(3001).slot == "药剂");
@@ -658,6 +691,7 @@ void TestSnapshotInterpolation() {
 int main() {
     TestAuthoritativeMatchScoreboard();
     TestReplayAfterTerminalStage();
+    TestBoundedCombatFeedback();
     TestWindowTitleIdentifiesScoreboardBuild();
     TestRewardCardSelection();
     TestChineseEquipmentLabels();

@@ -41,13 +41,14 @@ type Modifier struct {
 }
 
 type Definition struct {
-	ID          ID         `json:"id"`
-	Key         string     `json:"key"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Slot        Slot       `json:"slot"`
-	Modifiers   []Modifier `json:"modifiers,omitempty"`
-	Heal        float64    `json:"heal,omitempty"`
+	ID            ID         `json:"id"`
+	Key           string     `json:"key"`
+	Name          string     `json:"name"`
+	Description   string     `json:"description"`
+	Slot          Slot       `json:"slot"`
+	Modifiers     []Modifier `json:"modifiers,omitempty"`
+	Heal          float64    `json:"heal,omitempty"`
+	MagazineBonus uint32     `json:"magazine_bonus,omitempty"`
 }
 
 type catalogFile struct {
@@ -117,6 +118,9 @@ func NewCatalog(version uint32, definitions []Definition) (Catalog, error) {
 }
 
 func (d Definition) validate() error {
+	if d.MagazineBonus > 108 || (d.Slot == Potion && d.MagazineBonus != 0) {
+		return errors.New("magazine bonus must be at most 108 and belong to persistent equipment")
+	}
 	if d.ID == 0 || d.Key == "" || d.Name == "" {
 		return errors.New("id, key and name are required")
 	}
